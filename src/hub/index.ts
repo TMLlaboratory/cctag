@@ -3,12 +3,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import Bolt from "@slack/bolt";
 import { WebSocketServer } from "ws";
+import type { IncomingFile } from "../attachments.js";
 import { loadHubConfig } from "../config.js";
 import { TokenStore } from "./tokenStore.js";
 import { WsRpc } from "../ws/rpc.js";
-import { formatThreadHistorySinceLastBotPost } from "../slack/notifier.js";
+import { downloadSlackFile, formatThreadHistorySinceLastBotPost, uploadBinaryFile } from "../slack/notifier.js";
+import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "../slack/files.js";
 
 const { App } = Bolt;
+
+/** Cap on the `fileOwner` authorization map (see rememberFileOwner). */
+const MAX_TRACKED_FILES = 500;
 
 interface RegisterPayload {
   ownerUserId: string;
@@ -45,7 +50,23 @@ async function runServer(): Promise<void> {
   const spokesByOwner = new Map<string, WsRpc>();
   const threadOwner = new Map<string, string>();
   const messageLocations = new Map<string, { channel: string; ts: string; ownerUserId: string }>();
+  // Which owner each forwarded attachment was offered to — the authorization
+  // list `fetch_file` checks against. Bounded, because it grows with every
+  // attachment the workspace ever sends and only the recent tail is ever
+  // fetched (a Spoke asks within one turn of being told about the file).
+  const fileOwner = new Map<string, string>();
   let msgSeq = 0;
+
+  function rememberFileOwner(files: IncomingFile[], ownerUserId: string): void {
+    for (const f of files) {
+      fileOwner.set(f.id, ownerUserId);
+      if (fileOwner.size > MAX_TRACKED_FILES) {
+        // Map iteration is insertion-ordered, so this drops the oldest entry.
+        const oldest = fileOwner.keys().next();
+        if (!oldest.done) fileOwner.delete(oldest.value);
+      }
+    }
+  }
 
   const app = new App({
     token: config.slackBotToken,
@@ -208,6 +229,44 @@ async function runServer(): Promise<void> {
       return {};
     });
 
+    rpc.onCall("upload_file", async (payload) => {
+      const p = payload as { channel: string; threadTs: string; contentB64: string; filename: string; title?: string; comment?: string };
+      if (!canActOn(p.channel, p.threadTs)) {
+        console.error(`[hub] rejected upload_file from ${issued.name}: not authorized for ${p.channel}:${p.threadTs}`);
+        return {};
+      }
+      if (Buffer.byteLength(p.contentB64, "base64") > config.maxFileBytes) {
+        console.error(`[hub] rejected upload_file from ${issued.name}: ${p.filename} exceeds CCTAG_MAX_FILE_MB`);
+        return {};
+      }
+      await uploadBinaryFile(app.client, p.channel, p.threadTs, p);
+      return {};
+    });
+
+    // Downloading is scoped to files this Hub itself handed to this owner (see
+    // rememberFileOwner). Without that, any Spoke could name an arbitrary file
+    // id and pull down a file from a channel it has no business reading —
+    // the bot token can reach every file the bot can see, and only the Hub
+    // holds that token.
+    rpc.onCall("fetch_file", async (payload) => {
+      const p = payload as { fileId: string; name?: string };
+      if (!registeredOwnerId || fileOwner.get(p.fileId) !== registeredOwnerId) {
+        console.error(`[hub] rejected fetch_file from ${issued.name}: ${p.fileId} was not offered to this owner`);
+        return { contentB64: null };
+      }
+      const contentB64 = await downloadSlackFile(app.client, config.slackBotToken, {
+        id: p.fileId,
+        name: p.name ?? p.fileId,
+      });
+      // A file the Spoke's own size check waved through can still turn out to
+      // be over the cap (Slack's event size is advisory) — don't relay it.
+      if (contentB64 && Buffer.byteLength(contentB64, "base64") > config.maxFileBytes) {
+        console.error(`[hub] refused fetch_file for ${p.fileId}: exceeds CCTAG_MAX_FILE_MB`);
+        return { contentB64: null };
+      }
+      return { contentB64 };
+    });
+
     ws.on("close", () => {
       if (registeredOwnerId && spokesByOwner.get(registeredOwnerId) === rpc) {
         spokesByOwner.delete(registeredOwnerId);
@@ -228,14 +287,25 @@ async function runServer(): Promise<void> {
       await notConnectedReply(channel, threadTs);
       return;
     }
+    const files = incomingFilesFrom(event as unknown as FileBearingEvent);
+    rememberFileOwner(files, ownerUserId);
     await spoke
-      .call("app_mention", { channel, threadTs, userId, text: event.text ?? "", ts: event.ts })
+      .call("app_mention", { channel, threadTs, userId, text: event.text ?? "", ts: event.ts, files })
       .catch((err) => console.error("[hub] app_mention dispatch failed:", err));
   });
 
   app.event("message", async ({ event }) => {
-    const msgEvent = event as unknown as { subtype?: string; bot_id?: string; channel: string; thread_ts?: string; text?: string };
-    if (msgEvent.subtype || msgEvent.bot_id || !msgEvent.thread_ts) return;
+    const msgEvent = event as unknown as {
+      subtype?: string;
+      bot_id?: string;
+      channel: string;
+      thread_ts?: string;
+      text?: string;
+    };
+    // file_share is let through (rather than lumped in with joins/edits) so a
+    // reply that answers a pending prompt *and* happens to carry an upload
+    // still delivers its text — the attachment itself needs a mention.
+    if (!isPlainOrFileShare(msgEvent.subtype) || msgEvent.bot_id || !msgEvent.thread_ts) return;
     const key = threadKey(msgEvent.channel, msgEvent.thread_ts);
     const ownerUserId = threadOwner.get(key);
     if (!ownerUserId) return; // unpaired thread — ordinary chatter, ignore

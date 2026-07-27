@@ -1,6 +1,14 @@
+import {
+  isOutboundAttachable,
+  outboxAdditions,
+  readOutboundAttachments,
+  snapshotOutbox,
+  type AttachmentLimits,
+  type DirSnapshot,
+} from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing } from "./pairing.js";
-import type { MessageHandle, Notifier } from "./notifier.js";
+import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
@@ -26,10 +34,17 @@ interface TurnState {
   requesterUserId: string;
   driver: AgentDriver;
   paneId: string;
+  /** Live cwd of the pane, read at turn start — the outbox lives under it. */
+  cwd: string;
   sessionId: string;
   transcriptPath: string;
   offset: number;
   collected: string[];
+  /** `<cwd>/.cctag/outbox` as it looked when the turn began, so only what this
+   *  turn put there gets uploaded. */
+  outboxBaseline: DirSnapshot;
+  /** Attachable files the agent wrote during the turn, per its transcript. */
+  writtenPaths: Set<string>;
   toolCounts: Record<string, number>;
   statusHandle: MessageHandle;
   lastStatusUpdateAt: number;
@@ -50,10 +65,31 @@ interface TurnState {
   planFeedbackOptionNum?: number;
 }
 
-export interface TurnEngineOptions {
+export interface TurnEngineOptions extends AttachmentLimits {
   turnTimeoutMs: number;
   pollIntervalMs: number;
 }
+
+export interface StartTurnOptions {
+  /** How many of the prompt's attachments are images. Non-zero switches the
+   *  submit to the retry loop below — see SUBMIT_RETRIES_WITH_IMAGES. */
+  imageCount?: number;
+}
+
+/**
+ * How many times to re-send Enter when the prompt carried image attachments.
+ *
+ * Claude Code converts an image path in the input box into a real attachment
+ * asynchronously, and the Enter that `agent prompt` sequences server-side is
+ * swallowed while that runs — verified empirically: a prompt with a 2.8MB PNG
+ * sat unsent in the box (agent still `idle`) until a later Enter, while the
+ * same prompt carrying only non-image paths submitted immediately. Conversion
+ * finished between 500ms and 1000ms in that measurement, but it scales with
+ * file size and count, so this retries across several poll intervals instead
+ * of assuming one is enough. Each extra Enter is a no-op once the box is
+ * empty, which is why over-retrying is safe and under-retrying is not.
+ */
+const SUBMIT_RETRIES_WITH_IMAGES = 6;
 
 export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
 
@@ -67,6 +103,8 @@ export interface BlockedTerminalHandoff {
   offset: number;
   collected: string[];
   paneId: string;
+  /** Live pane cwd — the adopted turn needs it to find the outbox. */
+  cwd: string;
 }
 
 export class TurnEngine {
@@ -110,7 +148,7 @@ export class TurnEngine {
     this.turns.delete(paneId);
   }
 
-  async startTurn(pairing: Pairing, requesterUserId: string, text: string): Promise<void> {
+  async startTurn(pairing: Pairing, requesterUserId: string, text: string, opts: StartTurnOptions = {}): Promise<void> {
     const paneId = pairing.paneId;
     // Reserve the slot synchronously, before any `await` — otherwise two
     // concurrent calls for the same pane (e.g. a duplicate Slack event)
@@ -140,10 +178,13 @@ export class TurnEngine {
         requesterUserId,
         driver,
         paneId: agent.paneId,
+        cwd: agent.cwd,
         sessionId,
         transcriptPath: tPath,
         offset,
         collected: [],
+        outboxBaseline: snapshotOutbox(agent.cwd),
+        writtenPaths: new Set(),
         toolCounts: {},
         statusHandle,
         lastStatusUpdateAt: 0,
@@ -176,10 +217,15 @@ export class TurnEngine {
         // "working" at some point before settling, so the *resting* states —
         // idle or done, same pair pollLoop's own finalize check treats as
         // settled — are what "never even started" looks like here).
+        //
+        // Image attachments make this the normal case rather than the rare one,
+        // and one retry is no longer enough — see SUBMIT_RETRIES_WITH_IMAGES.
         await this.herdr.agentPrompt(paneId, normalized);
-        await sleep(this.opts.pollIntervalMs);
-        const recheck = await this.herdr.agentGet(paneId).catch(() => null);
-        if (recheck && (recheck.agentStatus === "idle" || recheck.agentStatus === "done")) {
+        const retries = (opts.imageCount ?? 0) > 0 ? SUBMIT_RETRIES_WITH_IMAGES : 1;
+        for (let i = 0; i < retries; i++) {
+          await sleep(this.opts.pollIntervalMs);
+          const recheck = await this.herdr.agentGet(paneId).catch(() => null);
+          if (!recheck || (recheck.agentStatus !== "idle" && recheck.agentStatus !== "done")) break;
           await this.herdr.paneSendKeys(paneId, "Enter");
         }
       } catch (err) {
@@ -230,10 +276,13 @@ export class TurnEngine {
         requesterUserId: pairing.pairedBy,
         driver: handoff.driver,
         paneId: handoff.paneId,
+        cwd: handoff.cwd,
         sessionId: handoff.sessionId,
         transcriptPath: handoff.transcriptPath,
         offset: handoff.offset,
         collected: [...handoff.collected],
+        outboxBaseline: snapshotOutbox(handoff.cwd),
+        writtenPaths: new Set(),
         toolCounts: {},
         statusHandle,
         lastStatusUpdateAt: 0,
@@ -350,11 +399,12 @@ export class TurnEngine {
       if (state.transcriptPath) {
         const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
         state.offset = newOffset;
-        const { texts, toolNames } = state.driver.extractTurnOutput(records);
+        const { texts, toolNames, attachmentPaths } = state.driver.extractTurnOutput(records);
         state.collected.push(...texts);
         for (const name of toolNames) {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
         }
+        for (const p of attachmentPaths ?? []) state.writtenPaths.add(p);
       }
 
       if (state.phase === "running") {
@@ -481,6 +531,73 @@ export class TurnEngine {
     }
     const label = text ? doneStatusText(elapsed, state.toolCounts) : `✅ 完了 (${elapsed}s)（テキスト応答なし）`;
     await state.statusHandle.update(label).catch(() => {});
+    // After the status update, not before: uploading several MB can take a
+    // while, and the status line is an already-posted message being edited in
+    // place, so settling it early doesn't reorder anything in the thread.
+    await this.attachOutboundFiles(state).catch((err) =>
+      console.error(`[turn ${paneId}] outbound attach failed:`, err),
+    );
+  }
+
+  /**
+   * Uploads files the turn produced that a Slack reader can't get from the
+   * text: anything the agent dropped in `<cwd>/.cctag/outbox` (an explicit
+   * "send this", so any file type goes), plus media/PDF files its transcript
+   * shows it writing (which catches the common case without the agent needing
+   * to know cctag exists).
+   */
+  private async attachOutboundFiles(state: TurnState): Promise<void> {
+    await this.uploadAttachments(state.pairing, state.cwd, [
+      ...outboxAdditions(state.cwd, state.outboxBaseline),
+      ...[...state.writtenPaths].filter(isOutboundAttachable),
+    ]);
+  }
+
+  /**
+   * The same outbox upload for a pairing with *no* active turn — work started
+   * at the terminal that never blocked is reported by BackgroundWatcher, not by
+   * a TurnState, and would otherwise post its text to the thread while silently
+   * dropping the chart it just rendered. Lives here rather than in the watcher
+   * so the notifier and the size caps stay in one place (same reasoning as
+   * adoptBlockedTerminal).
+   *
+   * Returns the outbox snapshot to keep as the next baseline, so a settled turn
+   * that uploaded nothing new doesn't re-upload on the following tick.
+   */
+  async uploadOutboxAdditions(pairing: Pairing, cwd: string, baseline: DirSnapshot): Promise<DirSnapshot> {
+    await this.uploadAttachments(pairing, cwd, outboxAdditions(cwd, baseline));
+    return snapshotOutbox(cwd);
+  }
+
+  private async uploadAttachments(pairing: Pairing, cwd: string, candidates: string[]): Promise<void> {
+    const upload = this.notifier.uploadFile?.bind(this.notifier);
+    if (!upload || candidates.length === 0) return;
+
+    const threadTs = pairing.threadTs ?? "";
+    const { files, skipped } = readOutboundAttachments(candidates, this.opts, cwd);
+    for (const f of files) {
+      try {
+        await upload(pairing.channel, threadTs, {
+          contentB64: f.contentB64,
+          filename: f.name,
+          comment: `📎 ${f.name}`,
+        });
+      } catch (err) {
+        // Hub and Spoke ship independently: a Hub without upload_file support
+        // answers "no handler", which is worth saying out loud once rather than
+        // failing silently every turn.
+        const reason = isUnsupportedByRemote(err)
+          ? "⚠️ Hubがファイル添付に未対応です（Hub側の更新が必要です）。"
+          : `⚠️ ${f.name} の添付に失敗しました: ${err instanceof Error ? err.message : String(err)}`;
+        await this.notifier.postReply(pairing.channel, threadTs, reason).catch(() => {});
+        return; // every remaining file would fail the same way
+      }
+    }
+    if (skipped.length > 0) {
+      await this.notifier
+        .postReply(pairing.channel, threadTs, `⚠️ 添付を省略しました:\n${skipped.map((s) => `• ${s}`).join("\n")}`)
+        .catch(() => {});
+    }
   }
 
   /**

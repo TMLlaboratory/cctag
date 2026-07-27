@@ -5,6 +5,7 @@ import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
+import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "./files.js";
 import { SlackNotifier } from "./notifier.js";
 
 const { App } = Bolt;
@@ -23,12 +24,17 @@ export function buildApp(config: Config) {
     socketMode: true,
   });
 
-  const notifier = new SlackNotifier(app.client);
+  const notifier = new SlackNotifier(app.client, config.slackBotToken);
   const turnEngine = new TurnEngine(herdr, notifier, {
     turnTimeoutMs: config.turnTimeoutMs,
     pollIntervalMs: config.pollIntervalMs,
+    maxFileBytes: config.maxFileBytes,
+    maxFileCount: config.maxFileCount,
   });
-  const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
+  const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId, {
+    maxFileBytes: config.maxFileBytes,
+    maxFileCount: config.maxFileCount,
+  });
   new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier).start();
 
   app.event("app_mention", async ({ event }) => {
@@ -40,6 +46,7 @@ export function buildApp(config: Config) {
       userId: event.user ?? "",
       text,
       ts: event.ts,
+      files: incomingFilesFrom(event as unknown as FileBearingEvent),
     });
   });
 
@@ -99,7 +106,10 @@ export function buildApp(config: Config) {
       thread_ts?: string;
       text?: string;
     };
-    if (msgEvent.subtype || msgEvent.bot_id) return;
+    // file_share is let through (rather than lumped in with joins/edits) so a
+    // reply that answers a pending prompt *and* happens to carry an upload
+    // still delivers its text — the attachment itself needs a mention.
+    if (!isPlainOrFileShare(msgEvent.subtype) || msgEvent.bot_id) return;
     if (!msgEvent.thread_ts) return;
     const text = stripComposerAttribution(msgEvent.text ?? "").trim();
     if (!text || /<@[^>]+>/.test(text)) return; // mentions are handled by app_mention

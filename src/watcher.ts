@@ -2,6 +2,7 @@ import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
+import { snapshotOutbox, type DirSnapshot } from "./attachments.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
@@ -16,6 +17,9 @@ interface WatchState {
   offset: number;
   lastStatus: string;
   collected: string[];
+  /** `<cwd>/.cctag/outbox` as of the last report, so terminal-initiated work
+   *  gets its files attached too — see TurnEngine.uploadOutboxAdditions. */
+  outboxBaseline: DirSnapshot;
 }
 
 /**
@@ -112,6 +116,7 @@ export class BackgroundWatcher {
         offset: tPath ? transcriptSizeSafe(tPath) : 0,
         lastStatus: agent.agentStatus,
         collected: [],
+        outboxBaseline: snapshotOutbox(agent.cwd),
       });
       return; // never replay pre-existing history on first sight / resume / rotation
     }
@@ -132,6 +137,7 @@ export class BackgroundWatcher {
         offset: state.offset,
         collected: state.collected,
         paneId: agent.paneId,
+        cwd: agent.cwd,
       });
       return;
     }
@@ -139,16 +145,22 @@ export class BackgroundWatcher {
     const wasActive = state.lastStatus === "working" || state.lastStatus === "blocked";
     const nowSettled = agent.agentStatus === "idle" || agent.agentStatus === "done";
 
-    if (wasActive && nowSettled && state.collected.length > 0) {
-      const text = state.collected.join("\n\n").trim();
-      if (text) {
-        const chunks = chunkForSlack(markdownToMrkdwn(text));
-        for (const [i, chunk] of chunks.entries()) {
-          const prefixed = i === 0 ? `🖥️ ターミナル側で応答を検出しました:\n${chunk}` : chunk;
-          await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", prefixed);
+    if (wasActive && nowSettled) {
+      if (state.collected.length > 0) {
+        const text = state.collected.join("\n\n").trim();
+        if (text) {
+          const chunks = chunkForSlack(markdownToMrkdwn(text));
+          for (const [i, chunk] of chunks.entries()) {
+            const prefixed = i === 0 ? `🖥️ ターミナル側で応答を検出しました:\n${chunk}` : chunk;
+            await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", prefixed);
+          }
         }
+        state.collected = [];
       }
-      state.collected = [];
+      // Outside the collected-text guard: work can produce a file without
+      // producing assistant text (a chart written by a script, say), and that
+      // file is still worth posting.
+      state.outboxBaseline = await this.turnEngine.uploadOutboxAdditions(pairing, agent.cwd, state.outboxBaseline);
     }
 
     state.lastStatus = agent.agentStatus;

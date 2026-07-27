@@ -8,6 +8,8 @@
  * opaque data here, not typed against the Slack SDK, so it forwards cleanly
  * over a WebSocket in the Hub–Spoke design too.
  */
+import type { IncomingFile } from "./attachments.js";
+
 export interface MessageHandle {
   update(text: string, blocks?: unknown[]): Promise<void>;
 }
@@ -38,4 +40,37 @@ export interface Notifier {
     threadTs: string,
     args: { content: string; filename: string; title?: string; comment?: string },
   ): Promise<void>;
+  /**
+   * Uploads arbitrary bytes (images, PDFs, ...) to the thread, base64-encoded
+   * so the payload survives the Hub–Spoke JSON RPC unchanged. Separate from
+   * uploadTextFile rather than replacing it because Hub and Spoke ship
+   * independently: a Spoke talking to a Hub that predates this method gets a
+   * "no handler" error, which is why callers must tolerate it throwing.
+   */
+  uploadFile?(
+    channel: string,
+    threadTs: string,
+    args: { contentB64: string; filename: string; title?: string; comment?: string },
+  ): Promise<void>;
+  /**
+   * Downloads a file a user attached in Slack, as base64. Absent when the
+   * platform adapter can't reach Slack's file API. The Spoke never sees the
+   * bot token, so its implementation asks the Hub to do the download.
+   */
+  fetchIncomingFile?(file: IncomingFile): Promise<string | null>;
+}
+
+/**
+ * Whether a failed Notifier call failed because the remote end doesn't
+ * implement the method at all, as opposed to failing on its merits.
+ *
+ * Only Hub–Spoke mode can produce this: the Hub and the Spoke ship
+ * independently, so a Spoke can be newer than the Hub it connects to and call
+ * an RPC method that Hub build has never heard of (WsRpc answers "no handler
+ * for ..."). Worth distinguishing because the fix is "update the Hub", not
+ * "retry" — and the method-presence checks callers do (`notifier.uploadFile?`)
+ * can't see it, since the Spoke's proxy implements every method locally.
+ */
+export function isUnsupportedByRemote(err: unknown): boolean {
+  return err instanceof Error && /no handler for/.test(err.message);
 }

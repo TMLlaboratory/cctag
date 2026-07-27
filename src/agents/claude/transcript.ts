@@ -89,6 +89,27 @@ export function extractAssistantText(records: TranscriptRecord[]): string[] {
   return texts;
 }
 
+/**
+ * Absolute paths the turn wrote via the Write tool.
+ *
+ * Only Write is inspected: it's the one tool whose input names its output file
+ * outright. Files produced by Bash (a matplotlib script, an ImageMagick call)
+ * aren't recoverable from the transcript at all, which is exactly the gap the
+ * `.cctag/outbox` convention covers.
+ */
+export function extractWrittenPaths(records: TranscriptRecord[]): string[] {
+  const paths: string[] = [];
+  for (const r of records) {
+    if (r.type !== "assistant") continue;
+    for (const block of contentBlocks(r)) {
+      if (block.type !== "tool_use" || block.name !== "Write") continue;
+      const filePath = (block.input as { file_path?: unknown } | undefined)?.file_path;
+      if (typeof filePath === "string" && filePath) paths.push(filePath);
+    }
+  }
+  return paths;
+}
+
 /** Human-readable one-line summaries of tool_use blocks, in order (for the status line). */
 export function extractToolUseSummaries(records: TranscriptRecord[]): string[] {
   const summaries: string[] = [];
