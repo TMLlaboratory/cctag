@@ -16,6 +16,7 @@ oauth_config:
       - im:history
       - mpim:history
       - reactions:write
+      - files:read
       - files:write
       - users:read
 settings:

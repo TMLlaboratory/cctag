@@ -1,7 +1,15 @@
+import {
+  buildPromptWithAttachments,
+  countImages,
+  saveIncomingFiles,
+  type AttachmentLimits,
+  type IncomingFile,
+  type SaveResult,
+} from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
 import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
-import type { Notifier } from "./notifier.js";
+import { isUnsupportedByRemote, type Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
 import { driverFor, type AgentDriver } from "./agents/driver.js";
 
@@ -20,6 +28,8 @@ const CLAUDE_HELP_TEXT = [
   "• `@cctag plan` — Plan Mode を有効化（`mode plan` と同じ）",
   "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
+  "• 画像やファイルを添付して `@cctag` すると、そのままインスタンスに渡されます（画像は画像として認識されます）",
+  "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
 ].join("\n");
 
 const CODEX_HELP_TEXT = [
@@ -31,6 +41,8 @@ const CODEX_HELP_TEXT = [
   "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
   "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
+  "• 添付ファイルはパスとして渡されます（Codex CLI では画像として認識されるかは未検証）",
+  "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
   "（`mode` / `plan` は Codex CLI では利用できません）",
 ].join("\n");
 
@@ -54,6 +66,8 @@ export interface MentionContext {
   text: string;
   /** This message's own Slack ts — used by `log` to exclude itself from fetched thread history. */
   ts: string;
+  /** Files attached to the mention (pasting an image in Slack uploads one). */
+  files?: IncomingFile[];
 }
 
 export interface PairSelectContext {
@@ -107,6 +121,7 @@ export class CommandHandler {
     private readonly turnEngine: TurnEngine,
     private readonly notifier: Notifier,
     private readonly ownerUserId: string,
+    private readonly attachmentLimits: AttachmentLimits,
   ) {}
 
   isOwner(userId: string): boolean {
@@ -115,6 +130,17 @@ export class CommandHandler {
 
   async handleMention(ctx: MentionContext): Promise<void> {
     const { channel, threadTs, userId, text, ts } = ctx;
+    const files = ctx.files ?? [];
+
+    // An attachment is unambiguously a turn, never a command: `connect` and
+    // friends have nothing to do with a file, and routing a file-bearing
+    // mention through the command switch would send "@cctag" + a screenshot
+    // (empty text) to the help branch instead of to the agent.
+    if (files.length > 0) {
+      await this.dispatchTurn(channel, threadTs, userId, text, files);
+      return;
+    }
+
     // Only single-word commands are recognized; anything else (including any
     // message containing whitespace/newlines) falls through to a turn below
     // using the FULL text, not a split fragment of it.
@@ -287,6 +313,20 @@ export class CommandHandler {
     }
 
     // Anything else: treat as a turn message.
+    await this.dispatchTurn(channel, threadTs, userId, text, []);
+  }
+
+  /**
+   * The common tail of every path that ends in "send this to the agent":
+   * resolve the pairing, download any attachments, and start the turn.
+   */
+  private async dispatchTurn(
+    channel: string,
+    threadTs: string,
+    userId: string,
+    text: string,
+    files: IncomingFile[],
+  ): Promise<void> {
     const pairing = this.pairingStore.get(channel, threadTs);
     if (!pairing) {
       await this.notifier.postReply(
@@ -300,8 +340,23 @@ export class CommandHandler {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
     }
+
+    let prompt = text;
+    let imageCount = 0;
+    if (files.length > 0) {
+      const { saved, skipped } = await this.downloadAttachments(channel, threadTs, files);
+      if (skipped.length > 0) {
+        await this.notifier.postReply(channel, threadTs, `⚠️ 添付をスキップしました:\n${skipped.map((s) => `• ${s}`).join("\n")}`);
+      }
+      if (saved.length === 0 && !text.trim()) return; // nothing usable to send
+      // A bare attachment with no words still has to say *something*, or the
+      // agent gets a prompt that is only a file path.
+      prompt = buildPromptWithAttachments(text.trim() || "添付されたファイルを確認してください。", saved);
+      imageCount = countImages(saved);
+    }
+
     try {
-      await this.turnEngine.startTurn(pairing, userId, text);
+      await this.turnEngine.startTurn(pairing, userId, prompt, { imageCount });
     } catch (err) {
       if (err instanceof Error && err.message === "agent-not-found") {
         this.pairingStore.remove(pairing.key);
@@ -310,6 +365,38 @@ export class CommandHandler {
       }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private async downloadAttachments(channel: string, threadTs: string, files: IncomingFile[]): Promise<SaveResult> {
+    const fetcher = this.notifier.fetchIncomingFile?.bind(this.notifier);
+    if (!fetcher) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ このモードでは添付ファイルを受け取れません。");
+      return { saved: [], skipped: [] };
+    }
+
+    // A Hub older than attachment support answers "no handler for fetch_file"
+    // for every file. Left to saveIncomingFiles that reads as N separate
+    // "couldn't download" lines, which points at the wrong thing entirely.
+    let unsupported = false;
+    const result = await saveIncomingFiles(
+      files,
+      async (f) => {
+        try {
+          return await fetcher(f);
+        } catch (err) {
+          if (!isUnsupportedByRemote(err)) throw err;
+          unsupported = true;
+          return null;
+        }
+      },
+      this.attachmentLimits,
+    );
+    if (unsupported) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ Hubが添付ファイルに未対応です（Hub側の更新が必要です）。");
+      // Per-file reasons are all the same one, already stated above.
+      return { saved: result.saved, skipped: [] };
+    }
+    return result;
   }
 
   /**
@@ -512,6 +599,11 @@ export class CommandHandler {
    * AskUserQuestion answer first; if nothing's pending there, tries routing
    * it as ExitPlanMode feedback ("Tell Claude what to change"). Silently a
    * no-op if neither is pending.
+   *
+   * Text only, deliberately: both answer mechanisms drive the TUI's option
+   * rows with arrow keys and inline placeholder replacement, which is not a
+   * place to be injecting file paths. Sending a file needs an explicit
+   * `@cctag` mention, same as starting any other turn.
    */
   async handleFreeTextMessage(ctx: FreeTextContext): Promise<void> {
     const pairing = this.pairingStore.get(ctx.channel, ctx.threadTs);

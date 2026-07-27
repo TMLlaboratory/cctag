@@ -1,11 +1,15 @@
 import type { WebClient } from "@slack/web-api";
+import type { IncomingFile } from "../attachments.js";
 import type { MessageHandle, Notifier } from "../notifier.js";
 import { stripComposerAttribution } from "../commands.js";
 
 export class SlackNotifier implements Notifier {
   private botUserId: string | undefined;
 
-  constructor(private readonly client: WebClient) {}
+  constructor(
+    private readonly client: WebClient,
+    private readonly token: string,
+  ) {}
 
   private async getBotUserId(): Promise<string | undefined> {
     if (this.botUserId === undefined) {
@@ -62,6 +66,74 @@ export class SlackNotifier implements Notifier {
       threadTs ? { channel_id: channel, thread_ts: threadTs, ...common } : { channel_id: channel, ...common },
     );
   }
+
+  async uploadFile(
+    channel: string,
+    threadTs: string,
+    args: { contentB64: string; filename: string; title?: string; comment?: string },
+  ): Promise<void> {
+    await uploadBinaryFile(this.client, channel, threadTs, args);
+  }
+
+  async fetchIncomingFile(file: IncomingFile): Promise<string | null> {
+    return downloadSlackFile(this.client, this.token, file);
+  }
+}
+
+/**
+ * Shared by the standalone SlackNotifier and the Hub's `upload_file` RPC
+ * handler. `file` (a Buffer) rather than `content` (a string) is what makes
+ * uploadV2 send the bytes verbatim — passing binary through `content` would
+ * corrupt it.
+ */
+export async function uploadBinaryFile(
+  client: WebClient,
+  channel: string,
+  threadTs: string,
+  args: { contentB64: string; filename: string; title?: string; comment?: string },
+): Promise<void> {
+  const common = {
+    file: Buffer.from(args.contentB64, "base64"),
+    filename: args.filename,
+    title: args.title,
+    initial_comment: args.comment,
+  };
+  await client.files.uploadV2(
+    threadTs ? { channel_id: channel, thread_ts: threadTs, ...common } : { channel_id: channel, ...common },
+  );
+}
+
+/**
+ * Downloads a Slack-hosted file. Shared by the standalone notifier and the
+ * Hub's `fetch_file` RPC handler — both hold the bot token, which
+ * `url_private_download` requires as a bearer header (the URL alone returns
+ * an HTML sign-in page, not the bytes, and does so with a 200, hence the
+ * content-type check).
+ */
+export async function downloadSlackFile(
+  client: WebClient,
+  botToken: string,
+  file: IncomingFile,
+): Promise<string | null> {
+  let url = file.downloadUrl;
+  if (!url) {
+    // Some events carry only the file id (and Slack's own docs warn the file
+    // object can be partial) — resolve the download URL via files.info.
+    const info = await client.files.info({ file: file.id }).catch(() => null);
+    url = (info?.file as { url_private_download?: string } | undefined)?.url_private_download;
+  }
+  if (!url) return null;
+
+  const res = await globalThis.fetch(url, { headers: { authorization: `Bearer ${botToken}` } });
+  if (!res.ok) {
+    console.error(`[slack] file download failed for ${file.name}: HTTP ${res.status}`);
+    return null;
+  }
+  if (res.headers.get("content-type")?.includes("text/html")) {
+    console.error(`[slack] file download for ${file.name} returned a sign-in page — check the files:read scope`);
+    return null;
+  }
+  return Buffer.from(await res.arrayBuffer()).toString("base64");
 }
 
 interface RepliesMessage {

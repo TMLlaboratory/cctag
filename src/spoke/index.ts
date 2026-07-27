@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
+import type { IncomingFile } from "../attachments.js";
 import { loadSpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
 import { PairingStore } from "../pairing.js";
@@ -43,8 +44,13 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       const turnEngine = new TurnEngine(herdr, notifier, {
         turnTimeoutMs: config.turnTimeoutMs,
         pollIntervalMs: config.pollIntervalMs,
+        maxFileBytes: config.maxFileBytes,
+        maxFileCount: config.maxFileCount,
       });
-      const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
+      const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId, {
+        maxFileBytes: config.maxFileBytes,
+        maxFileCount: config.maxFileCount,
+      });
       const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
       watcher.start();
       ws.once("close", () => watcher.stop());
@@ -58,9 +64,18 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       };
 
       rpc.onCall("app_mention", async (payload) => {
-        const p = payload as { channel: string; threadTs: string; userId: string; text: string; ts: string };
+        const p = payload as { channel: string; threadTs: string; userId: string; text: string; ts: string; files?: IncomingFile[] };
         const text = stripMention(stripComposerAttribution(p.text));
-        await commands.handleMention({ channel: p.channel, threadTs: p.threadTs, userId: p.userId, text, ts: p.ts });
+        await commands.handleMention({
+          channel: p.channel,
+          threadTs: p.threadTs,
+          userId: p.userId,
+          text,
+          ts: p.ts,
+          // Absent when the Hub predates attachment support — an older Hub just
+          // never sends the field, and the mention still works as plain text.
+          files: p.files ?? [],
+        });
         return {};
       });
 

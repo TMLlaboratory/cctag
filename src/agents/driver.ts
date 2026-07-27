@@ -32,6 +32,12 @@ export type BlockedPrompt =
 export interface TurnOutput {
   texts: string[];
   toolNames: string[];
+  /** Absolute paths of files the agent wrote during the turn, as reported by its
+   *  transcript. Candidates for auto-upload to the thread — TurnEngine narrows
+   *  them to the types worth attaching. Absent when the driver can't tell (see
+   *  the Codex driver, whose file writes go through shell commands whose target
+   *  paths aren't recoverable from the transcript). */
+  attachmentPaths?: string[];
 }
 
 /** Shift+Tab-style mode ring (Claude Code only — Codex has no equivalent, so its driver's `modes` is null). */

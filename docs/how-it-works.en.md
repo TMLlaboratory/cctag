@@ -283,6 +283,89 @@ client there). The actual formatting logic
 (`formatThreadHistorySinceLastBotPost`) lives once in `slack/notifier.ts`
 and is shared by both paths.
 
+## 5.8 How file attachments work (Slack ⇄ agent)
+
+### Inbound: why handing over a path is enough
+
+An image pasted into Slack arrives in the message's `files[]`, never in its
+`text`. cctag downloads it to `~/.cctag/inbox/<file_id>-<name>` and simply
+appends the paths to the prompt, one per line
+(`buildPromptWithAttachments()`).
+
+That works because **Claude Code converts an image path in a prompt into a real
+image attachment.** Measured behavior:
+
+- the path text is removed and replaced by an `[Image #N]` placeholder (which
+  moves to the front of the text)
+- the bytes land in the transcript as a separate base64 `image` block
+- one extra record is appended noting `[Image: source: <path>]`
+- the `Read` tool is never called — no extra tool round trip
+- a path outside the cwd triggers no permission prompt, precisely because
+  `Read` isn't involved
+- paths containing spaces and non-ASCII (`スクリーンショット 2026-07-27
+  14.02.33.png`) work unquoted
+
+Base64-in-the-prompt was rejected on token grounds. Measured on a 2.8MB PNG:
+~3.6k tokens this way (Claude Code re-encodes it to JPEG and downscales first)
+versus ~170k as text — ~50x — and the text version isn't an image to the model
+at all.
+
+Non-image files (PDF, CSV, ...) stay plain paths for the agent to open with its
+own `Read` tool.
+
+### The inbound catch: an image path swallows the Enter
+
+`herdr agent prompt` sequences the text injection and the Enter server-side, but
+**a prompt carrying an image path doesn't submit — it sits in the input box.**
+The path→attachment conversion is asynchronous and the Enter is absorbed while
+it runs. A prompt with only non-image paths submits immediately, so this is
+specific to images (measured: 500ms–1000ms to convert a 2.8MB PNG).
+
+The existing "resend Enter if nothing was submitted" safety net (`0d4c830` /
+`624389c`) waited once and retried once, so it's now a bounded loop of
+`SUBMIT_RETRIES_WITH_IMAGES` attempts. An Enter into an empty box is a harmless
+no-op, which is why erring toward over-retrying is the safe direction.
+
+### Outbound: two routes
+
+`Notifier.uploadFile?` (bytes as base64) sits alongside the `uploadTextFile?`
+used for plan attachments, with the same shape: standalone goes straight through
+`SlackNotifier`, Hub–Spoke goes through an `upload_file` RPC the Hub executes.
+What gets sent is decided by two routes:
+
+- **`<cwd>/.cctag/outbox/`** — the directory is snapshotted at turn start
+  (name → `mtime:size`) and anything new or changed at turn end is uploaded.
+  Per-cwd rather than global because several threads can be paired to different
+  panes at once, and a shared outbox would post one pane's files into another
+  pane's thread. Uploaded files are left in place — consuming a directory the
+  user also writes to is hard to undo — and the mtime/size comparison keeps an
+  untouched file from being re-sent.
+- **Transcript detection** — `Write` tool `file_path`s, narrowed to
+  images/SVG/PDF. Only `Write` is inspected because it's the one tool whose
+  input names its output. Files produced by Bash (a matplotlib PNG) leave no
+  recoverable path in the transcript, which is exactly the gap the outbox
+  convention fills. Source files and `.md` are excluded: the agent writes those
+  constantly and uploading each one would bury the thread.
+
+### Hub–Spoke file flow and authorization
+
+A Spoke holds no bot token, so the Hub always performs the download. The Hub
+forwards the file metadata it saw on the event *and* records **which file id it
+offered to which owner** (`fileOwner`, capped at 500), and the `fetch_file` RPC
+serves only ids in that record for that owner. Without it, a Spoke could name
+any file id and pull down anything the bot can see. The download URL itself is
+never handed to the Spoke; the Hub re-resolves it from Slack.
+
+A transfer moves megabytes of base64 in one JSON message and includes a Slack
+API round trip, which the RPC's 20s default (sized for `chat.postMessage`)
+doesn't cover — file calls use 120s instead. The caps
+(`CCTAG_MAX_FILE_MB` / `CCTAG_MAX_FILE_COUNT`) are enforced on both the Spoke
+and the Hub.
+
+Because **Hub and Spoke ship independently**, a Hub that predates `upload_file`
+answers `no handler for ...`. That's reported to the thread once as "the Hub
+needs updating" rather than as a transfer failure (`isUnsupportedByRemote()`).
+
 ## 6. Connecting one PC to more than one Slack workspace
 
 A Hub is tied to exactly one workspace (by its Slack app token). To reach a

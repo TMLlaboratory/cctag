@@ -103,6 +103,9 @@ read`, not from the transcript. See `src/agents/claude/prompts.ts` and
 | `@cctag mode` / `@cctag plan` | ✅ | — *(no Shift+Tab mode ring or plan mode)* |
 | Plan-file attach on ExitPlanMode | ✅ | — |
 | Background watcher (terminal-initiated work) | ✅ | ✅ |
+| Slack → agent image/file attachments | ✅ real image attachments | ⚠️ *(paths only — no verified auto-attach)* |
+| Agent → Slack file uploads (`.cctag/outbox`) | ✅ | ✅ |
+| Agent → Slack uploads detected from the transcript | ✅ `Write` targets | — *(writes go through shell commands)* |
 
 Where a feature isn't supported, cctag replies saying so rather than failing
 silently — e.g. `@cctag mode plan` on a Codex-paired thread.
@@ -208,6 +211,13 @@ already runs — see [For Spoke users](#for-spoke-users) instead.)*
 4. (Optional) Under **Basic Information → Display Information**, upload
    `assets/icon-512.png` as the app icon.
 5. Invite the bot to a channel: `/invite @cctag`.
+
+> **Upgrading an app created before file attachments landed:** `manifest.yaml`
+> gained the `files:read` scope, and a scope change only takes effect on
+> reinstall. Paste the current manifest over the app's existing one
+> (*Features → App Manifest*), then reinstall to the workspace. Until you do,
+> everything else keeps working and inbound attachments fail with a
+> "couldn't download" notice in the thread.
 
 ### Running standalone
 
@@ -461,6 +471,51 @@ thread:
   following command?"): one button per choice, first option styled primary,
   anything that looks like a refusal ("No", "Cancel", "拒否") styled as a
   danger button.
+
+### Sending files and images to the agent
+
+Attach a file (or just paste an image) to an `@cctag` message and the paired
+session receives it. cctag downloads it to `~/.cctag/inbox/` and puts the path
+in the prompt; Claude Code turns an image path into a real image attachment —
+what the TUI shows as `[Image #1]` — so the model actually *sees* the
+screenshot. A message that's nothing but an image works too.
+
+The path is deliberate, not incidental: base64 pasted into the prompt as text
+would cost roughly 50x the tokens (measured: a 2.8MB PNG is ~3.6k tokens
+attached this way, vs ~170k as text) and wouldn't be an image to the model at
+all. Non-image files (PDF, CSV, ...) arrive as paths for the agent to open with
+its own file-reading tool.
+
+Two things to know:
+
+- **The mention is required.** Dropping an image into a paired thread without
+  `@cctag` does nothing, same as any other unmentioned message — otherwise
+  every screenshot people share with each other would start a turn.
+- **Caps.** `CCTAG_MAX_FILE_MB` (default 8) and `CCTAG_MAX_FILE_COUNT`
+  (default 5) per message; anything rejected is reported in the thread rather
+  than silently dropped. Downloads are pruned after 7 days.
+
+### Getting files back out
+
+Two ways, both automatic — no command to remember:
+
+- **`<cwd>/.cctag/outbox/`** — anything the agent puts there during a turn is
+  uploaded to the thread when the turn ends. Any file type. This is the one
+  that covers charts, since a matplotlib PNG is written by a shell command that
+  leaves no trace of its output path in the transcript. Worth telling your
+  agent about once, e.g. in the project's `CLAUDE.md`:
+
+  ```markdown
+  Slack に見せたい画像や PDF は `.cctag/outbox/` に置く（cctag が自動で添付する）。
+  ```
+
+  Add `.cctag/` to `.gitignore`. Uploaded files are left in place, and a file
+  only re-uploads if it changes.
+
+- **Transcript-detected writes** — image/SVG/PDF files the agent writes with
+  the `Write` tool are picked up without any outbox involvement. Source files
+  and `.md` are deliberately excluded: the agent writes those constantly, and
+  uploading each one would bury the thread.
 
 ### Switching model
 

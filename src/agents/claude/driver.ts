@@ -10,7 +10,13 @@ import {
   parsePermissionMenu,
   stripFooterChrome,
 } from "./prompts.js";
-import { extractAssistantText, extractToolUseSummaries, locateClaudeTranscript, type TranscriptRecord } from "./transcript.js";
+import {
+  extractAssistantText,
+  extractToolUseSummaries,
+  extractWrittenPaths,
+  locateClaudeTranscript,
+  type TranscriptRecord,
+} from "./transcript.js";
 import { resolvePlanFile } from "./plan.js";
 
 function sleep(ms: number): Promise<void> {
@@ -79,7 +85,11 @@ export const claudeDriver: AgentDriver = {
 
   extractTurnOutput(records) {
     const r = records as TranscriptRecord[];
-    return { texts: extractAssistantText(r), toolNames: extractToolUseSummaries(r) };
+    return {
+      texts: extractAssistantText(r),
+      toolNames: extractToolUseSummaries(r),
+      attachmentPaths: extractWrittenPaths(r),
+    };
   },
 
   parseBlockedPane(paneText): BlockedPrompt {

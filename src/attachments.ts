@@ -1,0 +1,323 @@
+import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { extname, join, resolve } from "node:path";
+
+/**
+ * Slack ⇄ agent file attachment plumbing, kept free of Slack SDK types so
+ * standalone and Hub–Spoke modes share one implementation (same reasoning as
+ * notifier.ts).
+ *
+ * The inbound direction hinges on a verified Claude Code behavior: an image
+ * file *path* appearing in a submitted prompt is turned by the TUI into a real
+ * image attachment — the path text is removed, an `[Image #N]` placeholder
+ * takes its place, and the bytes land in the transcript as a base64 `image`
+ * content block. So cctag downloads the file, writes it to disk, and puts the
+ * path in the prompt. It deliberately never inlines base64 into the prompt
+ * text: measured on a 2.8MB PNG, the attachment path costs ~3.6k tokens (Claude
+ * Code re-encodes and downscales it first) while the same bytes pasted as text
+ * would be ~170k tokens — and wouldn't be visible to the model as an image at
+ * all.
+ */
+
+/** Extensions Claude Code auto-attaches as an image when their path appears in
+ *  a prompt (verified for .png/.jpg; the rest are the formats the API's image
+ *  blocks accept, so they take the same path). */
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+/** Outbound: what's worth pushing into the thread on its own, because a Slack
+ *  reader can't get it from the turn's text output. Deliberately excludes
+ *  source files and .md — the agent writes those constantly, and uploading
+ *  every one would bury the thread (plan .md files have their own path, see
+ *  TurnEngine.attachPlanFile). */
+const OUTBOUND_EXTS = new Set([...IMAGE_EXTS, ".svg", ".pdf"]);
+
+/** Downloaded inbound files older than this are pruned on the next save.
+ *  They're only needed until the agent has read them, but keeping a few days
+ *  means a thread can still refer back to "the screenshot I sent earlier". */
+const INBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface AttachmentLimits {
+  maxFileBytes: number;
+  maxFileCount: number;
+}
+
+/** A Slack file as reported on a message event — metadata only. The bytes are
+ *  fetched separately (by the side that holds the bot token). */
+export interface IncomingFile {
+  id: string;
+  name: string;
+  mimetype?: string;
+  size?: number;
+  /** Direct download URL, when the triggering event carried one. Optional
+   *  because it does NOT cross the Hub–Spoke boundary: the Spoke sends only the
+   *  id and the Hub re-resolves the URL itself, so a download URL never has to
+   *  be paired with the bot token needed to use it. */
+  downloadUrl?: string;
+}
+
+/** Fetches an inbound file's bytes as base64, or null if unavailable.
+ *  Standalone downloads with the bot token directly; the Spoke asks the Hub
+ *  over the WebSocket RPC. */
+export type FileFetcher = (file: IncomingFile) => Promise<string | null>;
+
+export interface SavedAttachment {
+  /** Absolute path on the machine running the agent. */
+  path: string;
+  /** Original (sanitized) Slack filename, for user-facing messages. */
+  name: string;
+  isImage: boolean;
+}
+
+export interface SaveResult {
+  saved: SavedAttachment[];
+  /** Human-readable reasons, one per rejected file, for posting back to the thread. */
+  skipped: string[];
+}
+
+export interface OutboundAttachment {
+  path: string;
+  name: string;
+  contentB64: string;
+}
+
+/** name -> "mtimeMs:size", so a file that was rewritten in place still counts as new. */
+export type DirSnapshot = Record<string, string>;
+
+function mb(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
+export function isImagePath(p: string): boolean {
+  return IMAGE_EXTS.has(extname(p).toLowerCase());
+}
+
+export function isOutboundAttachable(p: string): boolean {
+  return OUTBOUND_EXTS.has(extname(p).toLowerCase());
+}
+
+export function inboxDir(): string {
+  return join(homedir(), ".cctag", "inbox");
+}
+
+/** `<cwd>/.cctag/outbox` — per-pane, NOT a single shared directory: several
+ *  threads can be paired to different panes at once, and a global outbox would
+ *  post one pane's file into another pane's thread. */
+export function outboxDir(cwd: string): string {
+  return join(cwd, ".cctag", "outbox");
+}
+
+/**
+ * Strips what would break the one-path-per-line prompt convention or the
+ * filesystem, and keeps everything else. Spaces and non-ASCII are kept on
+ * purpose: Slack's own screenshot filenames contain both ("スクリーンショット
+ * 2026-07-27 14.02.33.png"), and Claude Code's path→attachment detection was
+ * verified to handle such a path unquoted.
+ */
+export function sanitizeAttachmentName(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? "";
+  // Control characters only. A newline in particular would split one filename
+  // across two lines of the prompt block and be read as two bogus paths.
+  const cleaned = base.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  return cleaned || "file";
+}
+
+/** Best-effort removal of stale downloads. Never throws — a full or
+ *  permission-denied inbox must not fail the turn that triggered the prune. */
+function pruneInbox(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - INBOX_MAX_AGE_MS;
+  for (const name of names) {
+    const p = join(dir, name);
+    try {
+      if (statSync(p).mtimeMs < cutoff) unlinkSync(p);
+    } catch {
+      // raced with another prune, or not ours to delete — skip
+    }
+  }
+}
+
+/**
+ * Downloads the inbound files cctag is willing to accept and writes them under
+ * `dir`. Rejections are returned rather than thrown, so a message mixing one
+ * huge file with one usable image still gets the usable one through.
+ */
+export async function saveIncomingFiles(
+  files: IncomingFile[],
+  fetch: FileFetcher,
+  limits: AttachmentLimits,
+  dir: string = inboxDir(),
+): Promise<SaveResult> {
+  const saved: SavedAttachment[] = [];
+  const skipped: string[] = [];
+  if (files.length === 0) return { saved, skipped };
+
+  pruneInbox(dir);
+
+  for (const f of files) {
+    if (saved.length >= limits.maxFileCount) {
+      skipped.push(`${f.name}（1メッセージあたり${limits.maxFileCount}件までです）`);
+      continue;
+    }
+    // Slack reports the size up front, so an oversized file can be rejected
+    // without transferring it at all.
+    if (f.size !== undefined && f.size > limits.maxFileBytes) {
+      skipped.push(`${f.name}（${mb(f.size)}MB — 上限は${mb(limits.maxFileBytes)}MB）`);
+      continue;
+    }
+
+    let b64: string | null;
+    try {
+      b64 = await fetch(f);
+    } catch (err) {
+      console.error(`[attachments] download failed for ${f.name}:`, err instanceof Error ? err.message : err);
+      b64 = null;
+    }
+    if (!b64) {
+      skipped.push(`${f.name}（ダウンロードできませんでした）`);
+      continue;
+    }
+
+    const bytes = Buffer.from(b64, "base64");
+    // Re-check against the real byte count: `size` is advisory (absent on some
+    // events), and this is the last point before it hits the disk.
+    if (bytes.byteLength > limits.maxFileBytes) {
+      skipped.push(`${f.name}（${mb(bytes.byteLength)}MB — 上限は${mb(limits.maxFileBytes)}MB）`);
+      continue;
+    }
+
+    const name = sanitizeAttachmentName(f.name);
+    // Slack file ids are unique per upload, so this can't collide even when
+    // two messages attach identically-named screenshots.
+    const path = join(dir, `${f.id}-${name}`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path, bytes);
+    } catch (err) {
+      console.error(`[attachments] write failed for ${path}:`, err instanceof Error ? err.message : err);
+      skipped.push(`${f.name}（保存できませんでした）`);
+      continue;
+    }
+    saved.push({ path, name, isImage: isImagePath(name) });
+  }
+
+  return { saved, skipped };
+}
+
+/**
+ * Appends the saved files' paths to the prompt, one per line and last.
+ *
+ * Position doesn't survive for images anyway (Claude Code lifts each one out
+ * and prepends an `[Image #N]` placeholder), and one-path-per-line is the exact
+ * shape the path→attachment detection was verified against. Agents without that
+ * detection just see a labeled list of paths they can open with their own
+ * file-reading tool, which is also what happens here for non-image files.
+ */
+export function buildPromptWithAttachments(text: string, saved: SavedAttachment[]): string {
+  if (saved.length === 0) return text;
+  const block = ["[Slackで添付されたファイル]", ...saved.map((s) => s.path)].join("\n");
+  const body = text.trim();
+  return body ? `${body}\n\n${block}` : block;
+}
+
+export function countImages(saved: SavedAttachment[]): number {
+  return saved.filter((s) => s.isImage).length;
+}
+
+/** Snapshots the outbox so the turn's own additions can be told apart from
+ *  files that were already sitting there. Missing directory = empty snapshot. */
+export function snapshotOutbox(cwd: string): DirSnapshot {
+  const dir = outboxDir(cwd);
+  const snapshot: DirSnapshot = {};
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return snapshot;
+  }
+  for (const name of names) {
+    try {
+      const st = statSync(join(dir, name));
+      if (st.isFile()) snapshot[name] = `${st.mtimeMs}:${st.size}`;
+    } catch {
+      // vanished mid-scan — treat as absent
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * Absolute paths of outbox files that are new or changed since `baseline`.
+ *
+ * Uploaded files are deliberately left in place rather than deleted: consuming
+ * a directory the user can also write to is the kind of surprise that's hard to
+ * undo, and the mtime/size comparison already makes re-posting the same
+ * untouched file impossible.
+ */
+export function outboxAdditions(cwd: string, baseline: DirSnapshot): string[] {
+  const dir = outboxDir(cwd);
+  const current = snapshotOutbox(cwd);
+  return Object.keys(current)
+    .filter((name) => current[name] !== baseline[name])
+    .sort()
+    .map((name) => join(dir, name));
+}
+
+/**
+ * Reads the files to upload, dropping duplicates (the same path can arrive from
+ * both the outbox scan and transcript detection) and anything over the size
+ * cap. Callers filter by extension *before* this: outbox contents are an
+ * explicit "send this" and take any type, while transcript-detected writes are
+ * narrowed to OUTBOUND_EXTS.
+ */
+export function readOutboundAttachments(
+  paths: string[],
+  limits: AttachmentLimits,
+  /** Base for any relative path. Must be the agent's cwd, not cctag's — the
+   *  paths come from the agent's own transcript, so cctag's process cwd would
+   *  resolve them somewhere unrelated. */
+  baseDir: string,
+): {
+  files: OutboundAttachment[];
+  skipped: string[];
+} {
+  const files: OutboundAttachment[] = [];
+  const skipped: string[] = [];
+  const seen = new Set<string>();
+
+  for (const p of paths) {
+    const abs = resolve(baseDir, p);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+
+    let size: number;
+    try {
+      const st = statSync(abs);
+      if (!st.isFile()) continue;
+      size = st.size;
+    } catch {
+      continue; // written then removed during the turn — nothing to send
+    }
+    if (size === 0) continue; // still being written, or a placeholder
+    if (files.length >= limits.maxFileCount) {
+      skipped.push(`${sanitizeAttachmentName(abs)}（1ターンあたり${limits.maxFileCount}件までです）`);
+      continue;
+    }
+    if (size > limits.maxFileBytes) {
+      skipped.push(`${sanitizeAttachmentName(abs)}（${mb(size)}MB — 上限は${mb(limits.maxFileBytes)}MB）`);
+      continue;
+    }
+
+    try {
+      files.push({ path: abs, name: sanitizeAttachmentName(abs), contentB64: readFileSync(abs).toString("base64") });
+    } catch (err) {
+      console.error(`[attachments] read failed for ${abs}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  return { files, skipped };
+}
