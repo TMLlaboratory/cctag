@@ -10,7 +10,7 @@ import {
   parsePermissionMenu,
   stripFooterChrome,
 } from "./prompts.js";
-import { extractAssistantText, extractToolUseSummaries, transcriptPath, type TranscriptRecord } from "./transcript.js";
+import { extractAssistantText, extractToolUseSummaries, locateClaudeTranscript, type TranscriptRecord } from "./transcript.js";
 import { resolvePlanFile } from "./plan.js";
 
 function sleep(ms: number): Promise<void> {
@@ -74,7 +74,7 @@ export const claudeDriver: AgentDriver = {
   paneReadSource: "recent",
 
   locateTranscript(cwd, sessionId) {
-    return sessionId ? transcriptPath(cwd, sessionId) : null;
+    return locateClaudeTranscript(cwd, sessionId);
   },
 
   extractTurnOutput(records) {

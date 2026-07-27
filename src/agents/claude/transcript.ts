@@ -1,3 +1,4 @@
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +11,47 @@ export function encodeCwd(cwd: string): string {
 
 export function transcriptPath(cwd: string, sessionId: string): string {
   return join(homedir(), ".claude", "projects", encodeCwd(cwd), `${sessionId}.jsonl`);
+}
+
+/**
+ * Locates a Claude Code session's transcript.
+ *
+ * Preferred path: herdr reported a session id (via the `herdr-agent-state.sh`
+ * SessionStart hook), so the file is an exact join — no scanning needed.
+ *
+ * Fallback (session id unavailable — e.g. the hook never fired: not yet
+ * trusted, or something on PATH intercepted the `python3` it shells out to):
+ * every session for this cwd lands in one directory (Claude Code encodes cwd,
+ * not session id, into the directory name), so the newest `*.jsonl` file in
+ * it is the one this pane is almost certainly writing to. Mirrors the same
+ * fallback `locateCodexTranscript` already does for Codex CLI
+ * (agents/codex/transcript.ts) — Claude Code just doesn't need a
+ * cwd-matching scan across day directories since the directory is already
+ * cwd-scoped.
+ */
+export function locateClaudeTranscript(cwd: string, sessionId: string | null): string | null {
+  if (sessionId) return transcriptPath(cwd, sessionId);
+
+  const dir = join(homedir(), ".claude", "projects", encodeCwd(cwd));
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
+  } catch {
+    return null;
+  }
+
+  let newest: { path: string; mtimeMs: number } | null = null;
+  for (const name of names) {
+    const p = join(dir, name);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(p).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!newest || mtimeMs > newest.mtimeMs) newest = { path: p, mtimeMs };
+  }
+  return newest?.path ?? null;
 }
 
 interface ContentBlock {

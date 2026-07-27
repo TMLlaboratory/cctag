@@ -467,6 +467,15 @@ export class TurnEngine {
         await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", chunk);
       }
     }
+    // No text collected and the transcript was never located at all (as
+    // opposed to located-but-genuinely-empty) — almost always means herdr
+    // couldn't report a sessionId and the driver's cwd-based fallback also
+    // came up empty (e.g. no transcript file exists yet for this cwd), not
+    // that the agent replied with nothing. Surface it distinctly so this
+    // doesn't get misread as a normal silent completion.
+    if (!text && !warning && !state.transcriptPath) {
+      warning = "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（herdrがsessionIdを報告できていない可能性があります）。";
+    }
     if (warning) {
       await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", warning);
     }
