@@ -148,7 +148,9 @@ async function runServer(): Promise<void> {
       for (const p of pairings) threadOwner.set(threadKey(p.channel, p.threadTs), ownerUserId);
 
       console.log(`[hub] spoke registered: ${issued.name} -> ${ownerUserId} (${pairings.length} pairing(s))`);
-      return { ok: true };
+      // Report the Hub's own file cap so the Spoke can clamp to it up front
+      // rather than discovering it by pushing megabytes that get refused.
+      return { ok: true, maxFileBytes: config.maxFileBytes };
     });
 
     rpc.onNotify("pairing_changed", (payload) => {
@@ -229,15 +231,23 @@ async function runServer(): Promise<void> {
       return {};
     });
 
+    // Rejections throw rather than returning an empty success: WsRpc turns a
+    // thrown error into an `ok: false` result the Spoke's call() rejects on, so
+    // a file the Hub refuses is reported to the user instead of being counted
+    // as delivered. (The older handlers above keep their quiet return for
+    // compatibility; a dropped status edit is not a dropped deliverable.)
     rpc.onCall("upload_file", async (payload) => {
       const p = payload as { channel: string; threadTs: string; contentB64: string; filename: string; title?: string; comment?: string };
       if (!canActOn(p.channel, p.threadTs)) {
         console.error(`[hub] rejected upload_file from ${issued.name}: not authorized for ${p.channel}:${p.threadTs}`);
-        return {};
+        throw new Error(`not authorized to post in ${p.channel}`);
       }
-      if (Buffer.byteLength(p.contentB64, "base64") > config.maxFileBytes) {
+      const bytes = Buffer.byteLength(p.contentB64, "base64");
+      if (bytes > config.maxFileBytes) {
         console.error(`[hub] rejected upload_file from ${issued.name}: ${p.filename} exceeds CCTAG_MAX_FILE_MB`);
-        return {};
+        throw new Error(
+          `Hub側の上限を超えています（${(bytes / 1024 / 1024).toFixed(1)}MB > ${(config.maxFileBytes / 1024 / 1024).toFixed(1)}MB）`,
+        );
       }
       await uploadBinaryFile(app.client, p.channel, p.threadTs, p);
       return {};
@@ -254,16 +264,14 @@ async function runServer(): Promise<void> {
         console.error(`[hub] rejected fetch_file from ${issued.name}: ${p.fileId} was not offered to this owner`);
         return { contentB64: null };
       }
-      const contentB64 = await downloadSlackFile(app.client, config.slackBotToken, {
-        id: p.fileId,
-        name: p.name ?? p.fileId,
-      });
-      // A file the Spoke's own size check waved through can still turn out to
-      // be over the cap (Slack's event size is advisory) — don't relay it.
-      if (contentB64 && Buffer.byteLength(contentB64, "base64") > config.maxFileBytes) {
-        console.error(`[hub] refused fetch_file for ${p.fileId}: exceeds CCTAG_MAX_FILE_MB`);
-        return { contentB64: null };
-      }
+      // The cap is applied while streaming, so an oversized file is abandoned
+      // mid-transfer instead of being fully buffered and then rejected.
+      const contentB64 = await downloadSlackFile(
+        app.client,
+        config.slackBotToken,
+        { id: p.fileId, name: p.name ?? p.fileId },
+        config.maxFileBytes,
+      );
       return { contentB64 };
     });
 

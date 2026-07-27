@@ -1,15 +1,8 @@
-import {
-  buildPromptWithAttachments,
-  countImages,
-  saveIncomingFiles,
-  type AttachmentLimits,
-  type IncomingFile,
-  type SaveResult,
-} from "./attachments.js";
+import type { IncomingFile } from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
 import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
-import { isUnsupportedByRemote, type Notifier } from "./notifier.js";
+import type { Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
 import { driverFor, type AgentDriver } from "./agents/driver.js";
 
@@ -121,7 +114,6 @@ export class CommandHandler {
     private readonly turnEngine: TurnEngine,
     private readonly notifier: Notifier,
     private readonly ownerUserId: string,
-    private readonly attachmentLimits: AttachmentLimits,
   ) {}
 
   isOwner(userId: string): boolean {
@@ -341,62 +333,26 @@ export class CommandHandler {
       return;
     }
 
-    let prompt = text;
-    let imageCount = 0;
-    if (files.length > 0) {
-      const { saved, skipped } = await this.downloadAttachments(channel, threadTs, files);
-      if (skipped.length > 0) {
-        await this.notifier.postReply(channel, threadTs, `⚠️ 添付をスキップしました:\n${skipped.map((s) => `• ${s}`).join("\n")}`);
-      }
-      if (saved.length === 0 && !text.trim()) return; // nothing usable to send
-      // A bare attachment with no words still has to say *something*, or the
-      // agent gets a prompt that is only a file path.
-      prompt = buildPromptWithAttachments(text.trim() || "添付されたファイルを確認してください。", saved);
-      imageCount = countImages(saved);
-    }
-
     try {
-      await this.turnEngine.startTurn(pairing, userId, prompt, { imageCount });
+      // Attachments are downloaded inside startTurn, not here: the busy check
+      // above is only meaningful if nothing slow happens between it and the
+      // pane actually being reserved.
+      await this.turnEngine.startTurn(pairing, userId, text, { files });
     } catch (err) {
       if (err instanceof Error && err.message === "agent-not-found") {
         this.pairingStore.remove(pairing.key);
         await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
         return;
       }
+      // startTurn re-checks busy under its own synchronous reservation, so two
+      // messages arriving together can reach it past the check above — that's
+      // the ordinary "wait your turn" case, not an error worth showing raw.
+      if (err instanceof Error && err.message === "busy") {
+        await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+        return;
+      }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }
-
-  private async downloadAttachments(channel: string, threadTs: string, files: IncomingFile[]): Promise<SaveResult> {
-    const fetcher = this.notifier.fetchIncomingFile?.bind(this.notifier);
-    if (!fetcher) {
-      await this.notifier.postReply(channel, threadTs, "⚠️ このモードでは添付ファイルを受け取れません。");
-      return { saved: [], skipped: [] };
-    }
-
-    // A Hub older than attachment support answers "no handler for fetch_file"
-    // for every file. Left to saveIncomingFiles that reads as N separate
-    // "couldn't download" lines, which points at the wrong thing entirely.
-    let unsupported = false;
-    const result = await saveIncomingFiles(
-      files,
-      async (f) => {
-        try {
-          return await fetcher(f);
-        } catch (err) {
-          if (!isUnsupportedByRemote(err)) throw err;
-          unsupported = true;
-          return null;
-        }
-      },
-      this.attachmentLimits,
-    );
-    if (unsupported) {
-      await this.notifier.postReply(channel, threadTs, "⚠️ Hubが添付ファイルに未対応です（Hub側の更新が必要です）。");
-      // Per-file reasons are all the same one, already stated above.
-      return { saved: result.saved, skipped: [] };
-    }
-    return result;
   }
 
   /**

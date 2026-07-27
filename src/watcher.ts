@@ -2,7 +2,7 @@ import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
-import { snapshotOutbox, type DirSnapshot } from "./attachments.js";
+import { snapshotOutbox, WrittenFileTracker, type DirSnapshot } from "./attachments.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
@@ -20,6 +20,9 @@ interface WatchState {
   /** `<cwd>/.cctag/outbox` as of the last report, so terminal-initiated work
    *  gets its files attached too — see TurnEngine.uploadOutboxAdditions. */
   outboxBaseline: DirSnapshot;
+  /** Write tracking for terminal-initiated work, kept here so it survives to
+   *  the report (or to the handoff, if the terminal blocks first). */
+  writes: WrittenFileTracker;
 }
 
 /**
@@ -117,6 +120,7 @@ export class BackgroundWatcher {
         lastStatus: agent.agentStatus,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
+        writes: new WrittenFileTracker(),
       });
       return; // never replay pre-existing history on first sight / resume / rotation
     }
@@ -125,7 +129,12 @@ export class BackgroundWatcher {
     if (state.transcriptPath) {
       const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
       state.offset = newOffset;
-      state.collected.push(...driver.extractTurnOutput(records).texts);
+      const output = driver.extractTurnOutput(records);
+      state.collected.push(...output.texts);
+      // Tracked here, not only in TurnEngine: work that starts at the terminal
+      // is only ever seen by this loop, and if it later blocks, the write it
+      // already completed has to survive into the adopted turn.
+      state.writes.ingest(output);
     }
 
     if (agent.agentStatus === "blocked") {
@@ -138,6 +147,8 @@ export class BackgroundWatcher {
         collected: state.collected,
         paneId: agent.paneId,
         cwd: agent.cwd,
+        outboxBaseline: state.outboxBaseline,
+        writes: state.writes,
       });
       return;
     }
@@ -160,7 +171,12 @@ export class BackgroundWatcher {
       // Outside the collected-text guard: work can produce a file without
       // producing assistant text (a chart written by a script, say), and that
       // file is still worth posting.
-      state.outboxBaseline = await this.turnEngine.uploadOutboxAdditions(pairing, agent.cwd, state.outboxBaseline);
+      state.outboxBaseline = await this.turnEngine.uploadOutboxAdditions(
+        pairing,
+        agent.cwd,
+        state.outboxBaseline,
+        state.writes.paths(),
+      );
     }
 
     state.lastStatus = agent.agentStatus;

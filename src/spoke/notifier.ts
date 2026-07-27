@@ -62,3 +62,16 @@ export class WsNotifier implements Notifier {
  *  Slack API round trip on the Hub side — well past what the RPC default (20s,
  *  sized for chat.postMessage) allows for. */
 const FILE_RPC_TIMEOUT_MS = 120_000;
+
+/**
+ * Narrows a Spoke's own byte cap to the Hub's, when the Hub reports a smaller
+ * one at registration.
+ *
+ * The Hub refuses anything above its limit, so a larger local setting buys
+ * nothing but failed transfers after the bytes have already crossed the wire.
+ * A Hub too old to report a limit sends nothing, and the local value stands.
+ */
+export function narrowedMaxFileBytes(local: number, hubReported: unknown): number {
+  if (typeof hubReported !== "number" || !Number.isFinite(hubReported) || hubReported <= 0) return local;
+  return Math.min(local, hubReported);
+}

@@ -232,6 +232,12 @@ npm install
 npm run dev   # or: npm run build && npm start
 ```
 
+`npm run typecheck` and `npm test` cover the parts that are cheap to check
+without a live Slack workspace — attachment limits, the outbound-file rules,
+denied-write correlation, and the download size guard. The parts that need a
+real terminal (prompt submission, permission prompts) are verified by hand
+against a disposable herdr pane.
+
 ### Running a Hub (for more than one person)
 
 The Hub needs the same `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` as standalone
@@ -512,10 +518,17 @@ Two ways, both automatic — no command to remember:
   Add `.cctag/` to `.gitignore`. Uploaded files are left in place, and a file
   only re-uploads if it changes.
 
+  The directory is keyed by working directory, so if two panes are open on the
+  same repository *and* paired to different threads, cctag can't tell whose
+  file is whose — in that case it skips the outbox, says so in the thread, and
+  leaves the files on disk rather than posting them to the wrong place.
+
 - **Transcript-detected writes** — image/SVG/PDF files the agent writes with
-  the `Write` tool are picked up without any outbox involvement. Source files
-  and `.md` are deliberately excluded: the agent writes those constantly, and
-  uploading each one would bury the thread.
+  the `Write` tool are picked up without any outbox involvement. Only writes
+  the agent actually completed count: if you deny the permission prompt, the
+  file on disk is unchanged and cctag leaves it alone. Source files and `.md`
+  are deliberately excluded: the agent writes those constantly, and uploading
+  each one would bury the thread.
 
 ### Switching model
 

@@ -29,15 +29,36 @@ export type BlockedPrompt =
   | { kind: "question"; info: AskUserQuestionPaneInfo }
   | { kind: "permission"; menu: PermissionMenu | null; isPlanPrompt: boolean; planFeedbackOptionNum?: number };
 
+/** A file-write the agent *asked* for, not yet known to have happened. */
+export interface WriteRequest {
+  toolUseId: string;
+  path: string;
+}
+
+/** How a tool use ended. `ok: false` covers both an outright failure and a
+ *  human denying the permission prompt — neither of which changed the file. */
+export interface ToolOutcome {
+  toolUseId: string;
+  ok: boolean;
+}
+
 export interface TurnOutput {
   texts: string[];
   toolNames: string[];
-  /** Absolute paths of files the agent wrote during the turn, as reported by its
-   *  transcript. Candidates for auto-upload to the thread — TurnEngine narrows
-   *  them to the types worth attaching. Absent when the driver can't tell (see
-   *  the Codex driver, whose file writes go through shell commands whose target
-   *  paths aren't recoverable from the transcript). */
-  attachmentPaths?: string[];
+  /**
+   * File writes the agent requested, keyed by tool-use id.
+   *
+   * Deliberately NOT "files that were written": a write and its outcome are
+   * separate transcript records that routinely land in different poll batches,
+   * and a denied write leaves the *existing* file untouched — uploading on the
+   * request alone would exfiltrate a file the human just refused to overwrite.
+   * WrittenFileTracker pairs these with `toolOutcomes` and only surfaces
+   * confirmed writes. Absent when the driver can't tell (see the Codex driver,
+   * whose writes go through shell commands whose targets aren't recoverable).
+   */
+  writeRequests?: WriteRequest[];
+  /** Outcomes for tool uses seen in this or any earlier batch. */
+  toolOutcomes?: ToolOutcome[];
 }
 
 /** Shift+Tab-style mode ring (Claude Code only — Codex has no equivalent, so its driver's `modes` is null). */

@@ -15,6 +15,28 @@ function required(name: string): string {
 }
 
 /**
+ * Parses a numeric env var, refusing anything that wouldn't behave as a limit.
+ *
+ * `Number()` alone is not enough for values that guard a resource boundary:
+ * `Number("8MB")` is NaN, and every `size > NaN` comparison is false, so a typo
+ * silently removes the cap it was meant to tighten. An empty value is treated
+ * as unset rather than as 0, since `Number("")` is 0 and a 0-byte cap would
+ * reject every file instead of obviously failing.
+ */
+export function parsePositiveNumber(name: string, fallback: number, opts: { integer?: boolean } = {}): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a positive number, got "${raw}"`);
+  }
+  if (opts.integer && !Number.isInteger(value)) {
+    throw new Error(`${name} must be a whole number, got "${raw}"`);
+  }
+  return value;
+}
+
+/**
  * Caps on files moved in either direction. Both directions share one pair of
  * knobs on purpose — the binding constraint is the same either way: in
  * Hub–Spoke mode every file crosses the WebSocket RPC base64-encoded (~1.37x
@@ -22,8 +44,8 @@ function required(name: string): string {
  */
 function loadAttachmentConfig(): AttachmentLimits {
   return {
-    maxFileBytes: Number(process.env.CCTAG_MAX_FILE_MB ?? 8) * 1024 * 1024,
-    maxFileCount: Number(process.env.CCTAG_MAX_FILE_COUNT ?? 5),
+    maxFileBytes: parsePositiveNumber("CCTAG_MAX_FILE_MB", 8) * 1024 * 1024,
+    maxFileCount: parsePositiveNumber("CCTAG_MAX_FILE_COUNT", 5, { integer: true }),
   };
 }
 

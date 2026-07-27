@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import type { IncomingFile } from "../attachments.js";
+import type { AttachmentLimits, IncomingFile } from "../attachments.js";
 import { loadSpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
 import { PairingStore } from "../pairing.js";
@@ -9,7 +9,7 @@ import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
 import { WsRpc } from "../ws/rpc.js";
-import { WsNotifier } from "./notifier.js";
+import { narrowedMaxFileBytes, WsNotifier } from "./notifier.js";
 
 function wsUrlFor(hubUrl: string): string {
   return hubUrl.replace(/\/+$/, "") + "/spoke";
@@ -41,16 +41,19 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
     ws.on("open", async () => {
       const rpc = new WsRpc(ws);
       const notifier = new WsNotifier(rpc);
-      const turnEngine = new TurnEngine(herdr, notifier, {
-        turnTimeoutMs: config.turnTimeoutMs,
-        pollIntervalMs: config.pollIntervalMs,
+      // One object, shared by reference with the TurnEngine: registration below
+      // narrows maxFileBytes to the Hub's cap, and the engine has to see it.
+      const limits: AttachmentLimits = {
         maxFileBytes: config.maxFileBytes,
         maxFileCount: config.maxFileCount,
-      });
-      const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId, {
-        maxFileBytes: config.maxFileBytes,
-        maxFileCount: config.maxFileCount,
-      });
+      };
+      const turnEngine = new TurnEngine(
+        herdr,
+        notifier,
+        { turnTimeoutMs: config.turnTimeoutMs, pollIntervalMs: config.pollIntervalMs, limits },
+        pairingStore,
+      );
+      const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
       const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
       watcher.start();
       ws.once("close", () => watcher.stop());
@@ -110,7 +113,7 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       });
 
       try {
-        const result = await rpc.call<{ ok: boolean }>("register", {
+        const result = await rpc.call<{ ok: boolean; maxFileBytes?: number }>("register", {
           ownerUserId: config.ownerUserId,
           pairings: pairingStore.list().map((p) => ({ channel: p.channel, threadTs: p.threadTs })),
         });
@@ -119,6 +122,14 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
             "Hub rejected registration — this token is not authorized for CCTAG_OWNER_USER_ID " +
               `${config.ownerUserId}. Check that the token and owner ID were issued together.`,
           );
+        }
+        const narrowed = narrowedMaxFileBytes(limits.maxFileBytes, result.maxFileBytes);
+        if (narrowed !== limits.maxFileBytes) {
+          console.log(
+            `[spoke] file size cap narrowed to the Hub's ${(narrowed / 1024 / 1024).toFixed(1)}MB ` +
+              `(local setting was ${(limits.maxFileBytes / 1024 / 1024).toFixed(1)}MB)`,
+          );
+          limits.maxFileBytes = narrowed;
         }
         console.log("[spoke] registered with hub");
       } catch (err) {

@@ -340,12 +340,28 @@ What gets sent is decided by two routes:
   pane's thread. Uploaded files are left in place — consuming a directory the
   user also writes to is hard to undo — and the mtime/size comparison keeps an
   untouched file from being re-sent.
+
+  Per-cwd still leaves an ambiguity when **two panes share one cwd**. So
+  whenever the outbox has additions, cctag asks `herdr agent list` for every
+  pane's live cwd and checks whether another pairing points at the same one. If
+  one does — or if the listing can't be fetched — it skips the outbox, says why
+  in the thread, and leaves the files alone. Transcript detection is unaffected:
+  those paths come from this turn's own transcript.
 - **Transcript detection** — `Write` tool `file_path`s, narrowed to
   images/SVG/PDF. Only `Write` is inspected because it's the one tool whose
   input names its output. Files produced by Bash (a matplotlib PNG) leave no
   recoverable path in the transcript, which is exactly the gap the outbox
   convention fills. Source files and `.md` are excluded: the agent writes those
   constantly and uploading each one would bury the thread.
+
+  Crucially, **the `tool_use` alone must not be trusted.** A `Write` and its
+  result are separate records that routinely arrive in different poll batches,
+  and a denied `Write` leaves the existing file **completely unchanged** —
+  acting on the request alone would have cctag read and upload a file the human
+  just refused to overwrite (measured: a denial records `is_error: true` on the
+  `tool_result` and the file is byte-for-byte untouched). `WrittenFileTracker`
+  therefore correlates request and result by `tool_use_id` and only surfaces
+  **confirmed** writes.
 
 ### Hub–Spoke file flow and authorization
 
