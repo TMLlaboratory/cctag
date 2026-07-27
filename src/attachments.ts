@@ -83,6 +83,42 @@ export interface OutboundAttachment {
 /** name -> "mtimeMs:size", so a file that was rewritten in place still counts as new. */
 export type DirSnapshot = Record<string, string>;
 
+/**
+ * Pairs the agent's file-write requests with their outcomes, so only writes that
+ * actually happened become upload candidates.
+ *
+ * This has to be stateful rather than a per-batch filter: a `tool_use` and its
+ * `tool_result` land in separate transcript records and routinely arrive in
+ * different poll batches, so a batch-local check would miss the outcome and
+ * either drop every write or trust every one. Trusting every one is the
+ * dangerous direction — a denied Write leaves the *existing* file untouched, and
+ * uploading on the request alone would send a file the human just refused to
+ * overwrite (verified against a real denial: `is_error: true`, file unchanged).
+ *
+ * Ownership moves between the BackgroundWatcher and TurnEngine when a blocked
+ * terminal is adopted, so the instance is handed over rather than rebuilt.
+ */
+export class WrittenFileTracker {
+  private pending = new Map<string, string>();
+  private confirmed = new Set<string>();
+
+  ingest(output: { writeRequests?: Array<{ toolUseId: string; path: string }>; toolOutcomes?: Array<{ toolUseId: string; ok: boolean }> }): void {
+    for (const w of output.writeRequests ?? []) this.pending.set(w.toolUseId, w.path);
+    for (const o of output.toolOutcomes ?? []) {
+      const path = this.pending.get(o.toolUseId);
+      if (path === undefined) continue; // an outcome for some other tool
+      this.pending.delete(o.toolUseId);
+      if (o.ok) this.confirmed.add(path);
+    }
+  }
+
+  /** Confirmed writes only. A request whose outcome never arrived stays out —
+   *  the turn ending before the result is written means it didn't complete. */
+  paths(): string[] {
+    return [...this.confirmed];
+  }
+}
+
 function mb(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1);
 }

@@ -1,6 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { ToolOutcome, WriteRequest } from "../driver.js";
 
 // Claude Code encodes the project cwd into the transcript directory name by
 // replacing every non-alphanumeric character with "-". Verified empirically
@@ -60,6 +61,7 @@ interface ContentBlock {
   name?: string;
   input?: unknown;
   tool_use_id?: string;
+  is_error?: boolean;
   text?: string;
   content?: unknown;
 }
@@ -90,24 +92,46 @@ export function extractAssistantText(records: TranscriptRecord[]): string[] {
 }
 
 /**
- * Absolute paths the turn wrote via the Write tool.
+ * Write-tool calls the assistant made, paired with their tool-use ids.
  *
  * Only Write is inspected: it's the one tool whose input names its output file
  * outright. Files produced by Bash (a matplotlib script, an ImageMagick call)
  * aren't recoverable from the transcript at all, which is exactly the gap the
  * `.cctag/outbox` convention covers.
  */
-export function extractWrittenPaths(records: TranscriptRecord[]): string[] {
-  const paths: string[] = [];
+export function extractWriteRequests(records: TranscriptRecord[]): WriteRequest[] {
+  const requests: WriteRequest[] = [];
   for (const r of records) {
     if (r.type !== "assistant") continue;
     for (const block of contentBlocks(r)) {
-      if (block.type !== "tool_use" || block.name !== "Write") continue;
+      if (block.type !== "tool_use" || block.name !== "Write" || !block.id) continue;
       const filePath = (block.input as { file_path?: unknown } | undefined)?.file_path;
-      if (typeof filePath === "string" && filePath) paths.push(filePath);
+      if (typeof filePath === "string" && filePath) requests.push({ toolUseId: block.id, path: filePath });
     }
   }
-  return paths;
+  return requests;
+}
+
+/**
+ * Outcomes of tool uses, read off the `tool_result` blocks Claude Code writes
+ * back as `user` records.
+ *
+ * `is_error: true` is the failure signal, verified empirically against a real
+ * denied Write: rejecting the permission prompt records
+ * `is_error: true` with "The user doesn't want to proceed with this tool use"
+ * and leaves the target file byte-for-byte unchanged. Successful results either
+ * omit the field or set it to false, so anything not explicitly true counts as
+ * success.
+ */
+export function extractToolOutcomes(records: TranscriptRecord[]): ToolOutcome[] {
+  const outcomes: ToolOutcome[] = [];
+  for (const r of records) {
+    for (const block of contentBlocks(r)) {
+      if (block.type !== "tool_result" || !block.tool_use_id) continue;
+      outcomes.push({ toolUseId: block.tool_use_id, ok: block.is_error !== true });
+    }
+  }
+  return outcomes;
 }
 
 /** Human-readable one-line summaries of tool_use blocks, in order (for the status line). */

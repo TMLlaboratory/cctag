@@ -1,10 +1,17 @@
 import {
+  buildPromptWithAttachments,
+  countImages,
   isOutboundAttachable,
   outboxAdditions,
+  outboxDir,
   readOutboundAttachments,
+  saveIncomingFiles,
   snapshotOutbox,
+  WrittenFileTracker,
   type AttachmentLimits,
   type DirSnapshot,
+  type IncomingFile,
+  type SavedAttachment,
 } from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
 import type { Pairing } from "./pairing.js";
@@ -43,8 +50,8 @@ interface TurnState {
   /** `<cwd>/.cctag/outbox` as it looked when the turn began, so only what this
    *  turn put there gets uploaded. */
   outboxBaseline: DirSnapshot;
-  /** Attachable files the agent wrote during the turn, per its transcript. */
-  writtenPaths: Set<string>;
+  /** Files the agent wrote during the turn — confirmed writes only. */
+  writes: WrittenFileTracker;
   toolCounts: Record<string, number>;
   statusHandle: MessageHandle;
   lastStatusUpdateAt: number;
@@ -65,15 +72,21 @@ interface TurnState {
   planFeedbackOptionNum?: number;
 }
 
-export interface TurnEngineOptions extends AttachmentLimits {
+export interface TurnEngineOptions {
   turnTimeoutMs: number;
   pollIntervalMs: number;
+  /**
+   * Held by reference, not copied: in Hub–Spoke mode the Spoke narrows
+   * `maxFileBytes` to the Hub's own cap once registration reports it, and every
+   * holder of this object has to see that narrowing (see spoke/index.ts).
+   */
+  limits: AttachmentLimits;
 }
 
 export interface StartTurnOptions {
-  /** How many of the prompt's attachments are images. Non-zero switches the
-   *  submit to the retry loop below — see SUBMIT_RETRIES_WITH_IMAGES. */
-  imageCount?: number;
+  /** Files attached to the triggering Slack message. Downloaded inside
+   *  startTurn so the transfer happens under the pane reservation. */
+  files?: IncomingFile[];
 }
 
 /**
@@ -105,6 +118,13 @@ export interface BlockedTerminalHandoff {
   paneId: string;
   /** Live pane cwd — the adopted turn needs it to find the outbox. */
   cwd: string;
+  /** The watcher's outbox snapshot, NOT a fresh one: re-baselining at adoption
+   *  time would classify everything the agent produced before it blocked as
+   *  pre-existing, and none of it would ever be posted. */
+  outboxBaseline: DirSnapshot;
+  /** Write tracking so far, handed over rather than restarted for the same
+   *  reason — a write confirmed before the block still needs uploading. */
+  writes: WrittenFileTracker;
 }
 
 export class TurnEngine {
@@ -127,6 +147,9 @@ export class TurnEngine {
     private readonly herdr: HerdrClient,
     private readonly notifier: Notifier,
     private readonly opts: TurnEngineOptions,
+    /** Read (never mutated) to tell whether this pane's cwd is shared with
+     *  another paired thread — see uploadAttachments. */
+    private readonly pairings: { list(): Pairing[] },
   ) {}
 
   isBusy(paneId: string): boolean {
@@ -166,6 +189,20 @@ export class TurnEngine {
       }
       const driver = driverFor(agent.agent);
 
+      // Downloading happens here, inside the reservation, not in the caller:
+      // a several-megabyte transfer can take a minute, and doing it before the
+      // pane is reserved lets a later short message start its turn first and
+      // then reject this one as busy after all that work.
+      const files = opts.files ?? [];
+      const prepared = await this.prepareAttachments(pairing, files);
+      if (prepared === null) return; // attachments unusable here; already explained in-thread
+      if (files.length > 0 && prepared.saved.length === 0 && !text.trim()) return; // nothing left to send
+      // A bare attachment with no words still has to say *something*, or the
+      // agent gets a prompt that is only a file path.
+      const promptText = prepared.saved.length
+        ? buildPromptWithAttachments(text.trim() || "添付されたファイルを確認してください。", prepared.saved)
+        : text;
+
       const sessionId = agent.sessionId ?? "";
       const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       const offset = tPath ? transcriptSizeSafe(tPath) : 0;
@@ -184,7 +221,7 @@ export class TurnEngine {
         offset,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
-        writtenPaths: new Set(),
+        writes: new WrittenFileTracker(),
         toolCounts: {},
         statusHandle,
         lastStatusUpdateAt: 0,
@@ -194,7 +231,7 @@ export class TurnEngine {
       };
       this.turns.set(paneId, state);
 
-      const normalized = text
+      const normalized = promptText
         .replace(/<@[^>|]+(\|[^>]+)?>/g, "")
         .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "$2 ($1)")
         .replace(/<(https?:\/\/[^>]+)>/g, "$1")
@@ -221,9 +258,19 @@ export class TurnEngine {
         // Image attachments make this the normal case rather than the rare one,
         // and one retry is no longer enough — see SUBMIT_RETRIES_WITH_IMAGES.
         await this.herdr.agentPrompt(paneId, normalized);
-        const retries = (opts.imageCount ?? 0) > 0 ? SUBMIT_RETRIES_WITH_IMAGES : 1;
+        // Retrying needs a stronger precondition than "the pane looks idle".
+        // A short turn can finish between two polls, and by then whoever is at
+        // the keyboard may have started typing the next prompt — a blind Enter
+        // would submit *their* draft. The transcript growing past the
+        // pre-submit offset means our prompt did land (Claude Code appends the
+        // user message on submit), so that's the signal to stop. Without a
+        // located transcript there's nothing to check against, so fall back to
+        // the single conservative retry this had before.
+        const canVerify = tPath !== "";
+        const retries = prepared.imageCount > 0 && canVerify ? SUBMIT_RETRIES_WITH_IMAGES : 1;
         for (let i = 0; i < retries; i++) {
           await sleep(this.opts.pollIntervalMs);
+          if (canVerify && transcriptSizeSafe(tPath) > offset) break; // submitted
           const recheck = await this.herdr.agentGet(paneId).catch(() => null);
           if (!recheck || (recheck.agentStatus !== "idle" && recheck.agentStatus !== "done")) break;
           await this.herdr.paneSendKeys(paneId, "Enter");
@@ -243,6 +290,53 @@ export class TurnEngine {
     } finally {
       this.reserving.delete(paneId);
     }
+  }
+
+  /**
+   * Downloads the message's attachments and works out how the prompt should
+   * read. Returns null when there's nothing left worth sending (every file
+   * rejected and no text to fall back on), having already explained why in the
+   * thread.
+   */
+  private async prepareAttachments(
+    pairing: Pairing,
+    files: IncomingFile[],
+  ): Promise<{ saved: SavedAttachment[]; imageCount: number } | null> {
+    if (files.length === 0) return { saved: [], imageCount: 0 };
+
+    const channel = pairing.channel;
+    const threadTs = pairing.threadTs ?? "";
+    const fetcher = this.notifier.fetchIncomingFile?.bind(this.notifier);
+    if (!fetcher) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ このモードでは添付ファイルを受け取れません。");
+      return null;
+    }
+
+    // A Hub older than attachment support answers "no handler for fetch_file"
+    // for every file. Left to saveIncomingFiles that reads as N separate
+    // "couldn't download" lines, which points at the wrong thing entirely.
+    let unsupported = false;
+    const { saved, skipped } = await saveIncomingFiles(
+      files,
+      async (f) => {
+        try {
+          return await fetcher(f);
+        } catch (err) {
+          if (!isUnsupportedByRemote(err)) throw err;
+          unsupported = true;
+          return null;
+        }
+      },
+      this.opts.limits,
+    );
+
+    if (unsupported) {
+      await this.notifier.postReply(channel, threadTs, "⚠️ Hubが添付ファイルに未対応です（Hub側の更新が必要です）。");
+    } else if (skipped.length > 0) {
+      await this.notifier.postReply(channel, threadTs, `⚠️ 添付をスキップしました:\n${skipped.map((s) => `• ${s}`).join("\n")}`);
+    }
+
+    return { saved, imageCount: countImages(saved) };
   }
 
   /**
@@ -281,8 +375,8 @@ export class TurnEngine {
         transcriptPath: handoff.transcriptPath,
         offset: handoff.offset,
         collected: [...handoff.collected],
-        outboxBaseline: snapshotOutbox(handoff.cwd),
-        writtenPaths: new Set(),
+        outboxBaseline: handoff.outboxBaseline,
+        writes: handoff.writes,
         toolCounts: {},
         statusHandle,
         lastStatusUpdateAt: 0,
@@ -399,12 +493,12 @@ export class TurnEngine {
       if (state.transcriptPath) {
         const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
         state.offset = newOffset;
-        const { texts, toolNames, attachmentPaths } = state.driver.extractTurnOutput(records);
-        state.collected.push(...texts);
-        for (const name of toolNames) {
+        const output = state.driver.extractTurnOutput(records);
+        state.collected.push(...output.texts);
+        for (const name of output.toolNames) {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
         }
-        for (const p of attachmentPaths ?? []) state.writtenPaths.add(p);
+        state.writes.ingest(output);
       }
 
       if (state.phase === "running") {
@@ -506,8 +600,21 @@ export class TurnEngine {
   private async finalize(paneId: string, warning?: string): Promise<void> {
     const state = this.turns.get(paneId);
     if (!state) return;
+    // Removing the TurnState is what makes the pane look free again, but this
+    // method still has to scan the outbox and read the files it finds. A turn
+    // starting in that window would write its own artifacts into the same
+    // directory and get them attributed to (and posted for) this one — so keep
+    // the pane busy until the uploads are done.
+    this.externallyBusy.add(paneId);
     this.turns.delete(paneId);
+    try {
+      await this.reportTurnResult(paneId, state, warning);
+    } finally {
+      this.externallyBusy.delete(paneId);
+    }
+  }
 
+  private async reportTurnResult(paneId: string, state: TurnState, warning?: string): Promise<void> {
     const elapsed = Math.round((Date.now() - state.startedAt) / 1000);
     const text = state.collected.join("\n\n").trim();
 
@@ -547,10 +654,10 @@ export class TurnEngine {
    * to know cctag exists).
    */
   private async attachOutboundFiles(state: TurnState): Promise<void> {
-    await this.uploadAttachments(state.pairing, state.cwd, [
-      ...outboxAdditions(state.cwd, state.outboxBaseline),
-      ...[...state.writtenPaths].filter(isOutboundAttachable),
-    ]);
+    await this.uploadAttachments(state.pairing, state.cwd, {
+      outboxBaseline: state.outboxBaseline,
+      writtenPaths: state.writes.paths(),
+    });
   }
 
   /**
@@ -564,17 +671,70 @@ export class TurnEngine {
    * Returns the outbox snapshot to keep as the next baseline, so a settled turn
    * that uploaded nothing new doesn't re-upload on the following tick.
    */
-  async uploadOutboxAdditions(pairing: Pairing, cwd: string, baseline: DirSnapshot): Promise<DirSnapshot> {
-    await this.uploadAttachments(pairing, cwd, outboxAdditions(cwd, baseline));
+  async uploadOutboxAdditions(
+    pairing: Pairing,
+    cwd: string,
+    baseline: DirSnapshot,
+    writtenPaths: string[] = [],
+  ): Promise<DirSnapshot> {
+    await this.uploadAttachments(pairing, cwd, { outboxBaseline: baseline, writtenPaths });
     return snapshotOutbox(cwd);
   }
 
-  private async uploadAttachments(pairing: Pairing, cwd: string, candidates: string[]): Promise<void> {
+  /**
+   * Whether `.cctag/outbox` under this cwd can be attributed to one thread.
+   *
+   * The directory is keyed by cwd, so two panes opened on the same repository
+   * and paired to different threads see each other's files as their own new
+   * additions and would each post the other's artifacts. herdr reports every
+   * pane's live cwd in one call, so the collision is detectable — and refusing
+   * the shared directory (files stay on disk) beats sending a thread something
+   * that was never meant for it. Transcript-detected writes are unaffected:
+   * those come from this turn's own transcript, so they're never ambiguous.
+   */
+  private async outboxOwnership(pairing: Pairing, cwd: string): Promise<{ sole: true } | { sole: false; reason: string }> {
+    const agents = await this.herdr.agentList().catch(() => null);
+    if (!agents) {
+      // Ownership can't be established, so it can't be assumed either.
+      return { sole: false, reason: "herdrのインスタンス一覧を取得できず、宛先スレッドを確認できませんでした" };
+    }
+    const cwdByPane = new Map(agents.map((a) => [a.paneId, a.cwd]));
+    const sharing = this.pairings.list().filter((p) => p.key !== pairing.key && cwdByPane.get(p.paneId) === cwd);
+    if (sharing.length === 0) return { sole: true };
+    return { sole: false, reason: "同じディレクトリに接続されたスレッドが他にもあり、どのスレッド宛てか判別できません" };
+  }
+
+  private async uploadAttachments(
+    pairing: Pairing,
+    cwd: string,
+    sources: { outboxBaseline: DirSnapshot; writtenPaths: string[] },
+  ): Promise<void> {
     const upload = this.notifier.uploadFile?.bind(this.notifier);
-    if (!upload || candidates.length === 0) return;
+    if (!upload) return;
 
     const threadTs = pairing.threadTs ?? "";
-    const { files, skipped } = readOutboundAttachments(candidates, this.opts, cwd);
+    const fromOutbox = outboxAdditions(cwd, sources.outboxBaseline);
+    const fromTranscript = sources.writtenPaths.filter(isOutboundAttachable);
+
+    let candidates = fromTranscript;
+    if (fromOutbox.length > 0) {
+      const ownership = await this.outboxOwnership(pairing, cwd);
+      if (ownership.sole) {
+        candidates = [...fromOutbox, ...fromTranscript];
+      } else {
+        await this.notifier
+          .postReply(
+            pairing.channel,
+            threadTs,
+            `⚠️ \`.cctag/outbox/\` の自動添付を見送りました（${ownership.reason}）。` +
+              `ファイルはそのまま残っています: ${outboxDir(cwd)}`,
+          )
+          .catch(() => {});
+      }
+    }
+    if (candidates.length === 0) return;
+
+    const { files, skipped } = readOutboundAttachments(candidates, this.opts.limits, cwd);
     for (const f of files) {
       try {
         await upload(pairing.channel, threadTs, {

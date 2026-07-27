@@ -24,17 +24,15 @@ export function buildApp(config: Config) {
     socketMode: true,
   });
 
-  const notifier = new SlackNotifier(app.client, config.slackBotToken);
-  const turnEngine = new TurnEngine(herdr, notifier, {
-    turnTimeoutMs: config.turnTimeoutMs,
-    pollIntervalMs: config.pollIntervalMs,
-    maxFileBytes: config.maxFileBytes,
-    maxFileCount: config.maxFileCount,
-  });
-  const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId, {
-    maxFileBytes: config.maxFileBytes,
-    maxFileCount: config.maxFileCount,
-  });
+  const limits = { maxFileBytes: config.maxFileBytes, maxFileCount: config.maxFileCount };
+  const notifier = new SlackNotifier(app.client, config.slackBotToken, limits);
+  const turnEngine = new TurnEngine(
+    herdr,
+    notifier,
+    { turnTimeoutMs: config.turnTimeoutMs, pollIntervalMs: config.pollIntervalMs, limits },
+    pairingStore,
+  );
+  const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
   new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier).start();
 
   app.event("app_mention", async ({ event }) => {

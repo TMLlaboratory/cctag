@@ -12,8 +12,9 @@ import {
 } from "./prompts.js";
 import {
   extractAssistantText,
+  extractToolOutcomes,
   extractToolUseSummaries,
-  extractWrittenPaths,
+  extractWriteRequests,
   locateClaudeTranscript,
   type TranscriptRecord,
 } from "./transcript.js";
@@ -88,7 +89,8 @@ export const claudeDriver: AgentDriver = {
     return {
       texts: extractAssistantText(r),
       toolNames: extractToolUseSummaries(r),
-      attachmentPaths: extractWrittenPaths(r),
+      writeRequests: extractWriteRequests(r),
+      toolOutcomes: extractToolOutcomes(r),
     };
   },
 

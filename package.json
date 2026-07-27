@@ -17,6 +17,7 @@
     "start:hub": "node dist/hub/index.js",
     "start:spoke": "node dist/spoke/index.js",
     "token": "tsx src/hub/index.ts token",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

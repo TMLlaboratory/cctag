@@ -1,5 +1,5 @@
 import type { WebClient } from "@slack/web-api";
-import type { IncomingFile } from "../attachments.js";
+import type { AttachmentLimits, IncomingFile } from "../attachments.js";
 import type { MessageHandle, Notifier } from "../notifier.js";
 import { stripComposerAttribution } from "../commands.js";
 
@@ -9,6 +9,8 @@ export class SlackNotifier implements Notifier {
   constructor(
     private readonly client: WebClient,
     private readonly token: string,
+    /** Held by reference so it stays in step with the engine's own cap. */
+    private readonly limits: AttachmentLimits,
   ) {}
 
   private async getBotUserId(): Promise<string | undefined> {
@@ -76,7 +78,7 @@ export class SlackNotifier implements Notifier {
   }
 
   async fetchIncomingFile(file: IncomingFile): Promise<string | null> {
-    return downloadSlackFile(this.client, this.token, file);
+    return downloadSlackFile(this.client, this.token, file, this.limits.maxFileBytes);
   }
 }
 
@@ -104,16 +106,24 @@ export async function uploadBinaryFile(
 }
 
 /**
- * Downloads a Slack-hosted file. Shared by the standalone notifier and the
- * Hub's `fetch_file` RPC handler — both hold the bot token, which
+ * Downloads a Slack-hosted file, refusing to hold more than `maxBytes` of it in
+ * memory at any point. Shared by the standalone notifier and the Hub's
+ * `fetch_file` RPC handler — both hold the bot token, which
  * `url_private_download` requires as a bearer header (the URL alone returns
  * an HTML sign-in page, not the bytes, and does so with a 200, hence the
  * content-type check).
+ *
+ * The cap is enforced *while* reading rather than after: `arrayBuffer()` would
+ * materialize the whole response first, so a file whose event metadata reported
+ * no size (or lied about it) could exhaust memory before any check ran — the
+ * Hub relays every Spoke's transfers, so that is a shared-process risk, not
+ * just a local one.
  */
 export async function downloadSlackFile(
   client: WebClient,
   botToken: string,
   file: IncomingFile,
+  maxBytes: number,
 ): Promise<string | null> {
   let url = file.downloadUrl;
   if (!url) {
@@ -133,7 +143,30 @@ export async function downloadSlackFile(
     console.error(`[slack] file download for ${file.name} returned a sign-in page — check the files:read scope`);
     return null;
   }
-  return Buffer.from(await res.arrayBuffer()).toString("base64");
+
+  // Cheapest rejection first: a declared length over the cap needs no transfer.
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    console.error(`[slack] refused ${file.name}: content-length ${declared} exceeds the ${maxBytes}-byte cap`);
+    return null;
+  }
+  if (!res.body) return null;
+
+  const chunks: Buffer[] = [];
+  let total = 0;
+  const reader = res.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      console.error(`[slack] refused ${file.name}: stream exceeded the ${maxBytes}-byte cap`);
+      return null;
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString("base64");
 }
 
 interface RepliesMessage {
