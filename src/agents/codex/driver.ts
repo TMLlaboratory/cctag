@@ -1,6 +1,13 @@
 import type { HerdrClient } from "../../herdr/client.js";
 import type { AgentDriver, BlockedPrompt } from "../driver.js";
-import { effortLevelKey, findCursorRowNum, isEffortListScreen, modelNameKey, parseCodexMenu } from "./prompts.js";
+import {
+  effortLevelKey,
+  findCursorRowNum,
+  isEffortListScreen,
+  modelNameKey,
+  parseCodexMenu,
+  parseCodexTrustPrompt,
+} from "./prompts.js";
 import { extractCodexTurnOutput, locateCodexTranscript, type CodexRecord } from "./transcript.js";
 
 function sleep(ms: number): Promise<void> {
@@ -76,6 +83,8 @@ export const codexDriver: AgentDriver = {
   extractTurnOutput(records) {
     return extractCodexTurnOutput(records as CodexRecord[]);
   },
+
+  parseTrustPrompt: parseCodexTrustPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
     // Codex has no AskUserQuestion-equivalent tool and no plan mode — every

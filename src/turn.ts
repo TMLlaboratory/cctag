@@ -208,6 +208,41 @@ export class TurnEngine {
       const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       const offset = tPath ? transcriptSizeSafe(tPath) : 0;
 
+      // A pane sitting at the startup directory-trust dialog reports `idle`,
+      // so nothing above this catches it, and submitting anyway is actively
+      // harmful: the prompt text is swallowed by the menu and the Enter that
+      // follows confirms whatever option is selected — which is "yes, I trust
+      // this" — so cctag would grant that trust on the strength of a Slack
+      // message arriving, then report a transcript it never got. Reproduced
+      // against Codex 0.147.0: the dialog closes, the box is empty, no turn
+      // runs, no session file is written.
+      //
+      // Deliberately NOT auto-answered. The dialog guards against prompt
+      // injection from untrusted directory contents, and that decision isn't
+      // cctag's to make on the user's behalf — it belongs to whoever can see
+      // what's actually in the directory.
+      //
+      // Only checked when no transcript could be located, which is the
+      // signature of a pane no turn has ever run in. Established panes skip
+      // the extra pane read entirely, so this costs nothing on the hot path.
+      if (!tPath && driver.parseTrustPrompt) {
+        const paneText = await this.herdr
+          .paneRead(agent.paneId, { source: driver.paneReadSource, lines: 40 })
+          .catch(() => "");
+        const question = paneText ? driver.parseTrustPrompt(paneText) : null;
+        if (question) {
+          await this.notifier.postReply(
+            pairing.channel,
+            pairing.threadTs ?? "",
+            `⚠️ ペインが起動時の信頼確認ダイアログで停止しています。ターミナルで応答してください。\n` +
+              `> ${question}\n` +
+              `cctagは代わりに答えません（ディレクトリの内容を確認できる人が判断すべき項目です）。` +
+              `応答後にもう一度送ってください。`,
+          );
+          return;
+        }
+      }
+
       const statusHandle = await this.notifier.postMessage(pairing.channel, pairing.threadTs ?? "", "⚙️ 実行中…");
 
       const state: TurnState = {
@@ -641,7 +676,17 @@ export class TurnEngine {
     // that the agent replied with nothing. Surface it distinctly so this
     // doesn't get misread as a normal silent completion.
     if (!text && !warning && !state.transcriptPath) {
-      warning = "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（herdrがsessionIdを報告できていない可能性があります）。";
+      // The likely cause differs by agent, and naming the wrong one sends
+      // whoever reads this down the wrong path. herdr does report a sessionId
+      // for Claude Code (via its SessionStart hook), so its absence is worth
+      // suspecting there. It never reports one for Codex — the cwd scan is the
+      // normal route — so for Codex the answer is almost always that no turn
+      // ever started in the pane, since Codex only writes its session file once
+      // one does.
+      warning =
+        state.driver.kind === "codex"
+          ? "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（ペインでターンが開始されなかった可能性があります。Codexはターンが走るまでセッションファイルを作りません）。"
+          : "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（herdrがsessionIdを報告できていない可能性があります）。";
     }
     if (warning) {
       await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", warning);

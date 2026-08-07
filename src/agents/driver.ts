@@ -110,6 +110,17 @@ export interface AgentDriver {
 
   /** Classifies what a `blocked` pane is currently showing. */
   parseBlockedPane(paneText: string): BlockedPrompt;
+  /**
+   * The startup "do you trust this directory?" dialog, or null if the pane
+   * isn't showing one. Returns the question text for quoting back to the user.
+   *
+   * Needed separately from `parseBlockedPane` because herdr reports this pane
+   * as `idle`, not `blocked` — verified against Codex 0.147.0 and Claude Code,
+   * both of which sit at this dialog with `agent_status: idle` and
+   * `interactive_ready: true`. Ordinary permission menus do flip to `blocked`,
+   * so this is the one state that needs looking for rather than waiting for.
+   */
+  parseTrustPrompt?(paneText: string): string | null;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */

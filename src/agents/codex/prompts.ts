@@ -126,3 +126,21 @@ export function stripCodexFooterChrome(raw: string): string {
   while (end > 0 && !lines[end - 1].trim()) end--;
   return lines.slice(0, end).join("\n").trim();
 }
+
+/**
+ * Codex CLI's startup directory-trust dialog.
+ *
+ * Verified text (0.147.0):
+ *   Do you trust the contents of this directory? Working with untrusted
+ *   contents comes with higher risk of prompt injection. ...
+ *   › 1. Yes, continue
+ *     2. No, quit
+ *
+ * Both the question and the affirmative option have to be present: the phrase
+ * alone could easily appear in ordinary agent output discussing trust.
+ */
+export function parseCodexTrustPrompt(paneText: string): string | null {
+  if (!/Do you trust the contents of this directory\?/i.test(paneText)) return null;
+  if (!/\bYes,\s*continue\b/i.test(paneText)) return null;
+  return "Do you trust the contents of this directory?";
+}

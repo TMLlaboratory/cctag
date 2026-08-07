@@ -244,3 +244,20 @@ export function stripFooterChrome(raw: string): string {
   while (end > 0 && !lines[end - 1].trim()) end--;
   return lines.slice(0, end).join("\n").trim();
 }
+
+/**
+ * Claude Code's startup folder-trust dialog.
+ *
+ * Verified text:
+ *   Quick safety check: Is this a project you created or one you trust? ...
+ *   ❯ 1. Yes, I trust this folder
+ *     2. No, exit
+ *
+ * Same reasoning as the Codex equivalent: require the question *and* the
+ * affirmative option, so prose mentioning trust doesn't trip it.
+ */
+export function parseClaudeTrustPrompt(paneText: string): string | null {
+  if (!/Is this a project you created or one you trust\?/i.test(paneText)) return null;
+  if (!/I trust this folder/i.test(paneText)) return null;
+  return "Is this a project you created or one you trust?";
+}
