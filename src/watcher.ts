@@ -3,6 +3,7 @@ import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { snapshotOutbox, WrittenFileTracker, type DirSnapshot } from "./attachments.js";
+import { postSegmented } from "./slack/post.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
@@ -160,11 +161,13 @@ export class BackgroundWatcher {
       if (state.collected.length > 0) {
         const text = state.collected.join("\n\n").trim();
         if (text) {
-          const chunks = chunkForSlack(markdownToMrkdwn(text));
-          for (const [i, chunk] of chunks.entries()) {
-            const prefixed = i === 0 ? `🖥️ ターミナル側で応答を検出しました:\n${chunk}` : chunk;
-            await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", prefixed);
-          }
+          await postSegmented(
+            this.notifier,
+            pairing.channel,
+            pairing.threadTs ?? "",
+            text,
+            "🖥️ ターミナル側で応答を検出しました:",
+          );
         }
         state.collected = [];
       }

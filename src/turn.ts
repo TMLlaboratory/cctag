@@ -20,6 +20,7 @@ import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./noti
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
+import { postSegmented } from "./slack/post.js";
 import {
   askUserQuestionAnsweredText,
   askUserQuestionBlocks,
@@ -632,10 +633,7 @@ export class TurnEngine {
     const text = state.collected.join("\n\n").trim();
 
     if (text) {
-      const mrkdwn = markdownToMrkdwn(text);
-      for (const chunk of chunkForSlack(mrkdwn)) {
-        await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", chunk);
-      }
+      await postSegmented(this.notifier, state.pairing.channel, state.pairing.threadTs ?? "", text);
     }
     // No text collected and the transcript was never located at all (as
     // opposed to located-but-genuinely-empty) — almost always means herdr

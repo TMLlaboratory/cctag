@@ -1,6 +1,7 @@
 import type { AgentInfo } from "../herdr/types.js";
 import type { AskUserQuestionPaneInfo, PermissionMenu } from "../agents/driver.js";
 import { isDangerousSnippet, isRefusalLabel } from "../agents/driver.js";
+import type { MarkdownTable } from "./mrkdwn.js";
 
 const STATUS_ICON: Record<string, string> = {
   idle: "🟢",
@@ -165,4 +166,72 @@ export function permissionParseFailureBlocks(paneId: string, promptId: number, r
       ],
     },
   ];
+}
+
+// --- Markdown tables as Block Kit table blocks ------------------------------
+//
+// Documented caps for a table block. Verified empirically that the two limits
+// folklore also claims — one table per message, and a table having to be the
+// last block — do NOT exist: [section, table, section, table] and
+// [section, table, section] both post fine. So prose and tables interleave in
+// one message and only these caps force a fallback.
+const TABLE_MAX_ROWS = 100;
+const TABLE_MAX_COLS = 20;
+const TABLE_MAX_CHARS = 10_000;
+
+/**
+ * Inline Markdown inside one cell, as rich_text elements.
+ *
+ * Bold, italic, code and links all render inside a cell — verified against a
+ * live workspace, contrary to references claiming cells are plain text only.
+ * Code spans are matched first so formatting characters inside `like_this`
+ * stay literal.
+ */
+function cellElements(md: string): unknown[] {
+  const elements: unknown[] = [];
+  const pattern = /`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|_([^_]+)_/g;
+  let last = 0;
+  for (let m = pattern.exec(md); m !== null; m = pattern.exec(md)) {
+    if (m.index > last) elements.push({ type: "text", text: md.slice(last, m.index) });
+    if (m[1] !== undefined) elements.push({ type: "text", text: m[1], style: { code: true } });
+    else if (m[2] !== undefined) elements.push({ type: "link", url: m[3], text: m[2] });
+    else if (m[4] !== undefined) elements.push({ type: "text", text: m[4], style: { bold: true } });
+    else if (m[5] !== undefined) elements.push({ type: "text", text: m[5], style: { italic: true } });
+    else if (m[6] !== undefined) elements.push({ type: "text", text: m[6], style: { italic: true } });
+    last = m.index + m[0].length;
+  }
+  if (last < md.length) elements.push({ type: "text", text: md.slice(last) });
+  // An empty cell still needs a node, or the row is ragged to Slack.
+  if (elements.length === 0) elements.push({ type: "text", text: " " });
+  return elements;
+}
+
+function cell(md: string): unknown {
+  return { type: "rich_text", elements: [{ type: "rich_text_section", elements: cellElements(md) }] };
+}
+
+/**
+ * A table block for `table`, or null when it exceeds what a table block holds.
+ *
+ * Returning null rather than throwing or truncating is deliberate: the caller
+ * falls back to posting the table as ordinary mrkdwn text, which is ugly but
+ * loses nothing. Silently dropping rows would be the worst outcome — the reader
+ * can't tell a trimmed table from a complete one.
+ */
+export function markdownTableBlock(table: MarkdownTable): unknown | null {
+  const all = [table.header, ...table.rows];
+  if (all.length === 0 || table.header.length === 0) return null;
+  if (all.length > TABLE_MAX_ROWS || table.header.length > TABLE_MAX_COLS) return null;
+  const chars = all.reduce((sum, row) => sum + row.reduce((n, c) => n + c.length, 0), 0);
+  if (chars > TABLE_MAX_CHARS) return null;
+  return { type: "table", rows: all.map((row) => row.map(cell)) };
+}
+
+/** The mrkdwn fallback for a table too big for a table block: a monospace grid,
+ *  which at least keeps the columns readable. */
+export function markdownTableFallback(table: MarkdownTable): string {
+  const all = [table.header, ...table.rows];
+  const widths = table.header.map((_, i) => Math.max(...all.map((r) => (r[i] ?? "").length)));
+  const line = (row: string[]): string => row.map((c, i) => (c ?? "").padEnd(widths[i])).join("  ").trimEnd();
+  return ["```", line(table.header), widths.map((w) => "-".repeat(w)).join("  "), ...table.rows.map(line), "```"].join("\n");
 }
