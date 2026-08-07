@@ -1,6 +1,6 @@
 display_information:
   name: cctag
-  description: Claude Code TUI bridge (local machine / herdr)
+  description: Coding-agent TUI bridge — Claude Code / Codex CLI (local machine / herdr)
   background_color: "#2b2d31"
 features:
   bot_user:
