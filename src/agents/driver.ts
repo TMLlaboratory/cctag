@@ -35,6 +35,23 @@ export interface WriteRequest {
   path: string;
 }
 
+/**
+ * Files the agent explicitly asked to hand to the user (Claude Code's
+ * `SendUserFile`), not yet known to have succeeded.
+ *
+ * Distinct from `WriteRequest` because the intent is different, and that
+ * difference decides how the paths are treated downstream: a write is merely
+ * "a file changed", so it stays bounded by an extension allowlist, while this
+ * is an explicit "send this" and takes any file type. One tool use names
+ * several files, hence `paths` rather than `path`.
+ */
+export interface SendFileRequest {
+  toolUseId: string;
+  paths: string[];
+  /** The tool's own `caption`, used as the upload comment when present. */
+  caption?: string;
+}
+
 /** How a tool use ended. `ok: false` covers both an outright failure and a
  *  human denying the permission prompt — neither of which changed the file. */
 export interface ToolOutcome {
@@ -57,6 +74,16 @@ export interface TurnOutput {
    * whose writes go through shell commands whose targets aren't recoverable).
    */
   writeRequests?: WriteRequest[];
+  /**
+   * `SendUserFile` calls the agent made — the explicit "send this to the user"
+   * signal, and the route we prefer over inferring intent from writes.
+   *
+   * Paired with `toolOutcomes` by the same tracker and for the same reason: a
+   * `SendUserFile` whose permission prompt was denied must not be uploaded.
+   * Absent for drivers with no equivalent tool (Codex), which is why
+   * `.cctag/outbox` has to stay as their route.
+   */
+  sendFileRequests?: SendFileRequest[];
   /** Outcomes for tool uses seen in this or any earlier batch. */
   toolOutcomes?: ToolOutcome[];
 }

@@ -10,6 +10,7 @@ import {
   WrittenFileTracker,
   type AttachmentLimits,
   type DirSnapshot,
+  type OutboundCandidate,
   type IncomingFile,
   type SavedAttachment,
 } from "./attachments.js";
@@ -668,7 +669,7 @@ export class TurnEngine {
   private async attachOutboundFiles(state: TurnState): Promise<void> {
     await this.uploadAttachments(state.pairing, state.cwd, {
       outboxBaseline: state.outboxBaseline,
-      writtenPaths: state.writes.paths(),
+      confirmed: state.writes.paths(),
     });
   }
 
@@ -687,9 +688,9 @@ export class TurnEngine {
     pairing: Pairing,
     cwd: string,
     baseline: DirSnapshot,
-    writtenPaths: string[] = [],
+    confirmed: OutboundCandidate[] = [],
   ): Promise<DirSnapshot> {
-    await this.uploadAttachments(pairing, cwd, { outboxBaseline: baseline, writtenPaths });
+    await this.uploadAttachments(pairing, cwd, { outboxBaseline: baseline, confirmed });
     return snapshotOutbox(cwd);
   }
 
@@ -719,20 +720,27 @@ export class TurnEngine {
   private async uploadAttachments(
     pairing: Pairing,
     cwd: string,
-    sources: { outboxBaseline: DirSnapshot; writtenPaths: string[] },
+    sources: { outboxBaseline: DirSnapshot; confirmed: OutboundCandidate[] },
   ): Promise<void> {
     const upload = this.notifier.uploadFile?.bind(this.notifier);
     if (!upload) return;
 
     const threadTs = pairing.threadTs ?? "";
-    const fromOutbox = outboxAdditions(cwd, sources.outboxBaseline);
-    const fromTranscript = sources.writtenPaths.filter(isOutboundAttachable);
+    const fromOutbox: OutboundCandidate[] = outboxAdditions(cwd, sources.outboxBaseline).map((path) => ({
+      path,
+      origin: "outbox" as const,
+    }));
+    // Only the write route is bounded by extension: a SendUserFile call is an
+    // explicit "deliver this" and may name a .csv, a .xlsx, anything.
+    const fromTranscript = sources.confirmed.filter((c) => c.origin !== "write" || isOutboundAttachable(c.path));
 
     let candidates = fromTranscript;
     if (fromOutbox.length > 0) {
       const ownership = await this.outboxOwnership(pairing, cwd);
       if (ownership.sole) {
-        candidates = [...fromOutbox, ...fromTranscript];
+        // Transcript entries first, so their caption survives dedup against the
+        // same file also sitting in the outbox.
+        candidates = [...fromTranscript, ...fromOutbox];
       } else {
         await this.notifier
           .postReply(
@@ -752,7 +760,9 @@ export class TurnEngine {
         await upload(pairing.channel, threadTs, {
           contentB64: f.contentB64,
           filename: f.name,
-          comment: `📎 ${f.name}`,
+          // The agent's own caption when it gave one — it says why the file is
+          // here, which the filename alone doesn't.
+          comment: f.caption ? `📎 ${f.caption}` : `📎 ${f.name}`,
         });
       } catch (err) {
         // Hub and Spoke ship independently: a Hub without upload_file support

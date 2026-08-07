@@ -41,7 +41,7 @@ test("WrittenFileTracker keeps a write confirmed in a later poll batch", () => {
   tracker.ingest({ writeRequests: [{ toolUseId: "toolu_ok", path: "/out/chart.png" }] });
   assert.deepEqual(tracker.paths(), [], "not yet confirmed");
   tracker.ingest({ toolOutcomes: [{ toolUseId: "toolu_ok", ok: true }] });
-  assert.deepEqual(tracker.paths(), ["/out/chart.png"]);
+  assert.deepEqual(tracker.paths(), [{ path: "/out/chart.png", origin: "write" }]);
 });
 
 test("WrittenFileTracker excludes a write whose outcome never arrived", () => {
@@ -132,16 +132,25 @@ test("readOutboundAttachments dedupes a path reached by both outbound routes", (
   mkdirSync(box, { recursive: true });
   const p = join(box, "chart.png");
   writeFileSync(p, "png-bytes");
-  // The same file arrives from the outbox scan and from transcript detection.
-  const { files } = readOutboundAttachments([p, p], LIMITS, cwd);
+  // The same file arrives from SendUserFile and from the outbox scan. The
+  // captioned entry is ordered first, which is how turn.ts feeds them.
+  const { files } = readOutboundAttachments(
+    [
+      { path: p, origin: "send", caption: "グラフです" },
+      { path: p, origin: "outbox" },
+    ],
+    LIMITS,
+    cwd,
+  );
   assert.equal(files.length, 1);
   assert.equal(files[0].name, "chart.png");
+  assert.equal(files[0].caption, "グラフです", "dedup must keep the caption, not the bare duplicate");
 });
 
 test("readOutboundAttachments resolves relative paths against the agent's cwd", () => {
   const cwd = scratch();
   writeFileSync(join(cwd, "rel.png"), "x");
-  const { files } = readOutboundAttachments(["rel.png"], LIMITS, cwd);
+  const { files } = readOutboundAttachments([{ path: "rel.png", origin: "send" }], LIMITS, cwd);
   assert.equal(files.length, 1);
   assert.equal(files[0].path, join(cwd, "rel.png"));
 });
@@ -149,6 +158,13 @@ test("readOutboundAttachments resolves relative paths against the agent's cwd", 
 test("readOutboundAttachments skips missing and empty files", () => {
   const cwd = scratch();
   writeFileSync(join(cwd, "empty.png"), "");
-  const { files } = readOutboundAttachments([join(cwd, "empty.png"), join(cwd, "gone.png")], LIMITS, cwd);
+  const { files } = readOutboundAttachments(
+    [
+      { path: join(cwd, "empty.png"), origin: "send" },
+      { path: join(cwd, "gone.png"), origin: "send" },
+    ],
+    LIMITS,
+    cwd,
+  );
   assert.deepEqual(files, []);
 });

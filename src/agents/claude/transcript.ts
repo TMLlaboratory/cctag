@@ -1,7 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ToolOutcome, WriteRequest } from "../driver.js";
+import type { SendFileRequest, ToolOutcome, WriteRequest } from "../driver.js";
 
 // Claude Code encodes the project cwd into the transcript directory name by
 // replacing every non-alphanumeric character with "-". Verified empirically
@@ -107,6 +107,38 @@ export function extractWriteRequests(records: TranscriptRecord[]): WriteRequest[
       if (block.type !== "tool_use" || block.name !== "Write" || !block.id) continue;
       const filePath = (block.input as { file_path?: unknown } | undefined)?.file_path;
       if (typeof filePath === "string" && filePath) requests.push({ toolUseId: block.id, path: filePath });
+    }
+  }
+  return requests;
+}
+
+/**
+ * `SendUserFile` calls the assistant made — the agent saying outright which
+ * files it wants delivered, rather than cctag inferring it from writes.
+ *
+ * Verified against a live pane: the tool is absent in `claude -p` (headless)
+ * but present in the interactive TUI cctag drives, and a successful call
+ * records `input: { files: [...], caption, status }` plus a `tool_result`
+ * naming each delivered file. Only `input.files` is read — the result text
+ * carries absolute paths but in an undocumented human-readable format, so the
+ * relative paths are resolved against the pane's cwd instead (the result is
+ * used only for its success/failure bit, via extractToolOutcomes).
+ *
+ * Non-string and empty entries are dropped rather than trusted: `files` comes
+ * straight from model output.
+ */
+export function extractSendUserFileRequests(records: TranscriptRecord[]): SendFileRequest[] {
+  const requests: SendFileRequest[] = [];
+  for (const r of records) {
+    if (r.type !== "assistant") continue;
+    for (const block of contentBlocks(r)) {
+      if (block.type !== "tool_use" || block.name !== "SendUserFile" || !block.id) continue;
+      const input = block.input as { files?: unknown; caption?: unknown } | undefined;
+      const raw = Array.isArray(input?.files) ? input.files : [];
+      const paths = raw.filter((p): p is string => typeof p === "string" && p.length > 0);
+      if (paths.length === 0) continue;
+      const caption = typeof input?.caption === "string" && input.caption.trim() ? input.caption.trim() : undefined;
+      requests.push({ toolUseId: block.id, paths, caption });
     }
   }
   return requests;

@@ -12,6 +12,7 @@ import {
 } from "./prompts.js";
 import {
   extractAssistantText,
+  extractSendUserFileRequests,
   extractToolOutcomes,
   extractToolUseSummaries,
   extractWriteRequests,
@@ -90,6 +91,7 @@ export const claudeDriver: AgentDriver = {
       texts: extractAssistantText(r),
       toolNames: extractToolUseSummaries(r),
       writeRequests: extractWriteRequests(r),
+      sendFileRequests: extractSendUserFileRequests(r),
       toolOutcomes: extractToolOutcomes(r),
     };
   },

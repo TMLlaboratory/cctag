@@ -78,44 +78,102 @@ export interface OutboundAttachment {
   path: string;
   name: string;
   contentB64: string;
+  /** Carried through from SendUserFile's `caption`; absent for the write and
+   *  outbox routes, which have no caption to carry. */
+  caption?: string;
 }
 
 /** name -> "mtimeMs:size", so a file that was rewritten in place still counts as new. */
 export type DirSnapshot = Record<string, string>;
 
 /**
- * Pairs the agent's file-write requests with their outcomes, so only writes that
- * actually happened become upload candidates.
+ * Where an outbound candidate came from, which is what decides whether the
+ * extension allowlist applies to it.
+ *
+ * `write` is inferred intent — the agent changed a file, which is not the same
+ * as asking for it to be sent — so it stays bounded by OUTBOUND_EXTS. `send`
+ * (SendUserFile) and `outbox` are both explicit "deliver this", so they take
+ * any file type.
+ */
+export type OutboundOrigin = "write" | "send" | "outbox";
+
+/** One file to consider uploading. Deliberately flat — one entry per file, never
+ *  grouped by caption or tool use: the size/count caps and the dedup downstream
+ *  both count entries, and nesting would make them silently miscount. */
+export interface OutboundCandidate {
+  path: string;
+  origin: OutboundOrigin;
+  /** SendUserFile's own caption, used as the upload comment when present. */
+  caption?: string;
+}
+
+/**
+ * Pairs the agent's outbound file requests with their outcomes, so only requests
+ * that actually succeeded become upload candidates.
  *
  * This has to be stateful rather than a per-batch filter: a `tool_use` and its
  * `tool_result` land in separate transcript records and routinely arrive in
  * different poll batches, so a batch-local check would miss the outcome and
- * either drop every write or trust every one. Trusting every one is the
+ * either drop every request or trust every one. Trusting every one is the
  * dangerous direction — a denied Write leaves the *existing* file untouched, and
  * uploading on the request alone would send a file the human just refused to
  * overwrite (verified against a real denial: `is_error: true`, file unchanged).
+ * The same reasoning covers a denied `SendUserFile`.
+ *
+ * Both routes are tracked here at once, on purpose: `SendUserFile` is the
+ * intended long-term route but its availability outside an app-paired session
+ * rests on a single probe, so Write detection stays as the fallback until
+ * production confirms the tool actually fires (see issue #2).
  *
  * Ownership moves between the BackgroundWatcher and TurnEngine when a blocked
  * terminal is adopted, so the instance is handed over rather than rebuilt.
  */
 export class WrittenFileTracker {
-  private pending = new Map<string, string>();
-  private confirmed = new Set<string>();
+  /** tool_use_id -> the files that use would confirm, with their origin. */
+  private pending = new Map<string, OutboundCandidate[]>();
+  /** Keyed by path so the same file reached twice collapses to one upload. */
+  private confirmed = new Map<string, OutboundCandidate>();
 
-  ingest(output: { writeRequests?: Array<{ toolUseId: string; path: string }>; toolOutcomes?: Array<{ toolUseId: string; ok: boolean }> }): void {
-    for (const w of output.writeRequests ?? []) this.pending.set(w.toolUseId, w.path);
+  ingest(output: {
+    writeRequests?: Array<{ toolUseId: string; path: string }>;
+    sendFileRequests?: Array<{ toolUseId: string; paths: string[]; caption?: string }>;
+    toolOutcomes?: Array<{ toolUseId: string; ok: boolean }>;
+  }): void {
+    for (const w of output.writeRequests ?? []) {
+      this.pending.set(w.toolUseId, [{ path: w.path, origin: "write" }]);
+    }
+    for (const s of output.sendFileRequests ?? []) {
+      this.pending.set(
+        s.toolUseId,
+        s.paths.map((p) => ({ path: p, origin: "send" as const, caption: s.caption })),
+      );
+    }
     for (const o of output.toolOutcomes ?? []) {
-      const path = this.pending.get(o.toolUseId);
-      if (path === undefined) continue; // an outcome for some other tool
+      const entries = this.pending.get(o.toolUseId);
+      if (entries === undefined) continue; // an outcome for some other tool
       this.pending.delete(o.toolUseId);
-      if (o.ok) this.confirmed.add(path);
+      if (!o.ok) continue;
+      for (const e of entries) this.remember(e);
     }
   }
 
-  /** Confirmed writes only. A request whose outcome never arrived stays out —
-   *  the turn ending before the result is written means it didn't complete. */
-  paths(): string[] {
-    return [...this.confirmed];
+  /**
+   * A `send` supersedes a `write` for the same path, regardless of arrival
+   * order: the common sequence is the agent writing a chart and *then* sending
+   * it, and the send is the one carrying the caption and the explicit intent.
+   * Between two sends the first wins, which is arbitrary but stable.
+   */
+  private remember(entry: OutboundCandidate): void {
+    const existing = this.confirmed.get(entry.path);
+    if (existing && !(existing.origin === "write" && entry.origin === "send")) return;
+    this.confirmed.set(entry.path, entry);
+  }
+
+  /** Confirmed requests only, one entry per file. A request whose outcome never
+   *  arrived stays out — the turn ending before the result is written means it
+   *  didn't complete. */
+  paths(): OutboundCandidate[] {
+    return [...this.confirmed.values()];
   }
 }
 
@@ -306,12 +364,16 @@ export function outboxAdditions(cwd: string, baseline: DirSnapshot): string[] {
 /**
  * Reads the files to upload, dropping duplicates (the same path can arrive from
  * both the outbox scan and transcript detection) and anything over the size
- * cap. Callers filter by extension *before* this: outbox contents are an
- * explicit "send this" and take any type, while transcript-detected writes are
- * narrowed to OUTBOUND_EXTS.
+ * cap. Callers filter by extension *before* this: explicit routes (outbox,
+ * SendUserFile) take any type, while transcript-detected writes are narrowed to
+ * OUTBOUND_EXTS.
+ *
+ * Dedup is by resolved absolute path and keeps the *first* entry, so a caller
+ * that wants a captioned duplicate to win has to order it first — which is what
+ * WrittenFileTracker already does by letting `send` supersede `write`.
  */
 export function readOutboundAttachments(
-  paths: string[],
+  candidates: OutboundCandidate[],
   limits: AttachmentLimits,
   /** Base for any relative path. Must be the agent's cwd, not cctag's — the
    *  paths come from the agent's own transcript, so cctag's process cwd would
@@ -325,8 +387,8 @@ export function readOutboundAttachments(
   const skipped: string[] = [];
   const seen = new Set<string>();
 
-  for (const p of paths) {
-    const abs = resolve(baseDir, p);
+  for (const c of candidates) {
+    const abs = resolve(baseDir, c.path);
     if (seen.has(abs)) continue;
     seen.add(abs);
 
@@ -349,7 +411,12 @@ export function readOutboundAttachments(
     }
 
     try {
-      files.push({ path: abs, name: sanitizeAttachmentName(abs), contentB64: readFileSync(abs).toString("base64") });
+      files.push({
+        path: abs,
+        name: sanitizeAttachmentName(abs),
+        contentB64: readFileSync(abs).toString("base64"),
+        caption: c.caption,
+      });
     } catch (err) {
       console.error(`[attachments] read failed for ${abs}:`, err instanceof Error ? err.message : err);
     }
