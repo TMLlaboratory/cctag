@@ -1,7 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SendFileRequest, ToolOutcome, WriteRequest } from "../driver.js";
+import type { SendFileRequest, ToolOutcome } from "../driver.js";
 
 // Claude Code encodes the project cwd into the transcript directory name by
 // replacing every non-alphanumeric character with "-". Verified empirically
@@ -92,29 +92,9 @@ export function extractAssistantText(records: TranscriptRecord[]): string[] {
 }
 
 /**
- * Write-tool calls the assistant made, paired with their tool-use ids.
- *
- * Only Write is inspected: it's the one tool whose input names its output file
- * outright. Files produced by Bash (a matplotlib script, an ImageMagick call)
- * aren't recoverable from the transcript at all, which is exactly the gap the
- * `.cctag/outbox` convention covers.
- */
-export function extractWriteRequests(records: TranscriptRecord[]): WriteRequest[] {
-  const requests: WriteRequest[] = [];
-  for (const r of records) {
-    if (r.type !== "assistant") continue;
-    for (const block of contentBlocks(r)) {
-      if (block.type !== "tool_use" || block.name !== "Write" || !block.id) continue;
-      const filePath = (block.input as { file_path?: unknown } | undefined)?.file_path;
-      if (typeof filePath === "string" && filePath) requests.push({ toolUseId: block.id, path: filePath });
-    }
-  }
-  return requests;
-}
-
-/**
  * `SendUserFile` calls the assistant made — the agent saying outright which
- * files it wants delivered, rather than cctag inferring it from writes.
+ * files it wants delivered. This is the only outbound transcript signal cctag
+ * reads; inferring intent from `Write` calls was tried and removed.
  *
  * Verified against a live pane: the tool is absent in `claude -p` (headless)
  * but present in the interactive TUI cctag drives, and a successful call
@@ -148,11 +128,10 @@ export function extractSendUserFileRequests(records: TranscriptRecord[]): SendFi
  * Outcomes of tool uses, read off the `tool_result` blocks Claude Code writes
  * back as `user` records.
  *
- * `is_error: true` is the failure signal, verified empirically against a real
- * denied Write: rejecting the permission prompt records
- * `is_error: true` with "The user doesn't want to proceed with this tool use"
- * and leaves the target file byte-for-byte unchanged. Successful results either
- * omit the field or set it to false, so anything not explicitly true counts as
+ * `is_error: true` is the failure signal, verified empirically by declining a
+ * real permission prompt: the result records `is_error: true` with "The user
+ * doesn't want to proceed with this tool use". Successful results either omit
+ * the field or set it to false, so anything not explicitly true counts as
  * success.
  */
 export function extractToolOutcomes(records: TranscriptRecord[]): ToolOutcome[] {

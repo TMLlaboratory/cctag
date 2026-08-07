@@ -15,7 +15,6 @@ import {
   extractSendUserFileRequests,
   extractToolOutcomes,
   extractToolUseSummaries,
-  extractWriteRequests,
   locateClaudeTranscript,
   type TranscriptRecord,
 } from "./transcript.js";
@@ -90,7 +89,6 @@ export const claudeDriver: AgentDriver = {
     return {
       texts: extractAssistantText(r),
       toolNames: extractToolUseSummaries(r),
-      writeRequests: extractWriteRequests(r),
       sendFileRequests: extractSendUserFileRequests(r),
       toolOutcomes: extractToolOutcomes(r),
     };

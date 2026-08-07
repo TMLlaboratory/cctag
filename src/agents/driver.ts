@@ -29,20 +29,13 @@ export type BlockedPrompt =
   | { kind: "question"; info: AskUserQuestionPaneInfo }
   | { kind: "permission"; menu: PermissionMenu | null; isPlanPrompt: boolean; planFeedbackOptionNum?: number };
 
-/** A file-write the agent *asked* for, not yet known to have happened. */
-export interface WriteRequest {
-  toolUseId: string;
-  path: string;
-}
-
 /**
  * Files the agent explicitly asked to hand to the user (Claude Code's
  * `SendUserFile`), not yet known to have succeeded.
  *
- * Distinct from `WriteRequest` because the intent is different, and that
- * difference decides how the paths are treated downstream: a write is merely
- * "a file changed", so it stays bounded by an extension allowlist, while this
- * is an explicit "send this" and takes any file type. One tool use names
+ * This replaced inferring intent from `Write` calls, which fired on artifacts
+ * nobody wanted in the thread and missed the common case entirely (a chart
+ * written by a shell command leaves no recoverable path). One tool use names
  * several files, hence `paths` rather than `path`.
  */
 export interface SendFileRequest {
@@ -62,18 +55,6 @@ export interface ToolOutcome {
 export interface TurnOutput {
   texts: string[];
   toolNames: string[];
-  /**
-   * File writes the agent requested, keyed by tool-use id.
-   *
-   * Deliberately NOT "files that were written": a write and its outcome are
-   * separate transcript records that routinely land in different poll batches,
-   * and a denied write leaves the *existing* file untouched — uploading on the
-   * request alone would exfiltrate a file the human just refused to overwrite.
-   * WrittenFileTracker pairs these with `toolOutcomes` and only surfaces
-   * confirmed writes. Absent when the driver can't tell (see the Codex driver,
-   * whose writes go through shell commands whose targets aren't recoverable).
-   */
-  writeRequests?: WriteRequest[];
   /**
    * `SendUserFile` calls the agent made — the explicit "send this to the user"
    * signal, and the route we prefer over inferring intent from writes.

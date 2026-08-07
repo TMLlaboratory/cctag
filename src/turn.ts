@@ -1,7 +1,6 @@
 import {
   buildPromptWithAttachments,
   countImages,
-  isOutboundAttachable,
   outboxAdditions,
   outboxDir,
   readOutboundAttachments,
@@ -724,13 +723,11 @@ export class TurnEngine {
     if (!upload) return;
 
     const threadTs = pairing.threadTs ?? "";
-    const fromOutbox: OutboundCandidate[] = outboxAdditions(cwd, sources.outboxBaseline).map((path) => ({
-      path,
-      origin: "outbox" as const,
-    }));
-    // Only the write route is bounded by extension: a SendUserFile call is an
-    // explicit "deliver this" and may name a .csv, a .xlsx, anything.
-    const fromTranscript = sources.confirmed.filter((c) => c.origin !== "write" || isOutboundAttachable(c.path));
+    // No extension filtering on either route: both are explicit "deliver this"
+    // now that intent is no longer inferred from writes, so a .csv or .xlsx
+    // goes through like anything else.
+    const fromOutbox: OutboundCandidate[] = outboxAdditions(cwd, sources.outboxBaseline).map((path) => ({ path }));
+    const fromTranscript = sources.confirmed;
 
     let candidates = fromTranscript;
     if (fromOutbox.length > 0) {

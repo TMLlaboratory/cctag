@@ -6,7 +6,6 @@ import { join } from "node:path";
 import {
   buildPromptWithAttachments,
   countImages,
-  isOutboundAttachable,
   outboxAdditions,
   outboxDir,
   readOutboundAttachments,
@@ -22,41 +21,6 @@ function scratch(): string {
 }
 
 const LIMITS = { maxFileBytes: 1024, maxFileCount: 2 };
-
-test("WrittenFileTracker ignores a write whose permission prompt was denied", () => {
-  const tracker = new WrittenFileTracker();
-  // Shape verified against a real denied Write: the tool_use is recorded, then a
-  // tool_result with is_error: true, and the target file is left untouched.
-  tracker.ingest({
-    writeRequests: [{ toolUseId: "toolu_denied", path: "/secrets/report.pdf" }],
-    toolOutcomes: [{ toolUseId: "toolu_denied", ok: false }],
-  });
-  assert.deepEqual(tracker.paths(), []);
-});
-
-test("WrittenFileTracker keeps a write confirmed in a later poll batch", () => {
-  const tracker = new WrittenFileTracker();
-  // The tool_use and its tool_result routinely land in different batches, so
-  // correlation has to survive across ingest() calls.
-  tracker.ingest({ writeRequests: [{ toolUseId: "toolu_ok", path: "/out/chart.png" }] });
-  assert.deepEqual(tracker.paths(), [], "not yet confirmed");
-  tracker.ingest({ toolOutcomes: [{ toolUseId: "toolu_ok", ok: true }] });
-  assert.deepEqual(tracker.paths(), [{ path: "/out/chart.png", origin: "write" }]);
-});
-
-test("WrittenFileTracker excludes a write whose outcome never arrived", () => {
-  const tracker = new WrittenFileTracker();
-  tracker.ingest({ writeRequests: [{ toolUseId: "toolu_pending", path: "/out/half.png" }] });
-  tracker.ingest({ toolOutcomes: [{ toolUseId: "toolu_unrelated", ok: true }] });
-  assert.deepEqual(tracker.paths(), []);
-});
-
-test("outbound extension filter excludes source and markdown", () => {
-  assert.equal(isOutboundAttachable("/a/chart.png"), true);
-  assert.equal(isOutboundAttachable("/a/doc.PDF"), true);
-  assert.equal(isOutboundAttachable("/a/notes.md"), false);
-  assert.equal(isOutboundAttachable("/a/index.ts"), false);
-});
 
 test("sanitizeAttachmentName strips traversal and control characters, keeps spaces and non-ASCII", () => {
   assert.equal(sanitizeAttachmentName("../../etc/pa\nss wd.png"), "pass wd.png");
@@ -136,8 +100,8 @@ test("readOutboundAttachments dedupes a path reached by both outbound routes", (
   // captioned entry is ordered first, which is how turn.ts feeds them.
   const { files } = readOutboundAttachments(
     [
-      { path: p, origin: "send", caption: "グラフです" },
-      { path: p, origin: "outbox" },
+      { path: p, caption: "グラフです" },
+      { path: p },
     ],
     LIMITS,
     cwd,
@@ -150,7 +114,7 @@ test("readOutboundAttachments dedupes a path reached by both outbound routes", (
 test("readOutboundAttachments resolves relative paths against the agent's cwd", () => {
   const cwd = scratch();
   writeFileSync(join(cwd, "rel.png"), "x");
-  const { files } = readOutboundAttachments([{ path: "rel.png", origin: "send" }], LIMITS, cwd);
+  const { files } = readOutboundAttachments([{ path: "rel.png" }], LIMITS, cwd);
   assert.equal(files.length, 1);
   assert.equal(files[0].path, join(cwd, "rel.png"));
 });
@@ -160,8 +124,8 @@ test("readOutboundAttachments skips missing and empty files", () => {
   writeFileSync(join(cwd, "empty.png"), "");
   const { files } = readOutboundAttachments(
     [
-      { path: join(cwd, "empty.png"), origin: "send" },
-      { path: join(cwd, "gone.png"), origin: "send" },
+      { path: join(cwd, "empty.png") },
+      { path: join(cwd, "gone.png") },
     ],
     LIMITS,
     cwd,

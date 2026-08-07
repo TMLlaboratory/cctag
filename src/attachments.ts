@@ -24,13 +24,6 @@ import { extname, join, resolve } from "node:path";
  *  blocks accept, so they take the same path). */
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
-/** Outbound: what's worth pushing into the thread on its own, because a Slack
- *  reader can't get it from the turn's text output. Deliberately excludes
- *  source files and .md — the agent writes those constantly, and uploading
- *  every one would bury the thread (plan .md files have their own path, see
- *  TurnEngine.attachPlanFile). */
-const OUTBOUND_EXTS = new Set([...IMAGE_EXTS, ".svg", ".pdf"]);
-
 /** Downloaded inbound files older than this are pruned on the next save.
  *  They're only needed until the agent has read them, but keeping a few days
  *  means a thread can still refer back to "the screenshot I sent earlier". */
@@ -78,31 +71,19 @@ export interface OutboundAttachment {
   path: string;
   name: string;
   contentB64: string;
-  /** Carried through from SendUserFile's `caption`; absent for the write and
-   *  outbox routes, which have no caption to carry. */
+  /** Carried through from SendUserFile's `caption`; absent for outbox files,
+   *  which have no caption to carry. */
   caption?: string;
 }
 
 /** name -> "mtimeMs:size", so a file that was rewritten in place still counts as new. */
 export type DirSnapshot = Record<string, string>;
 
-/**
- * Where an outbound candidate came from, which is what decides whether the
- * extension allowlist applies to it.
- *
- * `write` is inferred intent — the agent changed a file, which is not the same
- * as asking for it to be sent — so it stays bounded by OUTBOUND_EXTS. `send`
- * (SendUserFile) and `outbox` are both explicit "deliver this", so they take
- * any file type.
- */
-export type OutboundOrigin = "write" | "send" | "outbox";
-
 /** One file to consider uploading. Deliberately flat — one entry per file, never
  *  grouped by caption or tool use: the size/count caps and the dedup downstream
  *  both count entries, and nesting would make them silently miscount. */
 export interface OutboundCandidate {
   path: string;
-  origin: OutboundOrigin;
   /** SendUserFile's own caption, used as the upload comment when present. */
   caption?: string;
 }
@@ -115,37 +96,27 @@ export interface OutboundCandidate {
  * `tool_result` land in separate transcript records and routinely arrive in
  * different poll batches, so a batch-local check would miss the outcome and
  * either drop every request or trust every one. Trusting every one is the
- * dangerous direction — a denied Write leaves the *existing* file untouched, and
- * uploading on the request alone would send a file the human just refused to
- * overwrite (verified against a real denial: `is_error: true`, file unchanged).
- * The same reasoning covers a denied `SendUserFile`.
- *
- * Both routes are tracked here at once, on purpose: `SendUserFile` is the
- * intended long-term route but its availability outside an app-paired session
- * rests on a single probe, so Write detection stays as the fallback until
- * production confirms the tool actually fires (see issue #2).
+ * dangerous direction: a denied request means the human said no, and uploading
+ * on the request alone would send a file they just refused to release
+ * (verified against a real denial — `is_error: true`).
  *
  * Ownership moves between the BackgroundWatcher and TurnEngine when a blocked
  * terminal is adopted, so the instance is handed over rather than rebuilt.
  */
 export class WrittenFileTracker {
-  /** tool_use_id -> the files that use would confirm, with their origin. */
+  /** tool_use_id -> the files that use would confirm. */
   private pending = new Map<string, OutboundCandidate[]>();
   /** Keyed by path so the same file reached twice collapses to one upload. */
   private confirmed = new Map<string, OutboundCandidate>();
 
   ingest(output: {
-    writeRequests?: Array<{ toolUseId: string; path: string }>;
     sendFileRequests?: Array<{ toolUseId: string; paths: string[]; caption?: string }>;
     toolOutcomes?: Array<{ toolUseId: string; ok: boolean }>;
   }): void {
-    for (const w of output.writeRequests ?? []) {
-      this.pending.set(w.toolUseId, [{ path: w.path, origin: "write" }]);
-    }
     for (const s of output.sendFileRequests ?? []) {
       this.pending.set(
         s.toolUseId,
-        s.paths.map((p) => ({ path: p, origin: "send" as const, caption: s.caption })),
+        s.paths.map((p) => ({ path: p, caption: s.caption })),
       );
     }
     for (const o of output.toolOutcomes ?? []) {
@@ -157,15 +128,10 @@ export class WrittenFileTracker {
     }
   }
 
-  /**
-   * A `send` supersedes a `write` for the same path, regardless of arrival
-   * order: the common sequence is the agent writing a chart and *then* sending
-   * it, and the send is the one carrying the caption and the explicit intent.
-   * Between two sends the first wins, which is arbitrary but stable.
-   */
+  /** First send of a path wins, so a file named twice in one turn uploads once
+   *  and keeps the caption it was first sent with. */
   private remember(entry: OutboundCandidate): void {
-    const existing = this.confirmed.get(entry.path);
-    if (existing && !(existing.origin === "write" && entry.origin === "send")) return;
+    if (this.confirmed.has(entry.path)) return;
     this.confirmed.set(entry.path, entry);
   }
 
@@ -183,10 +149,6 @@ function mb(bytes: number): string {
 
 export function isImagePath(p: string): boolean {
   return IMAGE_EXTS.has(extname(p).toLowerCase());
-}
-
-export function isOutboundAttachable(p: string): boolean {
-  return OUTBOUND_EXTS.has(extname(p).toLowerCase());
 }
 
 export function inboxDir(): string {
@@ -364,9 +326,8 @@ export function outboxAdditions(cwd: string, baseline: DirSnapshot): string[] {
 /**
  * Reads the files to upload, dropping duplicates (the same path can arrive from
  * both the outbox scan and transcript detection) and anything over the size
- * cap. Callers filter by extension *before* this: explicit routes (outbox,
- * SendUserFile) take any type, while transcript-detected writes are narrowed to
- * OUTBOUND_EXTS.
+ * cap. No extension filtering anywhere: both routes are an explicit
+ * "deliver this", so any file type goes through.
  *
  * Dedup is by resolved absolute path and keeps the *first* entry, so a caller
  * that wants a captioned duplicate to win has to order it first — which is what
