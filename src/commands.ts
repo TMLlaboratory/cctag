@@ -34,7 +34,7 @@ const CODEX_HELP_TEXT = [
   "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
   "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
-  "• 添付ファイルはパスとして渡されます（Codex CLI では画像として認識されるかは未検証）",
+  "• 添付ファイルはパスとして渡されます（Codex CLI は画像も読み取れます）",
   "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
   "（`mode` / `plan` は Codex CLI では利用できません）",
 ].join("\n");

@@ -347,21 +347,26 @@ What gets sent is decided by two routes:
   one does — or if the listing can't be fetched — it skips the outbox, says why
   in the thread, and leaves the files alone. Transcript detection is unaffected:
   those paths come from this turn's own transcript.
-- **Transcript detection** — `Write` tool `file_path`s, narrowed to
-  images/SVG/PDF. Only `Write` is inspected because it's the one tool whose
-  input names its output. Files produced by Bash (a matplotlib PNG) leave no
-  recoverable path in the transcript, which is exactly the gap the outbox
-  convention fills. Source files and `.md` are excluded: the agent writes those
-  constantly and uploading each one would bury the thread.
+- **Transcript detection** — `SendUserFile`'s `input.files`. The agent stating
+  outright that it wants a file delivered, so nothing is filtered by type, and
+  its `caption` becomes the upload comment. Paths come from `input.files`,
+  resolved against the pane's cwd (`tool_result` carries absolute paths but in
+  an undocumented human-readable format, so it is used only for its success bit).
 
-  Crucially, **the `tool_use` alone must not be trusted.** A `Write` and its
+  This replaced detecting `Write` `file_path`s narrowed to images/SVG/PDF, which
+  inferred "send this" from "a file changed": it posted artifacts nobody asked
+  for, needed an extension allowlist that dropped legitimate `.csv` and `.md`
+  files, and still missed the common case, since files produced by Bash (a
+  matplotlib PNG) leave no recoverable path in the transcript. Codex CLI has no
+  equivalent tool, so the outbox stays its only route.
+
+  Crucially, **the `tool_use` alone must not be trusted.** A request and its
   result are separate records that routinely arrive in different poll batches,
-  and a denied `Write` leaves the existing file **completely unchanged** —
-  acting on the request alone would have cctag read and upload a file the human
-  just refused to overwrite (measured: a denial records `is_error: true` on the
-  `tool_result` and the file is byte-for-byte untouched). `WrittenFileTracker`
+  and a denied call changes nothing — acting on the request alone would have
+  cctag read and upload a file the human just refused to release (measured: a
+  denial records `is_error: true` on the `tool_result`). `WrittenFileTracker`
   therefore correlates request and result by `tool_use_id` and only surfaces
-  **confirmed** writes.
+  **confirmed** calls.
 
 ### Hub–Spoke file flow and authorization
 

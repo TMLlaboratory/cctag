@@ -103,9 +103,9 @@ read`, not from the transcript. See `src/agents/claude/prompts.ts` and
 | `@cctag mode` / `@cctag plan` | ✅ | — *(no Shift+Tab mode ring or plan mode)* |
 | Plan-file attach on ExitPlanMode | ✅ | — |
 | Background watcher (terminal-initiated work) | ✅ | ✅ |
-| Slack → agent image/file attachments | ✅ real image attachments | ⚠️ *(paths only — no verified auto-attach)* |
+| Slack → agent image/file attachments | ✅ real image attachments | ✅ *(read via an `exec` step)* |
 | Agent → Slack file uploads (`.cctag/outbox`) | ✅ | ✅ |
-| Agent → Slack uploads detected from the transcript | ✅ `Write` targets | — *(writes go through shell commands)* |
+| Agent → Slack uploads detected from the transcript | ✅ `SendUserFile` | — *(no equivalent tool)* |
 
 Where a feature isn't supported, cctag replies saying so rather than failing
 silently — e.g. `@cctag mode plan` on a Codex-paired thread.
@@ -523,12 +523,17 @@ Two ways, both automatic — no command to remember:
   file is whose — in that case it skips the outbox, says so in the thread, and
   leaves the files on disk rather than posting them to the wrong place.
 
-- **Transcript-detected writes** — image/SVG/PDF files the agent writes with
-  the `Write` tool are picked up without any outbox involvement. Only writes
-  the agent actually completed count: if you deny the permission prompt, the
-  file on disk is unchanged and cctag leaves it alone. Source files and `.md`
-  are deliberately excluded: the agent writes those constantly, and uploading
-  each one would bury the thread.
+- **`SendUserFile`** — Claude Code's own "hand this to the user" tool. Files it
+  names are uploaded without any outbox involvement, whatever their type, and
+  its `caption` becomes the upload comment. Only calls that actually succeeded
+  count: deny the permission prompt and cctag uploads nothing.
+
+  This replaced detecting `Write` calls, which inferred "send this" from "a file
+  changed" — so it posted artifacts nobody asked for, needed an extension
+  allowlist that dropped legitimate `.csv` and `.md` files, and missed the
+  common case anyway, since a chart written by a shell command leaves no path in
+  the transcript. Codex CLI has no equivalent tool, which is why the outbox
+  stays its only route.
 
 ### Switching model
 
