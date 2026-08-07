@@ -6,7 +6,7 @@ import {
   isEffortListScreen,
   modelNameKey,
   parseCodexMenu,
-  parseCodexTrustPrompt,
+  parseCodexStartupPrompt,
 } from "./prompts.js";
 import { extractCodexTurnOutput, locateCodexTranscript, type CodexRecord } from "./transcript.js";
 
@@ -84,7 +84,7 @@ export const codexDriver: AgentDriver = {
     return extractCodexTurnOutput(records as CodexRecord[]);
   },
 
-  parseTrustPrompt: parseCodexTrustPrompt,
+  parseStartupPrompt: parseCodexStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
     // Codex has no AskUserQuestion-equivalent tool and no plan mode — every

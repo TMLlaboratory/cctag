@@ -6,7 +6,7 @@ import {
   MODE_ALIASES,
   MODE_RING,
   parseAskUserQuestionPane,
-  parseClaudeTrustPrompt,
+  parseClaudeStartupPrompt,
   parseCurrentMode,
   parsePermissionMenu,
   stripFooterChrome,
@@ -95,7 +95,7 @@ export const claudeDriver: AgentDriver = {
     };
   },
 
-  parseTrustPrompt: parseClaudeTrustPrompt,
+  parseStartupPrompt: parseClaudeStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
     const aq = parseAskUserQuestionPane(paneText);

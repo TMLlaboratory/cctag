@@ -246,18 +246,24 @@ export function stripFooterChrome(raw: string): string {
 }
 
 /**
- * Claude Code's startup folder-trust dialog.
+ * A startup dialog Claude Code is waiting on, or null. Same shape and same
+ * reasoning as the Codex equivalent (see parseCodexStartupPrompt): a selected
+ * numbered option plus an enter-to-confirm footer, only ever consulted for a
+ * pane no turn has run in.
  *
- * Verified text:
- *   Quick safety check: Is this a project you created or one you trust? ...
- *   ❯ 1. Yes, I trust this folder
- *     2. No, exit
- *
- * Same reasoning as the Codex equivalent: require the question *and* the
- * affirmative option, so prose mentioning trust doesn't trip it.
+ * The known one is the folder-trust check:
+ *   Quick safety check: Is this a project you created or one you trust?
+ *   ❯ 1. Yes, I trust this folder / 2. No, exit
  */
-export function parseClaudeTrustPrompt(paneText: string): string | null {
-  if (!/Is this a project you created or one you trust\?/i.test(paneText)) return null;
-  if (!/I trust this folder/i.test(paneText)) return null;
-  return "Is this a project you created or one you trust?";
+export function parseClaudeStartupPrompt(paneText: string): string | null {
+  if (!/^\s*[›❯>]\s*\d+\.\s+\S/m.test(paneText)) return null;
+  if (!/Enter to confirm|Press enter to (continue|confirm)/i.test(paneText)) return null;
+  if (/Is this a project you created or one you trust\?/i.test(paneText)) {
+    return "Is this a project you created or one you trust?";
+  }
+  const headline = paneText
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^[›❯>]?\s*\d+\./.test(l) && !/Enter to confirm|Press enter/i.test(l));
+  return headline ? headline.slice(0, 160) : "起動時の選択待ちダイアログ";
 }

@@ -127,20 +127,41 @@ export function stripCodexFooterChrome(raw: string): string {
   return lines.slice(0, end).join("\n").trim();
 }
 
+/** `› 1. …` / `❯ 2. …` — a numbered option with the selection marker on it. */
+const SELECTED_OPTION = /^\s*[›❯>]\s*\d+\.\s+\S/m;
+/** The footer these dialogs end with, which is what makes them *waiting*. */
+const AWAITING_ENTER = /Press enter to (continue|confirm)/i;
+
 /**
- * Codex CLI's startup directory-trust dialog.
+ * A startup dialog Codex CLI is waiting on, or null.
  *
- * Verified text (0.147.0):
- *   Do you trust the contents of this directory? Working with untrusted
- *   contents comes with higher risk of prompt injection. ...
- *   › 1. Yes, continue
- *     2. No, quit
+ * Two are known, and both are hazardous to submit into:
  *
- * Both the question and the affirmative option have to be present: the phrase
- * alone could easily appear in ordinary agent output discussing trust.
+ *   Do you trust the contents of this directory?      → default is "Yes, continue"
+ *   ✨ Update available! 0.146.1 -> 0.147.0            → default *runs* `brew upgrade --cask codex`
+ *
+ * The update one is why this isn't a list of known strings: submitting a prompt
+ * into it confirmed the default and upgraded the binary out from under a running
+ * session (observed). Anything with a selected numbered option and an
+ * enter-to-continue footer is treated as waiting, so the next dialog upstream
+ * adds doesn't silently reintroduce the bug.
+ *
+ * Safe to be broad here because the caller only asks when no transcript exists
+ * for the pane — i.e. no turn has ever run in it, so the only thing on screen
+ * is the startup UI. Ordinary approval menus arrive later, and herdr reports
+ * those as `blocked` anyway.
  */
-export function parseCodexTrustPrompt(paneText: string): string | null {
-  if (!/Do you trust the contents of this directory\?/i.test(paneText)) return null;
-  if (!/\bYes,\s*continue\b/i.test(paneText)) return null;
-  return "Do you trust the contents of this directory?";
+export function parseCodexStartupPrompt(paneText: string): string | null {
+  if (!SELECTED_OPTION.test(paneText) || !AWAITING_ENTER.test(paneText)) return null;
+  if (/Do you trust the contents of this directory\?/i.test(paneText)) {
+    return "Do you trust the contents of this directory?";
+  }
+  if (/Update available!/i.test(paneText)) {
+    return "✨ Update available!（既定の選択肢は `brew upgrade --cask codex` を実行します）";
+  }
+  const headline = paneText
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^[›❯>]?\s*\d+\./.test(l) && !AWAITING_ENTER.test(l));
+  return headline ? headline.slice(0, 160) : "起動時の選択待ちダイアログ";
 }

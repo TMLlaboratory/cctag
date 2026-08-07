@@ -111,16 +111,21 @@ export interface AgentDriver {
   /** Classifies what a `blocked` pane is currently showing. */
   parseBlockedPane(paneText: string): BlockedPrompt;
   /**
-   * The startup "do you trust this directory?" dialog, or null if the pane
-   * isn't showing one. Returns the question text for quoting back to the user.
+   * A startup dialog waiting on a human before any prompt can land, or null.
+   * Returns a short description for quoting back to the user.
    *
-   * Needed separately from `parseBlockedPane` because herdr reports this pane
-   * as `idle`, not `blocked` — verified against Codex 0.147.0 and Claude Code,
-   * both of which sit at this dialog with `agent_status: idle` and
-   * `interactive_ready: true`. Ordinary permission menus do flip to `blocked`,
-   * so this is the one state that needs looking for rather than waiting for.
+   * Needed separately from `parseBlockedPane` because herdr reports these panes
+   * as `idle`, not `blocked` — measured for both the directory-trust dialog and
+   * Codex's "update available" menu. Ordinary permission menus *do* flip to
+   * `blocked`, so startup dialogs are the states that have to be looked for
+   * rather than waited for.
+   *
+   * Deliberately not a list of known dialogs. Codex alone ships at least two,
+   * and one of them defaults to running `brew upgrade` — enumerating them means
+   * the next one added upstream silently reintroduces the bug. Anything shaped
+   * like "numbered options waiting on Enter" counts.
    */
-  parseTrustPrompt?(paneText: string): string | null;
+  parseStartupPrompt?(paneText: string): string | null;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */

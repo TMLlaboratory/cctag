@@ -208,36 +208,40 @@ export class TurnEngine {
       const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       const offset = tPath ? transcriptSizeSafe(tPath) : 0;
 
-      // A pane sitting at the startup directory-trust dialog reports `idle`,
-      // so nothing above this catches it, and submitting anyway is actively
+      // A pane sitting at one of the agent's startup dialogs reports `idle`, so
+      // nothing above this catches it, and submitting anyway is actively
       // harmful: the prompt text is swallowed by the menu and the Enter that
-      // follows confirms whatever option is selected — which is "yes, I trust
-      // this" — so cctag would grant that trust on the strength of a Slack
-      // message arriving, then report a transcript it never got. Reproduced
-      // against Codex 0.147.0: the dialog closes, the box is empty, no turn
-      // runs, no session file is written.
+      // follows confirms whatever option is selected. Measured consequences of
+      // that, both on Codex — the directory-trust dialog defaults to "yes, I
+      // trust this", and the "update available" dialog defaults to *running*
+      // `brew upgrade --cask codex`, which swapped the binary out from under a
+      // live session. Either way no turn runs and no session file is written,
+      // so the thread gets a warning about a transcript that never existed.
       //
-      // Deliberately NOT auto-answered. The dialog guards against prompt
-      // injection from untrusted directory contents, and that decision isn't
-      // cctag's to make on the user's behalf — it belongs to whoever can see
-      // what's actually in the directory.
+      // Deliberately NOT auto-answered. One of these grants trust that guards
+      // against prompt injection from untrusted directory contents, and the
+      // other mutates the installed toolchain. Neither is cctag's call to make
+      // because a Slack message arrived — they belong to whoever can see the
+      // directory and the machine.
       //
       // Only checked when no transcript could be located, which is the
-      // signature of a pane no turn has ever run in. Established panes skip
-      // the extra pane read entirely, so this costs nothing on the hot path.
-      if (!tPath && driver.parseTrustPrompt) {
+      // signature of a pane no turn has ever run in. Established panes skip the
+      // extra pane read entirely, so this costs nothing on the hot path — and
+      // it's what lets the detector be shape-based rather than a list of known
+      // dialogs, since the only thing on a fresh pane's screen is startup UI.
+      if (!tPath && driver.parseStartupPrompt) {
         const paneText = await this.herdr
           .paneRead(agent.paneId, { source: driver.paneReadSource, lines: 40 })
           .catch(() => "");
-        const question = paneText ? driver.parseTrustPrompt(paneText) : null;
+        const question = paneText ? driver.parseStartupPrompt(paneText) : null;
         if (question) {
           await this.notifier.postReply(
             pairing.channel,
             pairing.threadTs ?? "",
-            `⚠️ ペインが起動時の信頼確認ダイアログで停止しています。ターミナルで応答してください。\n` +
+            `⚠️ ペインが起動時のダイアログで停止しています。ターミナルで応答してください。\n` +
               `> ${question}\n` +
-              `cctagは代わりに答えません（ディレクトリの内容を確認できる人が判断すべき項目です）。` +
-              `応答後にもう一度送ってください。`,
+              `cctagは代わりに答えません（信頼の付与やツールチェーンの更新を含むため、` +
+              `ディレクトリと環境を確認できる人が判断すべき項目です）。応答後にもう一度送ってください。`,
           );
           return;
         }
