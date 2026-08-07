@@ -1,5 +1,5 @@
 import { markdownTableBlock, markdownTableFallback } from "./blocks.js";
-import { segmentForSlack, type SlackSegment } from "./mrkdwn.js";
+import { chunkForSlack, segmentForSlack, type SlackSegment } from "./mrkdwn.js";
 import type { Notifier } from "../notifier.js";
 
 /** Slack's documented ceiling on blocks in one message. */
@@ -47,7 +47,38 @@ export async function postSegmented(
     const batch = blocks.slice(i, i + MAX_BLOCKS);
     // `text` is the notification/fallback string, not the body — Slack shows it
     // in push notifications and to clients that can't render blocks.
-    const fallback = segments.find((s) => s.kind === "text")?.text ?? "（表）";
-    await notifier.postMessage(channel, threadTs, fallback.slice(0, 300), batch);
+    const notify = segments.find((s) => s.kind === "text")?.text ?? "（表）";
+    try {
+      await notifier.postMessage(channel, threadTs, notify.slice(0, 300), batch);
+    } catch (err) {
+      // A block Slack rejects (`invalid_blocks`) must not cost the turn its
+      // output: the agent's answer is the point, the table is presentation.
+      // Retry the same content as plain mrkdwn, which is what this posted
+      // before table blocks existed.
+      console.error(`[slack] block post failed, falling back to text:`, err instanceof Error ? err.message : err);
+      await postAsPlainText(notifier, channel, threadTs, markdown, prefix);
+      return; // the fallback re-posts everything, so stop batching
+    }
+  }
+}
+
+/** Last resort when Block Kit is rejected: the pre-table-block behaviour, with
+ *  any table left as its monospace grid so the columns still line up. */
+async function postAsPlainText(
+  notifier: Notifier,
+  channel: string,
+  threadTs: string,
+  markdown: string,
+  prefix?: string,
+): Promise<void> {
+  const flat = segmentForSlack(markdown)
+    .map((s) => (s.kind === "text" ? s.text : markdownTableFallback(s.table)))
+    .join("\n\n");
+  const chunks = chunkForSlack(flat);
+  for (const [i, chunk] of chunks.entries()) {
+    const body = i === 0 && prefix ? `${prefix}\n${chunk}` : chunk;
+    await notifier.postReply(channel, threadTs, body).catch((err) => {
+      console.error(`[slack] text fallback also failed:`, err instanceof Error ? err.message : err);
+    });
   }
 }

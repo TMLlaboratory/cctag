@@ -67,3 +67,22 @@ test("an oversized table falls back to a monospace grid rather than being droppe
   assert.match(out, /ううう/);
   assert.match(out, /22/);
 });
+
+test("a rejected block post falls back to text instead of losing the turn's output", async () => {
+  const { postSegmented } = await import("./post.js");
+  const replies: string[] = [];
+  const notifier = {
+    async postMessage() {
+      // What Slack does when a block fails validation.
+      throw new Error("invalid_blocks");
+    },
+    async postReply(_c: string, _t: string, text: string) {
+      replies.push(text);
+    },
+  };
+  const md = ["答えです。", "", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n");
+  await postSegmented(notifier as never, "C1", "", md);
+  assert.equal(replies.length, 1, "the answer must still reach the thread");
+  assert.match(replies[0], /答えです/);
+  assert.match(replies[0], /```/, "the table degrades to a monospace grid");
+});
