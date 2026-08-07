@@ -488,6 +488,18 @@ export class TurnEngine {
         state.sessionId = agent.sessionId;
         state.transcriptPath = state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
         state.offset = 0;
+      } else if (!state.transcriptPath) {
+        // Still no transcript (herdr may never report a sessionId at all —
+        // e.g. its SessionStart hook is being blocked — so the branch above
+        // never fires). Retry the driver's cwd-based fallback every poll:
+        // the very first attempt (at turn start, in startTurn()) can miss if
+        // Claude Code hasn't created the session's transcript file yet, and
+        // without this retry that miss is permanent for the rest of the turn.
+        const located = state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+        if (located) {
+          state.transcriptPath = located;
+          state.offset = 0;
+        }
       }
 
       if (state.transcriptPath) {
