@@ -126,6 +126,15 @@ export interface AgentDriver {
    * like "numbered options waiting on Enter" counts.
    */
   parseStartupPrompt?(paneText: string): string | null;
+  /**
+   * Best-effort human-readable title for a running session, for `@cctag
+   * connect`'s picker — Claude Code auto-generates one per conversation
+   * (`ai-title` transcript records) and the Slack picker mirrors the same
+   * title next to the same folder grouping the Claude Code app itself uses.
+   * Absent = no such concept for this driver's CLI (Codex has none); may also
+   * return null per-call when a title exists in principle but wasn't found.
+   */
+  readTitle?(cwd: string, sessionId: string | null): string | null;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */

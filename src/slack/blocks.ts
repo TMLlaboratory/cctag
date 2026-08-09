@@ -16,9 +16,30 @@ function truncateLeft(s: string, max: number): string {
   return "…" + s.slice(s.length - max + 1);
 }
 
-/** A static_select of currently running herdr agents, for `@cctag connect`. */
-export function agentPickerBlocks(agents: AgentInfo[]) {
-  if (agents.length === 0) {
+function dirLabel(cwd: string): string {
+  const base = cwd.replace(/\/+$/, "").split("/").pop();
+  return base && base.length > 0 ? base : cwd;
+}
+
+/** One herdr agent plus the title `readTitle` resolved for it (null if the
+ *  driver has no such concept, or none was found). Built by the caller —
+ *  driver dispatch belongs in commands.ts, not in this rendering module. */
+export interface AgentPickerEntry {
+  agent: AgentInfo;
+  title: string | null;
+}
+
+/**
+ * A static_select of currently running herdr agents, for `@cctag connect`.
+ *
+ * Grouped by cwd via Slack's native `option_groups`: one header per project
+ * directory, one row per session underneath — mirroring the Claude Code
+ * app's own session picker (folder name, then each session's auto-generated
+ * title) instead of a flat list of full paths that gave no way to tell two
+ * sessions in the same directory apart at a glance.
+ */
+export function agentPickerBlocks(entries: AgentPickerEntry[]) {
+  if (entries.length === 0) {
     return [
       {
         type: "section",
@@ -26,6 +47,14 @@ export function agentPickerBlocks(agents: AgentInfo[]) {
       },
     ];
   }
+
+  const groups = new Map<string, AgentPickerEntry[]>();
+  for (const entry of entries) {
+    const list = groups.get(entry.agent.cwd);
+    if (list) list.push(entry);
+    else groups.set(entry.agent.cwd, [entry]);
+  }
+
   return [
     {
       type: "section",
@@ -34,16 +63,20 @@ export function agentPickerBlocks(agents: AgentInfo[]) {
         type: "static_select",
         action_id: "pair_select",
         placeholder: { type: "plain_text", text: "インスタンスを選択" },
-        options: agents.map((a) => {
-          const prefix = a.agent && a.agent !== "claude" ? `[${a.agent}] ` : "";
-          return {
-            text: {
-              type: "plain_text",
-              text: `${STATUS_ICON[a.agentStatus] ?? "⚪"} ${prefix}${truncateLeft(a.cwd, 60)}`.slice(0, 75),
-            },
-            value: a.paneId,
-          };
-        }),
+        option_groups: [...groups.entries()].map(([cwd, group]) => ({
+          label: { type: "plain_text", text: dirLabel(cwd).slice(0, 75) },
+          options: group.map(({ agent: a, title }) => {
+            const prefix = a.agent && a.agent !== "claude" ? `[${a.agent}] ` : "";
+            const label = title ?? a.name ?? a.paneId;
+            return {
+              text: {
+                type: "plain_text",
+                text: `${STATUS_ICON[a.agentStatus] ?? "⚪"} ${prefix}${label}`.slice(0, 75),
+              },
+              value: a.paneId,
+            };
+          }),
+        })),
       },
     },
   ];

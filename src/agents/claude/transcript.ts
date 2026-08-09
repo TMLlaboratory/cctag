@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SendFileRequest, ToolOutcome } from "../driver.js";
@@ -53,6 +53,51 @@ export function locateClaudeTranscript(cwd: string, sessionId: string | null): s
     if (!newest || mtimeMs > newest.mtimeMs) newest = { path: p, mtimeMs };
   }
   return newest?.path ?? null;
+}
+
+/**
+ * Claude Code's own auto-generated conversation title — the same string the
+ * Claude Code app shows per-session in its picker (verified against this
+ * project's own transcript: an `{"type":"ai-title","aiTitle":"..."}` record,
+ * re-emitted every so often through the session rather than written once).
+ *
+ * Only the trailing `tailBytes` of the file are read, not the whole
+ * transcript: sessions run to tens of MB, this is called once per running
+ * agent every time `@cctag connect` is invoked, and `ai-title` records recur
+ * often enough that the tail almost always contains at least one. A cut-off
+ * first line in that tail is expected and harmless — it fails to parse and is
+ * skipped, same as any other malformed line.
+ */
+export function readLatestAiTitle(transcriptPath: string, tailBytes = 65536): string | null {
+  let fd: number;
+  try {
+    fd = openSync(transcriptPath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - tailBytes);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let rec: { type?: string; aiTitle?: string };
+      try {
+        rec = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (rec.type === "ai-title" && typeof rec.aiTitle === "string" && rec.aiTitle.trim()) {
+        return rec.aiTitle.trim();
+      }
+    }
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 interface ContentBlock {

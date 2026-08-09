@@ -3,7 +3,7 @@ import type { HerdrClient } from "./herdr/client.js";
 import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
-import { agentPickerBlocks } from "./slack/blocks.js";
+import { agentPickerBlocks, type AgentPickerEntry } from "./slack/blocks.js";
 import { driverFor, type AgentDriver } from "./agents/driver.js";
 
 function sleep(ms: number): Promise<void> {
@@ -242,7 +242,11 @@ export class CommandHandler {
           return;
         }
         const agents = await this.herdr.agentList();
-        await this.notifier.postMessage(channel, threadTs, "接続するインスタンスを選択してください", agentPickerBlocks(agents));
+        const entries: AgentPickerEntry[] = agents.map((agent) => ({
+          agent,
+          title: driverFor(agent.agent).readTitle?.(agent.cwd, agent.sessionId) ?? null,
+        }));
+        await this.notifier.postMessage(channel, threadTs, "接続するインスタンスを選択してください", agentPickerBlocks(entries));
         return;
       }
       case "disconnect": {
