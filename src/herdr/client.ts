@@ -11,6 +11,7 @@ interface RawAgent {
   agent_status: string;
   cwd: string;
   name?: string;
+  terminal_title_stripped?: string;
   pane_id: string;
   terminal_id: string;
   workspace_id: string;
@@ -29,6 +30,7 @@ function normalizeAgent(raw: RawAgent): AgentInfo {
     agentStatus: normalizeStatus(raw.agent_status),
     cwd: raw.cwd,
     name: raw.name,
+    terminalTitle: raw.terminal_title_stripped?.trim() || null,
     paneId: raw.pane_id,
     terminalId: raw.terminal_id,
     workspaceId: raw.workspace_id,

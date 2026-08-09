@@ -17,7 +17,6 @@ import {
   extractToolOutcomes,
   extractToolUseSummaries,
   locateClaudeTranscript,
-  readLatestAiTitle,
   type TranscriptRecord,
 } from "./transcript.js";
 import { resolvePlanFile } from "./plan.js";
@@ -97,11 +96,6 @@ export const claudeDriver: AgentDriver = {
   },
 
   parseStartupPrompt: parseClaudeStartupPrompt,
-
-  readTitle(cwd, sessionId) {
-    const path = locateClaudeTranscript(cwd, sessionId);
-    return path ? readLatestAiTitle(path) : null;
-  },
 
   parseBlockedPane(paneText): BlockedPrompt {
     const aq = parseAskUserQuestionPane(paneText);
