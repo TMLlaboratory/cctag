@@ -497,7 +497,7 @@ Two things to know:
 - **The mention is required.** Dropping an image into a paired thread without
   `@cctag` does nothing, same as any other unmentioned message — otherwise
   every screenshot people share with each other would start a turn.
-- **Caps.** `CCTAG_MAX_FILE_MB` (default 8) and `CCTAG_MAX_FILE_COUNT`
+- **Caps.** `CCTAG_MAX_FILE_MB` (default 10) and `CCTAG_MAX_FILE_COUNT`
   (default 5) per message; anything rejected is reported in the thread rather
   than silently dropped. Downloads are pruned after 7 days.
 

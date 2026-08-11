@@ -41,10 +41,18 @@ export function parsePositiveNumber(name: string, fallback: number, opts: { inte
  * knobs on purpose — the binding constraint is the same either way: in
  * Hub–Spoke mode every file crosses the WebSocket RPC base64-encoded (~1.37x
  * its byte size) inside a single JSON message.
+ *
+ * The 10MB default is bounded by Hub memory, not by Slack (which allows 1GB)
+ * or by the WebSocket layer (`ws` defaults to a 100MiB message cap). Nothing
+ * streams: one transfer holds the frame buffer, its string form, the parsed
+ * base64, and the decoded bytes at once — roughly 6x the file size, so ~60MB
+ * of transient allocation here. Measured against the free-tier VM the Hub
+ * actually runs on (954MB total, no swap, ~445MB available), that leaves room
+ * for several concurrent transfers; raising this much further would not.
  */
 function loadAttachmentConfig(): AttachmentLimits {
   return {
-    maxFileBytes: parsePositiveNumber("CCTAG_MAX_FILE_MB", 8) * 1024 * 1024,
+    maxFileBytes: parsePositiveNumber("CCTAG_MAX_FILE_MB", 10) * 1024 * 1024,
     maxFileCount: parsePositiveNumber("CCTAG_MAX_FILE_COUNT", 5, { integer: true }),
   };
 }
