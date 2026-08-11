@@ -57,3 +57,43 @@ test("parsePositiveNumber enforces whole numbers where required", () => {
   );
   withEnv("3", () => assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 5, { integer: true }), 3));
 });
+
+test("each knob is validated against its real domain, not just positivity", () => {
+  // Codex review, Moderate 3. Every case below is a positive finite number that
+  // still misbehaves silently rather than loudly, which is why "positive" alone
+  // was not enough.
+  const cases: Array<{ value: string; opts: Parameters<typeof parsePositiveNumber>[2]; why: string }> = [
+    // 1e308 passes as finite here, then overflows to Infinity once multiplied
+    // into bytes — a cap that compares false against every size.
+    { value: "1e308", opts: { max: 1024 }, why: "file cap must stay multipliable into bytes" },
+    // Node coerces any delay past 2^31-1 to 1ms, so the longest interval anyone
+    // could type behaves like the shortest.
+    { value: "2147483648", opts: { integer: true, min: 100, max: 2_147_483_647 }, why: "timer overflow" },
+    // A plausible way to write "half a second" that would poll ~2000x faster.
+    { value: "0.5", opts: { integer: true, min: 100, max: 2_147_483_647 }, why: "sub-ms poll interval" },
+    { value: "70000", opts: { integer: true, min: 1, max: 65_535 }, why: "port out of range" },
+  ];
+
+  for (const { value, opts, why } of cases) {
+    const previous = process.env.CCTAG_TEST_LIMIT;
+    process.env.CCTAG_TEST_LIMIT = value;
+    try {
+      assert.throws(
+        () => parsePositiveNumber("CCTAG_TEST_LIMIT", 1_000, opts),
+        /must be (at least|at most|a whole number)/,
+        `${value} should be rejected (${why})`,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.CCTAG_TEST_LIMIT;
+      else process.env.CCTAG_TEST_LIMIT = previous;
+    }
+  }
+});
+
+test("values inside the domain still pass, and an unset var still falls back", () => {
+  withEnv("2000", () =>
+    assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 1_500, { integer: true, min: 100, max: 2_147_483_647 }), 2000),
+  );
+  withEnv("10", () => assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 10, { max: 1024 }), 10));
+  withEnv(undefined, () => assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 8765, { min: 1, max: 65_535 }), 8765));
+});

@@ -105,7 +105,35 @@ export class BackgroundWatcher {
 
   private async checkPairing(pairing: Pairing, forceRebaseline: boolean): Promise<void> {
     const agent = await this.herdr.agentGet(pairing.paneId);
-    if (!agent) return;
+    if (!agent) {
+      // Closing the terminal used to be invisible from Slack: the thread stayed
+      // paired and this returned quietly every 7s forever, so the only way to
+      // discover it was to send a message and get startTurn's agent-not-found.
+      // Reported once, from the same place that would have found the work.
+      //
+      // `null` specifically, never a thrown error: agentGet() returns null only
+      // for herdr's own no-such-pane answer, and a herdr timeout must not be
+      // reported as a closed terminal (tick() logs those). Same distinction the
+      // poll loop makes.
+      //
+      // The pairing is dropped rather than kept, matching what a message to a
+      // dead pane already does (commands.ts) — and a paneId is only unique
+      // within a herdr run, so a kept pairing could later attach this thread to
+      // whatever unrelated pane inherits the id.
+      this.pairingStore.remove(pairing.key);
+      this.watches.delete(pairing.paneId);
+      this.busyLastTick.delete(pairing.paneId);
+      console.log(`[watcher] pane ${pairing.paneId} is gone — unpaired ${pairing.key}`);
+      await this.notifier
+        .postReply(
+          pairing.channel,
+          pairing.threadTs ?? "",
+          "⚠️ 接続先のインスタンスが見つかりません（ターミナルが閉じられた可能性があります）。" +
+            "ペアリングを解除しました。`@cctag connect` で再接続してください。",
+        )
+        .catch((err) => console.error(`[watcher] could not report ${pairing.paneId} gone:`, err));
+      return;
+    }
     const driver = driverFor(agent.agent);
 
     const existing = this.watches.get(pairing.paneId);

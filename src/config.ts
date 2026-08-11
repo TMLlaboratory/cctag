@@ -22,8 +22,22 @@ function required(name: string): string {
  * silently removes the cap it was meant to tighten. An empty value is treated
  * as unset rather than as 0, since `Number("")` is 0 and a 0-byte cap would
  * reject every file instead of obviously failing.
+ *
+ * "Positive and finite" is necessary but not sufficient, hence `min`/`max`:
+ * every one of these knobs has a domain outside which a *technically valid*
+ * number still misbehaves silently rather than loudly. A poll interval of 0.5
+ * becomes a millisecond-scale hot loop against herdr; any delay above 2^31-1 is
+ * coerced by Node to 1ms, so an absurdly long interval acts like the shortest
+ * possible one; a port over 65535 fails at listen() long after config load; and
+ * a file cap of 1e308 passes here but overflows to Infinity once multiplied
+ * into bytes, disabling the comparison it exists for. Callers state the real
+ * domain so the value is rejected at startup with its own name attached.
  */
-export function parsePositiveNumber(name: string, fallback: number, opts: { integer?: boolean } = {}): number {
+export function parsePositiveNumber(
+  name: string,
+  fallback: number,
+  opts: { integer?: boolean; min?: number; max?: number } = {},
+): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   const value = Number(raw);
@@ -33,8 +47,17 @@ export function parsePositiveNumber(name: string, fallback: number, opts: { inte
   if (opts.integer && !Number.isInteger(value)) {
     throw new Error(`${name} must be a whole number, got "${raw}"`);
   }
+  if (opts.min !== undefined && value < opts.min) {
+    throw new Error(`${name} must be at least ${opts.min}, got "${raw}"`);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new Error(`${name} must be at most ${opts.max}, got "${raw}"`);
+  }
   return value;
 }
+
+/** Largest value Node's timers accept before coercing the delay to 1ms. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * Caps on files moved in either direction. Both directions share one pair of
@@ -52,8 +75,11 @@ export function parsePositiveNumber(name: string, fallback: number, opts: { inte
  */
 function loadAttachmentConfig(): AttachmentLimits {
   return {
-    maxFileBytes: parsePositiveNumber("CCTAG_MAX_FILE_MB", 10) * 1024 * 1024,
-    maxFileCount: parsePositiveNumber("CCTAG_MAX_FILE_COUNT", 5, { integer: true }),
+    // Capped at Slack's own 1GB per-file limit: anything past it could not be
+    // delivered anyway, and it keeps the MB->bytes multiply below well clear of
+    // the overflow that would turn the cap into Infinity.
+    maxFileBytes: parsePositiveNumber("CCTAG_MAX_FILE_MB", 10, { max: 1024 }) * 1024 * 1024,
+    maxFileCount: parsePositiveNumber("CCTAG_MAX_FILE_COUNT", 5, { integer: true, max: 100 }),
   };
 }
 
@@ -69,8 +95,18 @@ function loadAttachmentConfig(): AttachmentLimits {
  */
 function loadTimingConfig(): { turnTimeoutMs: number; pollIntervalMs: number } {
   return {
-    turnTimeoutMs: parsePositiveNumber("CCTAG_TURN_TIMEOUT_MS", 1_200_000),
-    pollIntervalMs: parsePositiveNumber("CCTAG_POLL_INTERVAL_MS", 1_500),
+    turnTimeoutMs: parsePositiveNumber("CCTAG_TURN_TIMEOUT_MS", 1_200_000, {
+      integer: true,
+      min: 1_000,
+      max: MAX_TIMER_MS,
+    }),
+    // The floor is what keeps a plausible-looking "0.5" from becoming a
+    // millisecond-scale hot loop spawning herdr processes.
+    pollIntervalMs: parsePositiveNumber("CCTAG_POLL_INTERVAL_MS", 1_500, {
+      integer: true,
+      min: 100,
+      max: MAX_TIMER_MS,
+    }),
   };
 }
 
@@ -127,7 +163,7 @@ export function loadHubConfig(): HubConfig {
   return {
     slackBotToken: required("SLACK_BOT_TOKEN"),
     slackAppToken: required("SLACK_APP_TOKEN"),
-    wsPort: parsePositiveNumber("CCTAG_HUB_PORT", 8765, { integer: true }),
+    wsPort: parsePositiveNumber("CCTAG_HUB_PORT", 8765, { integer: true, min: 1, max: 65_535 }),
     ...loadAttachmentConfig(),
   };
 }
