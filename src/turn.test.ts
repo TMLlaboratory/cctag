@@ -300,3 +300,75 @@ test("abortAll stops every poll loop, so a dead transport leaves nothing running
   assert.equal(engine.isBusy(PANE), false);
   assert.equal(engine.abortAll(), 0, "idempotent");
 });
+
+test("a prompt answered twice drives the TUI once", async () => {
+  // Codex review, Moderate 1. Slack buttons can be clicked twice, and the
+  // phase/prompt-id checks alone let both deliveries through: each passes the
+  // check before either reaches the state mutation that happens after `await`.
+  // Both then answered the pane — for Codex that is digit-plus-Enter twice,
+  // whose second copy can land on whatever menu appeared next and confirm it.
+  const { notifier } = fakeNotifier();
+  const sent: string[] = [];
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    // Slow enough that the second click arrives while the first is still in
+    // flight — the real race, rather than a simulated one.
+    async agentSend(_paneId: string, text: string) {
+      await sleep(40);
+      sent.push(text);
+    },
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200); // prompt posted, promptId is now 1
+
+    const first = engine.answerPermissionButton(PANE, 1, "1");
+    const second = await engine.answerPermissionButton(PANE, 1, "1");
+    await first;
+    await sleep(100); // let any second injection land before counting
+
+    assert.equal(second.ok, false, "the second click must be rejected while the first is in flight");
+    assert.equal(sent.length, 1, `the TUI must be driven once, got ${sent.length}: ${JSON.stringify(sent)}`);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a failed answer is not left claimed, so it can be retried", async () => {
+  // The rollback half: if input injection throws, the prompt must go back to
+  // pending rather than wedging the turn with nothing able to answer it.
+  const { notifier } = fakeNotifier();
+  let attempts = 0;
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    async agentSend() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("send-text failed");
+    },
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200);
+
+    await assert.rejects(engine.answerPermissionButton(PANE, 1, "1"), /send-text failed/);
+    const retry = await engine.answerPermissionButton(PANE, 1, "1");
+    assert.deepEqual(retry, { ok: true }, "the same prompt must still be answerable after a failure");
+    assert.equal(attempts, 2);
+  } finally {
+    engine.abortAll();
+  }
+});

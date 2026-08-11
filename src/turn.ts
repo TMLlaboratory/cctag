@@ -89,6 +89,17 @@ interface TurnState {
    *  appearing while the pane stays `blocked` is detectable. Null when the pane
    *  didn't parse — never compared in that case (see promptFingerprint). */
   promptFingerprint?: string | null;
+  /**
+   * Set synchronously the moment an answer is accepted, before any input is
+   * sent, and cleared once the prompt is resolved or the attempt failed.
+   *
+   * The phase/prompt-id checks alone cannot serialize two answers: Slack buttons
+   * can be clicked twice, and both deliveries pass those checks before either
+   * reaches the state mutation that happens after `await`. Both then drive the
+   * TUI — for Codex that is digit-plus-Enter twice, whose second copy can land
+   * on whatever menu appeared next and confirm it.
+   */
+  answering?: boolean;
   promptHandle?: MessageHandle;
   pendingQuestionInfo?: AskUserQuestionPaneInfo;
   // Set when the current awaiting-permission prompt is Claude Code's
@@ -493,47 +504,65 @@ export class TurnEngine {
 
   async answerQuestionButton(paneId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
-    if (!state || state.phase !== "awaiting-question" || state.currentPromptId !== promptId || !state.pendingQuestionInfo) {
+    if (
+      !state ||
+      state.phase !== "awaiting-question" ||
+      state.currentPromptId !== promptId ||
+      !state.pendingQuestionInfo ||
+      state.answering
+    ) {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
     const label = info.options[optionIndex]?.label ?? String(optionIndex + 1);
 
-    await state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
+    state.answering = true; // claimed — see TurnState.answering
+    try {
+      await state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
+    } catch (err) {
+      state.answering = false; // nothing was accepted; let the user try again
+      throw err;
+    }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label), []).catch(() => {});
-    state.promptHandle = undefined;
-    state.pendingQuestionInfo = undefined;
-    state.phase = "running";
+    this.markPromptResolved(state);
     return { ok: true };
   }
 
   async answerQuestionFreeText(paneId: string, freeText: string): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
-    if (!state || state.phase !== "awaiting-question" || !state.pendingQuestionInfo) {
+    if (!state || state.phase !== "awaiting-question" || !state.pendingQuestionInfo || state.answering) {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
-    if (!state.driver.answerQuestionFreeText) return { ok: false, reason: "not-pending" };
+    const answer = state.driver.answerQuestionFreeText;
+    if (!answer) return { ok: false, reason: "not-pending" };
 
-    await state.driver.answerQuestionFreeText(this.herdr, state.paneId, info, freeText);
-
+    state.answering = true;
+    try {
+      await answer(this.herdr, state.paneId, info, freeText);
+    } catch (err) {
+      state.answering = false;
+      throw err;
+    }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, freeText), []).catch(() => {});
-    state.promptHandle = undefined;
-    state.pendingQuestionInfo = undefined;
-    state.phase = "running";
+    this.markPromptResolved(state);
     return { ok: true };
   }
 
   async answerPermissionButton(paneId: string, promptId: number, num: string): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
-    if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId) {
+    if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId || state.answering) {
       return { ok: false, reason: "not-pending" };
     }
-    await state.driver.answerOption(this.herdr, state.paneId, num);
+    state.answering = true;
+    try {
+      await state.driver.answerOption(this.herdr, state.paneId, num);
+    } catch (err) {
+      state.answering = false;
+      throw err;
+    }
     await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
-    state.promptHandle = undefined;
-    state.planFeedbackOptionNum = undefined;
-    state.phase = "running";
+    this.markPromptResolved(state);
     return { ok: true };
   }
 
@@ -547,17 +576,39 @@ export class TurnEngine {
    */
   async answerPlanFeedback(paneId: string, freeText: string): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
-    if (!state || state.phase !== "awaiting-permission" || state.planFeedbackOptionNum === undefined) {
+    if (
+      !state ||
+      state.phase !== "awaiting-permission" ||
+      state.planFeedbackOptionNum === undefined ||
+      state.answering
+    ) {
       return { ok: false, reason: "not-pending" };
     }
-    if (!state.driver.answerPlanFeedback) return { ok: false, reason: "not-pending" };
-    await state.driver.answerPlanFeedback(this.herdr, state.paneId, state.planFeedbackOptionNum, freeText);
+    const answer = state.driver.answerPlanFeedback;
+    if (!answer) return { ok: false, reason: "not-pending" };
 
+    state.answering = true;
+    try {
+      await answer(this.herdr, state.paneId, state.planFeedbackOptionNum, freeText);
+    } catch (err) {
+      state.answering = false;
+      throw err;
+    }
     await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
-    state.promptHandle = undefined;
-    state.planFeedbackOptionNum = undefined;
-    state.phase = "running";
+    this.markPromptResolved(state);
     return { ok: true };
+  }
+
+  /** Clears everything tied to the prompt just answered and hands the turn back
+   *  to the poll loop. Shared by all four answer paths so none can forget a
+   *  field — notably `answering`, which would otherwise wedge the turn. */
+  private markPromptResolved(state: TurnState): void {
+    state.promptHandle = undefined;
+    state.promptFingerprint = undefined;
+    state.pendingQuestionInfo = undefined;
+    state.planFeedbackOptionNum = undefined;
+    state.answering = false;
+    state.phase = "running";
   }
 
   /**
@@ -575,6 +626,7 @@ export class TurnEngine {
     const paneId = state.paneId;
     state.currentPromptId += 1;
     state.promptFingerprint = fingerprint;
+    state.answering = false;
 
     if (prompt.kind === "question") {
       const aq = prompt.info;
@@ -735,10 +787,7 @@ export class TurnEngine {
           // and the agent went straight into the next. Nothing else reports
           // that, so without this the thread would keep offering buttons for a
           // prompt that is gone and never show the one actually waiting.
-          if (state.promptHandle) {
-            await state.promptHandle.update("（ターミナル側で回答済み）", []).catch(() => {});
-            state.promptHandle = undefined;
-          }
+          await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
           state.pendingQuestionInfo = undefined;
           state.planFeedbackOptionNum = undefined;
           await this.postPrompt(state, paneText, prompt, fingerprint);
@@ -751,14 +800,8 @@ export class TurnEngine {
         // Was awaiting an answer, and the terminal is no longer blocked —
         // resolved, either by our own button/free-text (which already
         // cleared promptHandle) or directly at the terminal keyboard.
-        if (state.promptHandle) {
-          await state.promptHandle.update("（ターミナル側で回答済み）", []).catch(() => {});
-          state.promptHandle = undefined;
-        }
-        state.promptFingerprint = undefined;
-        state.pendingQuestionInfo = undefined;
-        state.planFeedbackOptionNum = undefined;
-        state.phase = "running";
+        await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
+        this.markPromptResolved(state);
       }
 
       if (agent.agentStatus === "idle" || agent.agentStatus === "done") {
