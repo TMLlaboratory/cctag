@@ -57,6 +57,23 @@ function loadAttachmentConfig(): AttachmentLimits {
   };
 }
 
+/**
+ * The two turn-loop timings, shared by standalone and Spoke mode.
+ *
+ * Validated for the same reason the file caps are, and with more at stake: both
+ * names end in `_MS`, which invites writing the unit in the value ("20m",
+ * "1.5s"). `Number()` turns that into NaN, and NaN fails silently in the
+ * direction that removes the safeguard — `elapsed > NaN` is always false, so
+ * the turn never times out, and `setTimeout(NaN)` fires after 1ms, turning the
+ * poll loop into a hot loop against herdr (both measured, not inferred).
+ */
+function loadTimingConfig(): { turnTimeoutMs: number; pollIntervalMs: number } {
+  return {
+    turnTimeoutMs: parsePositiveNumber("CCTAG_TURN_TIMEOUT_MS", 1_200_000),
+    pollIntervalMs: parsePositiveNumber("CCTAG_POLL_INTERVAL_MS", 1_500),
+  };
+}
+
 /** Config for standalone mode: a single machine talks to Slack directly. */
 export interface Config extends AttachmentLimits {
   slackBotToken: string;
@@ -73,8 +90,7 @@ export function loadConfig(): Config {
     slackAppToken: required("SLACK_APP_TOKEN"),
     ownerUserId: required("CCTAG_OWNER_USER_ID"),
     herdrBin: process.env.CCTAG_HERDR_BIN ?? "/opt/homebrew/bin/herdr",
-    turnTimeoutMs: Number(process.env.CCTAG_TURN_TIMEOUT_MS ?? 1_200_000),
-    pollIntervalMs: Number(process.env.CCTAG_POLL_INTERVAL_MS ?? 1_500),
+    ...loadTimingConfig(),
     ...loadAttachmentConfig(),
   };
 }
@@ -93,8 +109,7 @@ export function loadSpokeConfig(): SpokeConfig {
   return {
     ownerUserId: required("CCTAG_OWNER_USER_ID"),
     herdrBin: process.env.CCTAG_HERDR_BIN ?? "/opt/homebrew/bin/herdr",
-    turnTimeoutMs: Number(process.env.CCTAG_TURN_TIMEOUT_MS ?? 1_200_000),
-    pollIntervalMs: Number(process.env.CCTAG_POLL_INTERVAL_MS ?? 1_500),
+    ...loadTimingConfig(),
     hubUrl: required("CCTAG_HUB_URL"),
     spokeToken: required("CCTAG_SPOKE_TOKEN"),
     ...loadAttachmentConfig(),
@@ -112,7 +127,7 @@ export function loadHubConfig(): HubConfig {
   return {
     slackBotToken: required("SLACK_BOT_TOKEN"),
     slackAppToken: required("SLACK_APP_TOKEN"),
-    wsPort: Number(process.env.CCTAG_HUB_PORT ?? 8765),
+    wsPort: parsePositiveNumber("CCTAG_HUB_PORT", 8765, { integer: true }),
     ...loadAttachmentConfig(),
   };
 }

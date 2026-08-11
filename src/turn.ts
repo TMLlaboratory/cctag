@@ -57,6 +57,18 @@ interface TurnState {
   statusHandle: MessageHandle;
   lastStatusUpdateAt: number;
   startedAt: number;
+  /**
+   * When to give up, as an absolute time rather than `startedAt + timeout`.
+   *
+   * The distinction matters because a blocked pane is waiting on a person, and
+   * a person taking their time is not a stalled turn. Every poll that finds the
+   * pane blocked pushes this forward, so the timeout only ever measures how
+   * long the *agent* has gone without progress. Without that, an unanswered
+   * prompt timed out on schedule, the turn ended, and BackgroundWatcher — which
+   * adopts any blocked paired pane with no active turn — immediately re-adopted
+   * it and posted the same prompt again, once per timeout window, forever.
+   */
+  deadlineAt: number;
   abort: AbortController;
   // AskUserQuestion / permission prompts are read off the pane, not the
   // transcript — see agents/claude/prompts.ts for why. Each newly-posted
@@ -266,6 +278,7 @@ export class TurnEngine {
         statusHandle,
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
+        deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         abort: new AbortController(),
         currentPromptId: 0,
       };
@@ -421,6 +434,7 @@ export class TurnEngine {
         statusHandle,
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
+        deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         abort: new AbortController(),
         currentPromptId: 0,
       };
@@ -564,16 +578,23 @@ export class TurnEngine {
         }
       }
 
-      // Applied before the `blocked` branch's `continue` below — otherwise an
-      // unanswered prompt (nobody at the keyboard, nobody clicking the Slack
-      // button) would keep the terminal "busy" forever, since blocked never
-      // reaches the timeout check further down.
-      if (Date.now() - state.startedAt > this.opts.turnTimeoutMs) {
+      // A blocked pane is waiting on a person, so the clock doesn't run. This
+      // has to come *before* the check below rather than after: while a prompt
+      // is up the loop sleeps on a 5s floor, so a deadline refreshed only after
+      // the check would already have lapsed by the time the next poll reads it.
+      const blocked = agent.agentStatus === "blocked";
+      if (blocked) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
+
+      if (Date.now() > state.deadlineAt) {
         await this.finalize(paneId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
         return;
       }
 
-      if (agent.agentStatus === "blocked") {
+      if (blocked) {
+        // Staying busy for as long as the prompt is up is what stops
+        // BackgroundWatcher from re-adopting the pane and posting the same
+        // prompt again; and a pane sitting at a prompt is not one a new turn
+        // could start on anyway — text sent to it would land in the dialog.
         if (state.phase === "running") {
           // A NEW prompt appeared (either the first one this turn, or the
           // next one in a multi-question flow — each is independently
