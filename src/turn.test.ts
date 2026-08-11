@@ -10,16 +10,19 @@ import { WrittenFileTracker } from "./attachments.js";
 
 const PANE = "wT:p1";
 
-const PERMISSION_PANE = [
-  "Bash command",
-  "",
-  "  rm -rf build/",
-  "",
-  "Do you want to proceed?",
-  "❯ 1. Yes",
-  "  2. Yes, and don't ask again",
-  "  3. No, and tell Claude what to do differently",
-].join("\n");
+function permissionPane(command: string, cursorOn = 1): string {
+  const opts = ["Yes", "Yes, and don't ask again", "No, and tell Claude what to do differently"];
+  return [
+    "Bash command",
+    "",
+    `  ${command}`,
+    "",
+    "Do you want to proceed?",
+    ...opts.map((label, i) => `${i + 1 === cursorOn ? "❯" : " "} ${i + 1}. ${label}`),
+  ].join("\n");
+}
+
+const PERMISSION_PANE = permissionPane("rm -rf build/");
 
 function fakeAgent(agentStatus: AgentInfo["agentStatus"]): AgentInfo {
   return {
@@ -62,13 +65,16 @@ function fakeNotifier(): { notifier: Notifier; posts: string[] } {
   return { notifier, posts };
 }
 
-function fakeHerdr(status: () => AgentInfo["agentStatus"]): HerdrClient {
+function fakeHerdr(
+  status: () => AgentInfo["agentStatus"],
+  pane: () => string = () => PERMISSION_PANE,
+): HerdrClient {
   return {
     async agentGet() {
       return fakeAgent(status());
     },
     async paneRead() {
-      return PERMISSION_PANE;
+      return pane();
     },
     async agentSend() {},
   } as unknown as HerdrClient;
@@ -130,7 +136,7 @@ test("an unanswered prompt is posted once and does not time out, however long it
   );
   assert.equal(engine.isBusy(PANE), true, "the pane must stay busy so the watcher cannot re-adopt it");
 
-  await engine.abortTurn(PANE);
+  engine.abortAll();
 });
 
 test("the timeout still fires when the agent itself stops making progress", async () => {
@@ -152,4 +158,145 @@ test("the timeout still fires when the agent itself stops making progress", asyn
     "a working pane that never settles should time out exactly once",
   );
   assert.equal(engine.isBusy(PANE), false, "a timed-out turn releases the pane");
+});
+
+test("a prompt replaced at the terminal is re-posted, without the pane ever leaving blocked", async () => {
+  // Codex review, Critical 1. Answering prompt A at the keyboard and landing on
+  // prompt B never passes through a non-blocked status, so the phase guard alone
+  // left the thread offering buttons for a prompt that was already gone while
+  // the one actually waiting was never posted — and, since the pane stays busy,
+  // nothing else would ever surface it.
+  const { notifier, posts } = fakeNotifier();
+  let command = "rm -rf build/";
+  const engine = engineFor(
+    fakeHerdr(
+      () => "blocked",
+      () => permissionPane(command),
+    ),
+    notifier,
+    600_000,
+  );
+
+  await adopt(engine, fakePairing());
+  await sleep(300);
+  assert.equal(posts.filter((p) => p.includes("許可リクエスト")).length, 1, "prompt A posted");
+
+  command = "npm install"; // answered at the keyboard; the agent hits prompt B
+  await sleep(5_600);
+
+  assert.equal(
+    posts.filter((p) => p.includes("許可リクエスト")).length,
+    2,
+    "the replacement prompt must be posted too",
+  );
+
+  engine.abortAll();
+});
+
+test("moving the cursor within the same prompt is not mistaken for a new one", async () => {
+  // The false-positive side of the same fix, and the more dangerous one: a
+  // fingerprint that changed when the user merely pressed Down would re-post a
+  // still-pending prompt on every poll — reintroducing the repetition the
+  // deadline fix removed. The cursor glyph and its indentation must normalize away.
+  const { notifier, posts } = fakeNotifier();
+  let cursor = 1;
+  const engine = engineFor(
+    fakeHerdr(
+      () => "blocked",
+      () => permissionPane("rm -rf build/", cursor),
+    ),
+    notifier,
+    600_000,
+  );
+
+  await adopt(engine, fakePairing());
+  await sleep(300);
+  cursor = 3; // arrow keys at the terminal, prompt still pending
+  await sleep(5_600);
+
+  assert.equal(
+    posts.filter((p) => p.includes("許可リクエスト")).length,
+    1,
+    "navigating the menu is the same prompt",
+  );
+
+  engine.abortAll();
+});
+
+test("a transient herdr failure does not end a live turn", async () => {
+  // Codex review, Critical 5. agentGet() returns null only for herdr's own "no
+  // such pane"; a timeout or spawn failure throws. Treating the two alike killed
+  // turns whose agent was still working, and released the pane to a watcher that
+  // rebaselines — losing the rest of the output. Uses a `working` pane so the
+  // loop keeps its fast interval and the failures actually get reached.
+  const { notifier, posts } = fakeNotifier();
+  let calls = 0;
+  const herdr = {
+    async agentGet() {
+      calls += 1;
+      if (calls === 2 || calls === 3) throw new Error("herdr command timed out");
+      return fakeAgent("working");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    async agentSend() {},
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(300);
+
+    assert.ok(calls >= 4, `the loop should have kept polling through the failures (calls=${calls})`);
+    assert.equal(
+      posts.filter((p) => p.includes("インスタンスが終了") || p.includes("herdrへの問い合わせ")).length,
+      0,
+      "two failures in a row must not be reported as a dead pane",
+    );
+    assert.equal(engine.isBusy(PANE), true, "ownership is preserved across a hiccup");
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("herdr failing persistently does eventually end the turn, with its own message", async () => {
+  const { notifier, posts } = fakeNotifier();
+  const herdr = {
+    async agentGet(): Promise<AgentInfo | null> {
+      throw new Error("herdr command timed out");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    async agentSend() {},
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  await adopt(engine, fakePairing());
+  await sleep(300);
+
+  assert.equal(posts.filter((p) => p.includes("herdrへの問い合わせが連続して失敗")).length, 1);
+  assert.equal(posts.filter((p) => p.includes("インスタンスが終了")).length, 0, "not the same diagnosis");
+  assert.equal(engine.isBusy(PANE), false);
+});
+
+test("abortAll stops every poll loop, so a dead transport leaves nothing running", async () => {
+  // Codex review, Critical 2. On a Spoke reconnect only the watcher was stopped;
+  // the engine's loops kept polling herdr through a notifier whose socket was
+  // gone, and the replacement engine then started a second loop over the same pane.
+  const { notifier } = fakeNotifier();
+  const engine = engineFor(
+    fakeHerdr(() => "blocked"),
+    notifier,
+    600_000,
+  );
+
+  await adopt(engine, fakePairing());
+  await sleep(100);
+  assert.equal(engine.isBusy(PANE), true);
+
+  assert.equal(engine.abortAll(), 1, "reports what it dropped");
+  assert.equal(engine.isBusy(PANE), false);
+  assert.equal(engine.abortAll(), 0, "idempotent");
 });

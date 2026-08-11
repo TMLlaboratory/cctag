@@ -151,6 +151,38 @@ export interface AgentDriver {
   runModelCommand(herdr: HerdrClient, agent: { paneId: string }, argsText: string): Promise<string>;
 }
 
+/**
+ * Identity of the prompt currently on a pane, or null if nothing recognizable
+ * is showing.
+ *
+ * Exists because herdr reports one `blocked` for every prompt: answering one at
+ * the terminal and landing on the next never passes through a non-blocked
+ * status, so "is this still the prompt we posted?" cannot be answered from
+ * status alone. Comparing this across polls is what catches the substitution.
+ *
+ * Everything the user can change *without* resolving the prompt is deliberately
+ * excluded, since a false difference would re-post a prompt that is still
+ * pending — the very repetition this was untangled from. That means the cursor
+ * marker (moved by arrow keys) and multi-select checkbox state (toggled with
+ * space) are normalized away; the option text and the command being asked about
+ * are what remain. Returns null rather than a fingerprint of nothing when the
+ * pane doesn't parse, so an empty or garbled read is never mistaken for a
+ * change.
+ */
+export function promptFingerprint(prompt: BlockedPrompt): string | null {
+  if (prompt.kind === "question") {
+    const info = prompt.info;
+    return ["q", info.header, info.question, ...info.options.map((o) => o.label)].join(" ");
+  }
+  if (!prompt.menu) return null;
+  const choices = prompt.menu.choices.map((c) => `${c.num}.${c.label}`).join(" ");
+  // The snippet carries the cursor glyph on whichever option is selected, and
+  // its indentation shifts with it — strip both so navigating the menu reads as
+  // the same prompt.
+  const context = prompt.menu.snippet.replace(/[›❯>]/g, "").replace(/\s+/g, " ").trim();
+  return ["p", choices, context].join(" ");
+}
+
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;
 const REFUSAL_LABEL_RE = /no|cancel|拒否|キャンセル|don'?t/i;
 

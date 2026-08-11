@@ -56,7 +56,14 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
       const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
       watcher.start();
-      ws.once("close", () => watcher.stop());
+      ws.once("close", () => {
+        // Both halves have to stop, not just the watcher: this connection's
+        // engine holds poll loops whose only way to reach Slack was the notifier
+        // wrapping the socket that just closed. See TurnEngine.abortAll.
+        watcher.stop();
+        const dropped = turnEngine.abortAll();
+        if (dropped > 0) console.log(`[spoke] dropped ${dropped} in-flight turn(s) on disconnect`);
+      });
 
       pairingStore.onChange = (change) => {
         rpc.notify("pairing_changed", {

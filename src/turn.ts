@@ -14,10 +14,17 @@ import {
   type SavedAttachment,
 } from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
+import type { AgentInfo } from "./herdr/types.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
-import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo } from "./agents/driver.js";
+import {
+  driverFor,
+  promptFingerprint,
+  type AgentDriver,
+  type AskUserQuestionPaneInfo,
+  type BlockedPrompt,
+} from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 import { postSegmented } from "./slack/post.js";
 import {
@@ -69,12 +76,19 @@ interface TurnState {
    * it and posted the same prompt again, once per timeout window, forever.
    */
   deadlineAt: number;
+  /** Consecutive herdr query failures, reset by any success. Distinguishes a
+   *  flaky herdr from a pane that is genuinely gone. */
+  herdrFailures: number;
   abort: AbortController;
   // AskUserQuestion / permission prompts are read off the pane, not the
   // transcript — see agents/claude/prompts.ts for why. Each newly-posted
   // prompt gets a fresh id so stale button clicks (from an already-resolved
   // or already-superseded prompt) can be rejected.
   currentPromptId: number;
+  /** Identity of the prompt `promptHandle` is showing, so a different one
+   *  appearing while the pane stays `blocked` is detectable. Null when the pane
+   *  didn't parse — never compared in that case (see promptFingerprint). */
+  promptFingerprint?: string | null;
   promptHandle?: MessageHandle;
   pendingQuestionInfo?: AskUserQuestionPaneInfo;
   // Set when the current awaiting-permission prompt is Claude Code's
@@ -116,6 +130,16 @@ export interface StartTurnOptions {
  * empty, which is why over-retrying is safe and under-retrying is not.
  */
 const SUBMIT_RETRIES_WITH_IMAGES = 6;
+
+/**
+ * How many herdr queries in a row may fail before a turn gives up on its pane.
+ *
+ * Each herdr call already has its own 15s timeout, so this tolerates roughly a
+ * minute of herdr being unreachable — long enough to ride out a restart (the
+ * Homebrew auto-update case that produced `protocol_mismatch` before) without
+ * abandoning a turn whose agent is still working perfectly well.
+ */
+const HERDR_FAILURES_BEFORE_GIVING_UP = 3;
 
 export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
 
@@ -182,6 +206,22 @@ export class TurnEngine {
     if (!state) return;
     state.abort.abort();
     this.turns.delete(paneId);
+  }
+
+  /**
+   * Abandons every in-flight turn. Called when this engine's notifier dies —
+   * in Spoke mode the WebSocket to the Hub dropping — because a poll loop that
+   * outlives its transport is worse than no loop at all: it can't deliver
+   * anything, yet it keeps polling herdr, and the replacement engine built for
+   * the new connection starts a *second* loop over the same panes. If a pane is
+   * blocked, the new side then posts the prompt the old side still thinks it
+   * owns. Returns how many turns were dropped, for the log line.
+   */
+  abortAll(): number {
+    const count = this.turns.size;
+    for (const state of this.turns.values()) state.abort.abort();
+    this.turns.clear();
+    return count;
   }
 
   async startTurn(pairing: Pairing, requesterUserId: string, text: string, opts: StartTurnOptions = {}): Promise<void> {
@@ -279,6 +319,7 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
+        herdrFailures: 0,
         abort: new AbortController(),
         currentPromptId: 0,
       };
@@ -435,6 +476,7 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
+        herdrFailures: 0,
         abort: new AbortController(),
         currentPromptId: 0,
       };
@@ -518,6 +560,68 @@ export class TurnEngine {
     return { ok: true };
   }
 
+  /**
+   * Posts the prompt currently on the pane and moves the turn into the matching
+   * awaiting-* phase. Called both for the first prompt of a blocked stretch and
+   * for one that replaced it while the pane never left `blocked`, so it must not
+   * assume anything about the phase it starts from.
+   */
+  private async postPrompt(
+    state: TurnState,
+    paneText: string,
+    prompt: BlockedPrompt,
+    fingerprint: string | null,
+  ): Promise<void> {
+    const paneId = state.paneId;
+    state.currentPromptId += 1;
+    state.promptFingerprint = fingerprint;
+
+    if (prompt.kind === "question") {
+      const aq = prompt.info;
+      state.pendingQuestionInfo = aq;
+      state.promptHandle = await this.notifier.postMessage(
+        state.pairing.channel,
+        state.pairing.threadTs ?? "",
+        `❓ ${aq.header}: ${aq.question}`,
+        askUserQuestionBlocks(paneId, state.currentPromptId, aq),
+      );
+      state.phase = "awaiting-question";
+      return;
+    }
+
+    const { menu, isPlanPrompt, planFeedbackOptionNum: feedbackNum } = prompt;
+    state.planFeedbackOptionNum = feedbackNum;
+
+    if (isPlanPrompt && this.notifier.uploadTextFile) {
+      await this.attachPlanFile(state, paneText).catch((err) =>
+        console.error(`[turn ${paneId}] plan file attach failed:`, err),
+      );
+    }
+
+    // Drop the "Tell Claude what to change" option from the buttons: its digit
+    // only moves the cursor, it doesn't confirm (it expects typed feedback
+    // next), so a button for it would be a dead end. That path is handled by a
+    // free-text thread reply instead (answerPlanFeedback), which the header
+    // points the user to.
+    const buttonMenu =
+      menu && feedbackNum !== undefined
+        ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
+        : menu;
+
+    const header = isPlanPrompt
+      ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
+      : "⚠️ 許可リクエスト";
+    state.promptHandle = await this.notifier.postMessage(
+      state.pairing.channel,
+      state.pairing.threadTs ?? "",
+      header,
+      buttonMenu
+        ? permissionBlocks(paneId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
+        : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
+    );
+    state.phase = "awaiting-permission";
+  }
+
   private async pollLoop(paneId: string): Promise<void> {
     const state = this.turns.get(paneId);
     if (!state) return;
@@ -532,7 +636,28 @@ export class TurnEngine {
       // different, newly-started turn.
       if (state.abort.signal.aborted) return;
 
-      const agent = await this.herdr.agentGet(paneId).catch(() => null);
+      // `null` and a thrown error mean different things and must not be
+      // conflated: agentGet() returns null only for herdr's own "no such pane"
+      // answer, but throws for a command timeout, a spawn failure, or output it
+      // can't parse. Treating the second as a dead pane ended live turns on a
+      // transient hiccup — and, because finalize() releases the pane, handed it
+      // to the watcher, which rebaselines and drops the rest of the output.
+      let agent: AgentInfo | null;
+      try {
+        agent = await this.herdr.agentGet(paneId);
+        state.herdrFailures = 0;
+      } catch (err) {
+        state.herdrFailures += 1;
+        if (state.herdrFailures <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+          console.error(
+            `[turn ${paneId}] herdr query failed (${state.herdrFailures}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+            err instanceof Error ? err.message : err,
+          );
+          continue;
+        }
+        await this.finalize(paneId, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
+        return;
+      }
       if (!agent) {
         await this.finalize(paneId, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
         return;
@@ -595,58 +720,30 @@ export class TurnEngine {
         // BackgroundWatcher from re-adopting the pane and posting the same
         // prompt again; and a pane sitting at a prompt is not one a new turn
         // could start on anyway — text sent to it would land in the dialog.
+        const paneText = await this.herdr.paneRead(state.paneId, { source: state.driver.paneReadSource, lines: 60 });
+        const prompt = state.driver.parseBlockedPane(paneText);
+        const fingerprint = promptFingerprint(prompt);
+
         if (state.phase === "running") {
           // A NEW prompt appeared (either the first one this turn, or the
           // next one in a multi-question flow — each is independently
           // parsed off the pane; see prompts.ts).
-          const paneText = await this.herdr.paneRead(state.paneId, { source: state.driver.paneReadSource, lines: 60 });
-          const prompt = state.driver.parseBlockedPane(paneText);
-          state.currentPromptId += 1;
-          if (prompt.kind === "question") {
-            const aq = prompt.info;
-            state.pendingQuestionInfo = aq;
-            state.promptHandle = await this.notifier.postMessage(
-              state.pairing.channel,
-              state.pairing.threadTs ?? "",
-              `❓ ${aq.header}: ${aq.question}`,
-              askUserQuestionBlocks(paneId, state.currentPromptId, aq),
-            );
-            state.phase = "awaiting-question";
-          } else {
-            const { menu, isPlanPrompt, planFeedbackOptionNum: feedbackNum } = prompt;
-            state.planFeedbackOptionNum = feedbackNum;
-
-            if (isPlanPrompt && this.notifier.uploadTextFile) {
-              await this.attachPlanFile(state, paneText).catch((err) =>
-                console.error(`[turn ${paneId}] plan file attach failed:`, err),
-              );
-            }
-
-            // Drop the "Tell Claude what to change" option from the buttons:
-            // its digit only moves the cursor, it doesn't confirm (it expects
-            // typed feedback next), so a button for it would be a dead end.
-            // That path is handled by a free-text thread reply instead
-            // (answerPlanFeedback), which the header points the user to.
-            const buttonMenu =
-              menu && feedbackNum !== undefined
-                ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
-                : menu;
-
-            const header = isPlanPrompt
-              ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
-              : "⚠️ 許可リクエスト";
-            state.promptHandle = await this.notifier.postMessage(
-              state.pairing.channel,
-              state.pairing.threadTs ?? "",
-              header,
-              buttonMenu
-                ? permissionBlocks(paneId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
-                : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
-            );
-            state.phase = "awaiting-permission";
+          await this.postPrompt(state, paneText, prompt, fingerprint);
+        } else if (fingerprint !== null && state.promptFingerprint !== null && fingerprint !== state.promptFingerprint) {
+          // A DIFFERENT prompt is showing than the one posted, without the pane
+          // ever leaving `blocked`: the pending one was answered at the keyboard
+          // and the agent went straight into the next. Nothing else reports
+          // that, so without this the thread would keep offering buttons for a
+          // prompt that is gone and never show the one actually waiting.
+          if (state.promptHandle) {
+            await state.promptHandle.update("（ターミナル側で回答済み）", []).catch(() => {});
+            state.promptHandle = undefined;
           }
+          state.pendingQuestionInfo = undefined;
+          state.planFeedbackOptionNum = undefined;
+          await this.postPrompt(state, paneText, prompt, fingerprint);
         }
-        // else: already showing a prompt for this blocked state — keep waiting.
+        // else: still the same prompt we already posted — keep waiting.
         continue;
       }
 
@@ -658,6 +755,7 @@ export class TurnEngine {
           await state.promptHandle.update("（ターミナル側で回答済み）", []).catch(() => {});
           state.promptHandle = undefined;
         }
+        state.promptFingerprint = undefined;
         state.pendingQuestionInfo = undefined;
         state.planFeedbackOptionNum = undefined;
         state.phase = "running";
