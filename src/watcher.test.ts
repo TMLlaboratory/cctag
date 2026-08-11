@@ -104,3 +104,35 @@ test("a herdr error is not reported as a closed terminal", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a pairing from before pane-id addressing is diagnosed as stale, not as a closed terminal", async () => {
+  // Observed in production right after deploying the check above: three such
+  // pairings existed and logged "pane undefined is gone". They do need clearing
+  // — nothing can resolve them — but "the terminal was closed" is the wrong
+  // reason to give someone, and it never reaches herdr to find that out.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = new PairingStore(join(dir, "pairings.json"));
+    store.add({ ...fakePairing(), paneId: undefined as unknown as string });
+    const { notifier, replies } = fakeNotifier();
+    let queried = 0;
+    const herdr = {
+      async agentGet() {
+        queried += 1;
+        return null;
+      },
+    } as unknown as HerdrClient;
+
+    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20);
+    watcher.start();
+    await sleep(150);
+    watcher.stop();
+
+    assert.equal(replies.length, 1, "reported once");
+    assert.match(replies[0], /古い形式/);
+    assert.equal(queried, 0, "no point asking herdr about a target it cannot resolve");
+    assert.equal(store.list().length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -104,6 +104,26 @@ export class BackgroundWatcher {
   }
 
   private async checkPairing(pairing: Pairing, forceRebaseline: boolean): Promise<void> {
+    // Pairings written before cctag addressed panes by pane_id have no paneId at
+    // all, so every herdr call for them resolves nothing and the thread has been
+    // inert since the upgrade. Same outcome as a closed terminal — unpair and
+    // say so — but diagnosed separately, because "the terminal was closed" is
+    // both wrong and unactionable here, and because it keeps the reason out of
+    // the log line as a literal `undefined`.
+    if (!pairing.paneId) {
+      this.pairingStore.remove(pairing.key);
+      console.log(`[watcher] pairing ${pairing.key} predates pane-id addressing — unpaired`);
+      await this.notifier
+        .postReply(
+          pairing.channel,
+          pairing.threadTs ?? "",
+          "⚠️ このスレッドのペアリングは古い形式のため利用できなくなっていました。" +
+            "解除したので、`@cctag connect` で再接続してください。",
+        )
+        .catch((err) => console.error(`[watcher] could not report stale pairing ${pairing.key}:`, err));
+      return;
+    }
+
     const agent = await this.herdr.agentGet(pairing.paneId);
     if (!agent) {
       // Closing the terminal used to be invisible from Slack: the thread stayed
