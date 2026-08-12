@@ -61,6 +61,16 @@ const TYPE_SOMETHING_RE = /^\s*(?:❯\s*)?(\d+)\.\s*Type something\.?\s*$/;
 const OPTION_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(?:\[([ x✔])\]\s*)?(.+?)\s*$/;
 const HEADER_LINE_RE = /^\s*[☐☒]\s*(.+?)\s*$/;
 const NUMBERED_START_RE = /^\s*(?:❯\s*)?\d+\./;
+/**
+ * The tab bar a multi-question AskUserQuestion draws above the current
+ * question: `←  ☐ 配色  ☐ フォント  ✔ Submit  →`. Recognized so it can be
+ * excluded — it is neither the header nor the question, and treating it as the
+ * latter put that whole line in Slack where the question belonged (measured on
+ * a reproduced two-question dialog).
+ */
+const QUESTION_TAB_BAR_RE = /[☐☒].*(?:Submit|→)|(?:←|→).*[☐☒]/;
+/** A horizontal rule the TUI uses as a separator, never content. */
+const RULE_LINE_RE = /^[\s─━—-]+$/;
 
 /** Returns null if this pane text isn't showing an AskUserQuestion menu. */
 export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneInfo | null {
@@ -78,32 +88,22 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
   }
   if (typeSomethingIdx === -1) return null;
 
-  let headerLineIdx = -1;
-  for (let i = typeSomethingIdx; i >= 0; i--) {
-    if (HEADER_LINE_RE.test(lines[i])) {
-      headerLineIdx = i;
-      break;
-    }
-  }
-  const header = headerLineIdx >= 0 ? (HEADER_LINE_RE.exec(lines[headerLineIdx])?.[1] ?? "質問") : "質問";
-
-  let questionLineIdx = -1;
-  for (let i = headerLineIdx + 1; i < typeSomethingIdx; i++) {
-    if (lines[i].trim() && !NUMBERED_START_RE.test(lines[i])) {
-      questionLineIdx = i;
-      break;
-    }
-  }
-  const question = questionLineIdx >= 0 ? lines[questionLineIdx].trim() : "";
-
+  // Options first, then the question. The old order — question, then options
+  // after it — meant option 1's own line was skipped whenever the question
+  // wasn't where it guessed, and the result still passed validation because
+  // `Array.prototype.some` walks past holes in a sparse array: a dialog came
+  // back with a null first option and one of the descriptions as its question.
+  const expected = typeSomethingNum - 1;
+  if (expected < 1) return null;
+  const optionIdx: number[] = [];
   const options: AskUserQuestionOption[] = [];
   let multiSelect = false;
-  const firstOptionSearchStart = questionLineIdx >= 0 ? questionLineIdx + 1 : headerLineIdx + 1;
-  for (let i = firstOptionSearchStart; i < typeSomethingIdx; i++) {
+  for (let i = 0; i < typeSomethingIdx; i++) {
     const m = OPTION_LINE_RE.exec(lines[i]);
     if (!m) continue;
     const num = parseInt(m[1], 10);
-    if (num < 1 || num >= typeSomethingNum) continue;
+    if (num < 1 || num > expected) continue;
+    if (options[num - 1] !== undefined) continue; // first sighting wins
     if (m[2] !== undefined) multiSelect = true;
 
     let description = "";
@@ -112,8 +112,40 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
       description += (description ? " " : "") + lines[j].trim();
     }
     options[num - 1] = { label: m[3], description: description || undefined };
+    optionIdx[num - 1] = i;
   }
-  if (options.length !== typeSomethingNum - 1 || options.some((o) => !o)) return null;
+  // Explicit index check, not `.some()`, for the sparse-array reason above.
+  for (let i = 0; i < expected; i++) {
+    if (options[i] === undefined) return null;
+  }
+
+  const firstOptionIdx = optionIdx[0];
+  const isProse = (line: string): boolean =>
+    line.trim().length > 0 &&
+    !NUMBERED_START_RE.test(line) &&
+    !QUESTION_TAB_BAR_RE.test(line) &&
+    !RULE_LINE_RE.test(line) &&
+    !HEADER_LINE_RE.test(line);
+
+  // Nearest prose line above the first option — the question sits directly
+  // above its options in every layout measured.
+  let question = "";
+  for (let i = firstOptionIdx - 1; i >= 0; i--) {
+    if (isProse(lines[i])) {
+      question = lines[i].trim();
+      break;
+    }
+  }
+
+  let header = "質問";
+  for (let i = firstOptionIdx; i >= 0; i--) {
+    if (QUESTION_TAB_BAR_RE.test(lines[i])) continue;
+    const m = HEADER_LINE_RE.exec(lines[i]);
+    if (m) {
+      header = m[1];
+      break;
+    }
+  }
 
   return { header, question, options, multiSelect };
 }
