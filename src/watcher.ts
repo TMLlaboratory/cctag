@@ -158,20 +158,54 @@ export class BackgroundWatcher {
 
     const existing = this.watches.get(pairing.paneId);
     const sessionId = agent.sessionId ?? "";
-    const sessionRotated = existing !== undefined && sessionId !== "" && sessionId !== existing.sessionId;
+    let sessionRotated = existing !== undefined && sessionId !== "" && sessionId !== existing.sessionId;
+
+    // A session id is the cheap way to notice the CLI restarted, but not every
+    // agent reports one — Codex routinely doesn't, which is exactly why both
+    // drivers keep a cwd-based transcript fallback. Without a session id to
+    // compare, rotation was undetectable: the watch held the transcript path
+    // resolved on first sight forever, so after a restart in the same pane it
+    // tailed a file nothing writes to any more and terminal-side responses
+    // stopped appearing, silently and permanently.
+    //
+    // So when there's no id to compare — or no path yet, which is the same
+    // problem seen from the other end — re-resolve and treat a different answer
+    // as rotation. Only in those cases: a pane that does report an id keeps the
+    // cheap comparison, and this walk opens transcript files to match on cwd.
+    // True only for a transcript that did not exist when watching began, whose
+    // every record therefore postdates it — see the offset choice below.
+    let transcriptAppeared = false;
+    if (existing !== undefined && !sessionRotated && (sessionId === "" || existing.transcriptPath === "")) {
+      const resolved = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      if (resolved !== existing.transcriptPath) {
+        sessionRotated = true;
+        transcriptAppeared = existing.transcriptPath === "" && resolved !== "";
+      }
+    }
 
     if (!existing || sessionRotated || forceRebaseline) {
       const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       this.watches.set(pairing.paneId, {
         sessionId,
         transcriptPath: tPath,
-        offset: tPath ? transcriptSizeSafe(tPath) : 0,
+        // Normally the end of the file: on first sight, on resuming after a turn,
+        // and on a restart, whatever is already written either predates watching
+        // or was already reported, and replaying it would dump an old session
+        // into the thread.
+        //
+        // The exception is a transcript that only just came into existence. Codex
+        // creates its rollout file lazily — not at launch, but when a turn first
+        // runs — so this is the ordinary case for it, and baselining at the end
+        // would silently drop that entire first turn rather than a few seconds of
+        // it. Nothing in the file can predate watching, so reading it whole is
+        // both safe and the only way that turn reaches Slack.
+        offset: tPath && !transcriptAppeared ? transcriptSizeSafe(tPath) : 0,
         lastStatus: agent.agentStatus,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
         writes: new WrittenFileTracker(),
       });
-      return; // never replay pre-existing history on first sight / resume / rotation
+      return;
     }
 
     const state = existing;
