@@ -9,6 +9,28 @@ export function transcriptSizeSafe(path: string): number {
 }
 
 /**
+ * Whether this transcript came into existence after `sinceMs`.
+ *
+ * Distinguishes a file that genuinely did not exist yet from one that was merely
+ * unresolvable for a moment — the locators fold a failed readdir, stat or
+ * first-line read into the same `null`, so "no path, then a path" alone cannot
+ * tell those apart, and treating the second as new would replay a whole existing
+ * session into the thread.
+ *
+ * Conservative when the answer isn't knowable: a filesystem that reports no
+ * birth time (birthtimeMs of 0) counts as not-new, so the caller baselines at the
+ * end and drops output rather than risking a replay.
+ */
+export function transcriptCreatedAfter(path: string, sinceMs: number): boolean {
+  try {
+    const { birthtimeMs } = statSync(path);
+    return birthtimeMs > 0 && birthtimeMs >= sinceMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Reads all complete JSONL lines after `offset` bytes. Returns the parsed
  * records (as loosely-typed objects — each driver casts to its own record
  * shape) and the new offset (which stops at the last full line — a

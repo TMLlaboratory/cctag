@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundWatcher } from "./watcher.js";
@@ -178,6 +178,23 @@ function rotatingHerdr(cwd: string, status: () => AgentInfo["agentStatus"]): Her
   } as unknown as HerdrClient;
 }
 
+/** An engine stand-in whose pane can be reported busy for one tick, standing in
+ *  for a Slack turn holding it — which is what makes the watcher resume with
+ *  forceRebaseline set. */
+function engineBusyOnce(): { engine: TurnEngine; setBusy: (ticks: number) => void } {
+  let remaining = 0;
+  const engine = {
+    isBusy: () => {
+      if (remaining > 0) {
+        remaining -= 1;
+        return true;
+      }
+      return false;
+    },
+  } as unknown as TurnEngine;
+  return { engine, setBusy: (ticks: number) => (remaining = ticks) };
+}
+
 async function withRotationFixture(
   run: (ctx: {
     cwd: string;
@@ -185,14 +202,20 @@ async function withRotationFixture(
     store: PairingStore;
     replies: string[];
     setStatus: (s: AgentInfo["agentStatus"]) => void;
+    /** Report the pane busy for the next N ticks, as a Slack turn would. */
+    setBusy: (ticks: number) => void;
+    /** Make the transcript directory unresolvable, as a transient failure would. */
+    hideTranscript: (hidden: boolean) => void;
     start: () => BackgroundWatcher;
   }) => Promise<void>,
 ): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), "cctag-rot-"));
   const tDir = transcriptDirFor(cwd);
+  const hiddenDir = tDir + "-hidden";
   const storeDir = mkdtempSync(join(tmpdir(), "cctag-rot-store-"));
   let status: AgentInfo["agentStatus"] = "working";
   let watcher: BackgroundWatcher | undefined;
+  const { engine, setBusy } = engineBusyOnce();
   try {
     const store = new PairingStore(join(storeDir, "pairings.json"));
     store.add({ ...fakePairing(), cwd });
@@ -203,11 +226,17 @@ async function withRotationFixture(
       store,
       replies,
       setStatus: (s) => (status = s),
+      setBusy,
+      hideTranscript: (hidden) => {
+        // Renaming the directory is how a locator gets its readdir failure.
+        if (hidden) renameSync(tDir, hiddenDir);
+        else renameSync(hiddenDir, tDir);
+      },
       start: () => {
         watcher = new BackgroundWatcher(
           rotatingHerdr(cwd, () => status),
           store,
-          idleEngine,
+          engine,
           notifier,
           20,
         );
@@ -217,6 +246,7 @@ async function withRotationFixture(
     });
   } finally {
     watcher?.stop();
+    rmSync(hiddenDir, { recursive: true, force: true });
     rmSync(tDir, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
     rmSync(storeDir, { recursive: true, force: true });
@@ -287,6 +317,59 @@ test("a transcript that already existed is still never replayed", async () => {
       replies.filter((r) => r.includes("前の発言")).length,
       0,
       `history must not be replayed, got ${JSON.stringify(replies)}`,
+    );
+  });
+});
+
+test("resuming after a Slack turn never re-reads the transcript that turn reported", async () => {
+  // Codex re-review, Critical 3. For a Codex pane the first rollout is created by
+  // whichever turn runs first, so a Slack turn creating it is the ordinary case —
+  // and then the watcher resumes with both "rebaseline after a turn" and
+  // "transcript appeared" true at once. Reading from 0 won that race and the
+  // watcher collected everything TurnEngine had just posted, re-posting the lot
+  // at the next settle.
+  await withRotationFixture(async ({ tDir, replies, setStatus, start, setBusy }) => {
+    // The watch has to exist first, with no transcript resolved, which is the
+    // state a Codex pane sits in before anything has run in it.
+    start();
+    await sleep(80);
+
+    setBusy(4); // a Slack turn takes the pane
+    writeTranscript(tDir, "session-a.jsonl", ["ターンがSlackに投稿した応答"]);
+    await sleep(160); // the turn runs and reports that output itself
+
+    // Now the watcher resumes: rebaseline-after-turn and transcript-appeared are
+    // true on the same tick, which is the collision.
+    await sleep(120);
+    setStatus("idle");
+    await sleep(140);
+
+    assert.ok(
+      !replies.some((r) => r.includes("ターンがSlackに投稿した応答")),
+      `the turn's own output must not be posted again, got ${JSON.stringify(replies)}`,
+    );
+  });
+});
+
+test("a transcript that only failed to resolve for a moment is not read from the start", async () => {
+  // Codex re-review, Moderate 1. The locators fold a failed readdir or first-line
+  // read into the same null as "not created yet", so "" -> path cannot by itself
+  // mean the file is new. Here the file predates watching and merely became
+  // visible later; reading it whole would dump an old session into the thread.
+  await withRotationFixture(async ({ tDir, replies, setStatus, start, hideTranscript }) => {
+    writeTranscript(tDir, "session-a.jsonl", ["ずっと前からある発言"]);
+    hideTranscript(true); // resolution fails on the first tick
+    start();
+    await sleep(80);
+
+    hideTranscript(false); // and succeeds on the next
+    await sleep(160);
+    setStatus("idle");
+    await sleep(140);
+
+    assert.ok(
+      !replies.some((r) => r.includes("ずっと前からある発言")),
+      `an existing transcript must not be replayed, got ${JSON.stringify(replies)}`,
     );
   });
 });

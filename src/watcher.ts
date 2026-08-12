@@ -4,7 +4,7 @@ import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { snapshotOutbox, WrittenFileTracker, type DirSnapshot } from "./attachments.js";
 import { postSegmented } from "./slack/post.js";
-import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { readNewRecords, transcriptCreatedAfter, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 
@@ -16,6 +16,9 @@ interface WatchState {
   sessionId: string;
   transcriptPath: string;
   offset: number;
+  /** When this watch was (re)baselined. A transcript created after it holds
+   *  nothing this watcher could already have reported. */
+  startedAt: number;
   lastStatus: string;
   collected: string[];
   /** `<cwd>/.cctag/outbox` as of the last report, so terminal-initiated work
@@ -204,7 +207,22 @@ export class BackgroundWatcher {
       const resolved = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       if (resolved !== existing.transcriptPath) {
         sessionRotated = true;
-        transcriptAppeared = existing.transcriptPath === "" && resolved !== "";
+        // Two guards on reading a newly-resolved transcript from the start.
+        //
+        // Not while resuming from a turn: TurnEngine has just reported that
+        // transcript itself, and a Slack turn is what creates the first rollout
+        // for a Codex pane — so this combination is the ordinary one, and reading
+        // from 0 would repost the whole turn on the next settle.
+        //
+        // And only if the file was actually created after watching began. The
+        // locators fold a failed readdir or first-line read into the same null as
+        // "not there yet", so "no path, then a path" can equally mean one
+        // unlucky resolution of a long-standing transcript.
+        transcriptAppeared =
+          existing.transcriptPath === "" &&
+          resolved !== "" &&
+          !forceRebaseline &&
+          transcriptCreatedAfter(resolved, existing.startedAt);
       }
     }
 
@@ -225,6 +243,7 @@ export class BackgroundWatcher {
         // it. Nothing in the file can predate watching, so reading it whole is
         // both safe and the only way that turn reaches Slack.
         offset: tPath && !transcriptAppeared ? transcriptSizeSafe(tPath) : 0,
+        startedAt: Date.now(),
         lastStatus: agent.agentStatus,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
