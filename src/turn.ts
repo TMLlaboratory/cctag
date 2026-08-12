@@ -155,6 +155,19 @@ const SUBMIT_RETRIES_WITH_IMAGES = 6;
  */
 const HERDR_FAILURES_BEFORE_GIVING_UP = 3;
 
+/**
+ * How much of a blocked pane to read before parsing the prompt on it.
+ *
+ * Was 60, which is not enough: a question whose options carry previews draws the
+ * preview in a box beside them, and a long preview pushes the option lines out
+ * of the window entirely. Measured on a real dialog with a 12-line preview — at
+ * 60 lines the option rows were absent and parsing returned nothing, at 80 they
+ * were present. Previews are unbounded, so this leaves real headroom; a pane read
+ * is cheap text, and both parsers now bind to the *last* dialog in the window so
+ * a wider read cannot make them latch onto an older one.
+ */
+const BLOCKED_PANE_LINES = 200;
+
 export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
 
 /** Transcript-tracking state BackgroundWatcher had already collected for a
@@ -552,7 +565,10 @@ export class TurnEngine {
 
     state.answering = true; // claimed — see TurnState.answering
     try {
-      await state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
+      const answer = state.driver.answerQuestionOption
+        ? state.driver.answerQuestionOption(this.herdr, state.paneId, optionIndex + 1, info)
+        : state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
+      await answer;
     } catch (err) {
       state.answering = false; // nothing was accepted; let the user try again
       throw err;
@@ -806,7 +822,10 @@ export class TurnEngine {
         // BackgroundWatcher from re-adopting the pane and posting the same
         // prompt again; and a pane sitting at a prompt is not one a new turn
         // could start on anyway — text sent to it would land in the dialog.
-        const paneText = await this.herdr.paneRead(state.paneId, { source: state.driver.paneReadSource, lines: 60 });
+        const paneText = await this.herdr.paneRead(state.paneId, {
+          source: state.driver.paneReadSource,
+          lines: BLOCKED_PANE_LINES,
+        });
         const prompt = state.driver.parseBlockedPane(paneText);
         const fingerprint = promptFingerprint(prompt);
 

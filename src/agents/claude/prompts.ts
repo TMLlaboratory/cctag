@@ -76,9 +76,12 @@ const RULE_LINE_RE = /^[\s─━—-]+$/;
 export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneInfo | null {
   const lines = paneText.split("\n");
 
+  // The *last* one on screen: a pane read wide enough to hold a tall dialog can
+  // also still hold an older, already-answered one, and the live dialog is
+  // always the bottom-most. Anchoring on the first would parse the dead one.
   let typeSomethingIdx = -1;
   let typeSomethingNum = -1;
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = lines.length - 1; i >= 0; i--) {
     const m = TYPE_SOMETHING_RE.exec(lines[i]);
     if (m) {
       typeSomethingIdx = i;
@@ -103,7 +106,8 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
     if (!m) continue;
     const num = parseInt(m[1], 10);
     if (num < 1 || num > expected) continue;
-    if (options[num - 1] !== undefined) continue; // first sighting wins
+    // Last sighting wins, for the same reason the anchor is the last row: the
+    // option lines nearest the anchor belong to the dialog actually on screen.
     if (m[2] !== undefined) multiSelect = true;
 
     let description = "";
@@ -192,27 +196,45 @@ export function parsePreviewQuestionPane(paneText: string): AskUserQuestionPaneI
     return (edge === -1 ? line : line.slice(0, edge)).replace(/\s+$/, "");
   });
 
-  const endIdx = lines.findIndex((l) => CHAT_ROW_RE.test(l) || NOTES_ROW_RE.test(l));
-  const limit = endIdx === -1 ? lines.length : endIdx;
-
-  const options: AskUserQuestionOption[] = [];
-  let firstOptionIdx = -1;
-  for (let i = 0; i < limit; i++) {
-    const m = OPTION_LINE_RE.exec(lines[i]);
-    if (!m) continue;
-    const num = parseInt(m[1], 10);
-    if (num !== options.length + 1) continue; // must run 1..n in order
-    if (firstOptionIdx === -1) firstOptionIdx = i;
-
-    let label = m[3].trim();
-    for (let j = i + 1; j < limit; j++) {
-      if (!lines[j].trim() || NUMBERED_START_RE.test(lines[j]) || !CONTINUATION_RE.test(lines[j])) break;
-      // Joined without a separator: the break is mid-word, not between words —
-      // "落ち着いたネイビー＆アイ" + "ボリーを基調にした" is one label.
-      label += lines[j].trim();
+  // Bound to the dialog on screen, not the first one in the window: the read has
+  // to be wide enough for a tall preview box, which means it can also still hold
+  // an older dialog above. Anchor on the last of this renderer's rows, then walk
+  // *up* to the option block and stop at option 1.
+  let limit = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CHAT_ROW_RE.test(lines[i]) || NOTES_ROW_RE.test(lines[i])) {
+      limit = i;
+      break;
     }
-    options.push({ label });
   }
+  if (limit === -1) return null;
+
+  const found: { num: number; idx: number; label: string }[] = [];
+  for (let i = limit - 1; i >= 0 && found.length === 0; i--) {
+    if (!OPTION_LINE_RE.test(lines[i])) continue;
+    // First option line met walking up is the last of the block; collect the
+    // whole block from here downwards so wrapped labels read in order.
+    for (let j = i; j >= 0; j--) {
+      const m = OPTION_LINE_RE.exec(lines[j]);
+      if (!m) continue;
+      const num = parseInt(m[1], 10);
+      let label = m[3].trim();
+      for (let k = j + 1; k < limit; k++) {
+        if (!lines[k].trim() || NUMBERED_START_RE.test(lines[k]) || !CONTINUATION_RE.test(lines[k])) break;
+        // Joined without a separator: the wrap is mid-word, not between words —
+        // "落ち着いたネイビー＆アイ" + "ボリーを基調にした" is one label.
+        label += lines[k].trim();
+      }
+      found.unshift({ num, idx: j, label });
+      if (num === 1) break;
+    }
+  }
+  const options: AskUserQuestionOption[] = [];
+  for (let i = 0; i < found.length; i++) {
+    if (found[i].num !== i + 1) return null; // must run 1..n in order
+    options.push({ label: found[i].label });
+  }
+  const firstOptionIdx = found.length > 0 ? found[0].idx : -1;
   if (options.length < 2 || firstOptionIdx === -1) return null;
 
   let question = "";

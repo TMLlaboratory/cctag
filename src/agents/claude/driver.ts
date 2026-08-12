@@ -9,6 +9,7 @@ import {
   parseClaudeStartupPrompt,
   parseCurrentMode,
   parsePermissionMenu,
+  parsePreviewQuestionPane,
   stripFooterChrome,
 } from "./prompts.js";
 import {
@@ -98,7 +99,7 @@ export const claudeDriver: AgentDriver = {
   parseStartupPrompt: parseClaudeStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
-    const aq = parseAskUserQuestionPane(paneText);
+    const aq = parseAskUserQuestionPane(paneText) ?? parsePreviewQuestionPane(paneText);
     if (aq) return { kind: "question", info: aq };
     const menu = parsePermissionMenu(paneText);
     const feedbackNum = findPlanFeedbackOption(paneText);
@@ -112,6 +113,22 @@ export const claudeDriver: AgentDriver = {
 
   async answerOption(herdr, paneId, value) {
     await herdr.agentSend(paneId, value);
+  },
+
+  async answerQuestionOption(herdr, paneId, optionNum, answered) {
+    await herdr.agentSend(paneId, String(optionNum));
+    await sleep(400);
+    // Whether that digit already confirmed depends on which renderer drew the
+    // question, and the two are chosen per question, so the pane is the only
+    // reliable witness. Still showing the same question means the digit merely
+    // moved the cursor (the preview renderer) and Enter is still owed. Anything
+    // else — the next question, the submit menu, a working pane — means it
+    // confirmed and moving on, where an Enter would answer something else.
+    const after = await herdr.paneRead(paneId, { source: "recent", lines: 200 }).catch(() => "");
+    const still = after ? parsePreviewQuestionPane(after) : null;
+    if (still && still.question === answered.question) {
+      await herdr.paneSendKeys(paneId, "Enter");
+    }
   },
 
   async answerQuestionFreeText(herdr, paneId, info, text) {

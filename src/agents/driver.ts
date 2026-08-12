@@ -128,6 +128,23 @@ export interface AgentDriver {
   parseStartupPrompt?(paneText: string): string | null;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
+  /**
+   * Answers a *question* option, which is not the same keystroke as confirming a
+   * permission menu even though both are numbered lists.
+   *
+   * Measured on a live pane: in the classic list a digit selects and confirms in
+   * one go, but in the preview renderer it only moves the cursor and Enter is
+   * what confirms. Sending both unconditionally is wrong in the other direction
+   * — after the digit has already confirmed and advanced, a trailing Enter would
+   * confirm whatever is highlighted on the *next* question. So the driver looks
+   * at the pane in between. Absent = the plain answerOption is enough.
+   */
+  answerQuestionOption?(
+    herdr: HerdrClient,
+    paneId: string,
+    optionNum: number,
+    answered: AskUserQuestionPaneInfo,
+  ): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
   answerQuestionFreeText?(
     herdr: HerdrClient,

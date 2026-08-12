@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseAskUserQuestionPane, parsePreviewQuestionPane } from "./prompts.js";
+import { claudeDriver } from "./driver.js";
 
 // Fixtures taken from a real pane. A two-question AskUserQuestion was raised on
 // purpose — one question with option previews, one without — because that shape
@@ -156,4 +157,62 @@ test("a permission menu is not mistaken for a preview question", () => {
     "Esc to cancel · Tab to amend",
   ].join("\n");
   assert.equal(parsePreviewQuestionPane(permission), null, "no Chat about this row means this is not that renderer");
+});
+
+// --- answering, which differs by renderer -------------------------------------
+
+/** Records what was sent, and lets the test decide what the pane shows next. */
+function fakeHerdr(paneAfterDigit: () => string): {
+  herdr: Parameters<NonNullable<typeof claudeDriver.answerQuestionOption>>[0];
+  sent: string[];
+} {
+  const sent: string[] = [];
+  const herdr = {
+    async agentSend(_p: string, text: string) {
+      sent.push(`text:${text}`);
+    },
+    async paneSendKeys(_p: string, ...keys: string[]) {
+      sent.push(...keys.map((k) => `key:${k}`));
+    },
+    async paneRead() {
+      return paneAfterDigit();
+    },
+  } as unknown as Parameters<NonNullable<typeof claudeDriver.answerQuestionOption>>[0];
+  return { herdr, sent };
+}
+
+const PREVIEW_INFO = { header: "質問", question: "配色はどちらにしますか？", options: [], multiSelect: false };
+
+test("the preview renderer gets the Enter its digit does not supply", async () => {
+  // Measured: in this renderer a digit only moves the cursor. Without the Enter
+  // the dialog just sits there with a different option highlighted.
+  const { herdr, sent } = fakeHerdr(() => PREVIEW_PANE);
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 2, PREVIEW_INFO);
+  assert.deepEqual(sent, ["text:2", "key:Enter"]);
+});
+
+test("the classic renderer gets no Enter, which would answer the next question", async () => {
+  // Measured: there a digit selects and confirms, and the dialog has already
+  // advanced by the time we look — so a trailing Enter would confirm whatever is
+  // highlighted on the question that replaced it.
+  const nextQuestion = ["単位系はどちらにしますか？", "", "❯ 1. SI単位系", "  2. ヤード・ポンド法", "  3. Type something."].join("\n");
+  const { herdr, sent } = fakeHerdr(() => nextQuestion);
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO);
+  assert.deepEqual(sent, ["text:1"], "the digit alone");
+});
+
+test("landing on the submit menu also gets no Enter", async () => {
+  const submitMenu = ["Ready to submit your answers?", "❯ 1. Submit answers", "  2. Cancel"].join("\n");
+  const { herdr, sent } = fakeHerdr(() => submitMenu);
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO);
+  assert.deepEqual(sent, ["text:1"]);
+});
+
+test("a different preview question on screen gets no Enter either", async () => {
+  // Same renderer, but a *different* question means the digit confirmed and
+  // advanced; the identity check is what tells those two cases apart.
+  const other = PREVIEW_PANE.replace("配色はどちらにしますか？", "フォントはどちらにしますか？");
+  const { herdr, sent } = fakeHerdr(() => other);
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO);
+  assert.deepEqual(sent, ["text:1"]);
 });
