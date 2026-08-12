@@ -296,9 +296,13 @@ test("abortAll stops every poll loop, so a dead transport leaves nothing running
   await sleep(100);
   assert.equal(engine.isBusy(PANE), true);
 
-  assert.equal(engine.abortAll(), 1, "reports what it dropped");
-  assert.equal(engine.isBusy(PANE), false);
-  assert.equal(engine.abortAll(), 0, "idempotent");
+  assert.equal(engine.abortAll(), 1, "reports what it signalled");
+  // Cancellation signals; the holder releases. The pane therefore comes back as
+  // soon as the loop notices, which is immediately rather than at the end of its
+  // five-second wait because the wait itself aborts.
+  for (let i = 0; i < 40 && engine.isBusy(PANE); i++) await sleep(25);
+  assert.equal(engine.isBusy(PANE), false, "the loop must release on its way out");
+  assert.equal(engine.abortAll(), 0, "nothing left to signal");
 });
 
 test("a prompt answered twice drives the TUI once", async () => {
@@ -480,6 +484,144 @@ test("a command and a turn cannot drive the same pane at once", async () => {
 
     lease.release();
     assert.equal(engine.isBusy(PANE), false);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a cancel landing while the prompt is being posted does not leak the pane", async () => {
+  // Codex re-review, Critical 1. The last cancellation check sat before the
+  // status message went out, so a cancel arriving during that await still
+  // registered a turn — with an already-cancelled lease — and the poll loop then
+  // returned on the aborted signal without releasing. The pane stayed busy for
+  // the life of the process, and nothing could ever take it again.
+  const { notifier } = fakeNotifier();
+  let releasePost: (() => void) | undefined;
+  const slowPost: Notifier = {
+    ...notifier,
+    async postMessage(_c, _t, _text) {
+      await new Promise<void>((r) => (releasePost = r));
+      return { async update() {} };
+    },
+  };
+  const engine = new TurnEngine(
+    fakeHerdr(() => "blocked"),
+    slowPost,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  const adopting = adopt(engine, fakePairing());
+  for (let i = 0; i < 40 && !releasePost; i++) await sleep(25);
+  assert.ok(releasePost, "the adoption should be waiting on its status post");
+
+  engine.cancelPane(PANE); // the disconnect
+  releasePost();
+  assert.equal(await adopting, false, "a cancelled adoption must not report success");
+
+  for (let i = 0; i < 40 && engine.isBusy(PANE); i++) await sleep(25);
+  assert.equal(engine.isBusy(PANE), false, "the pane must come back");
+});
+
+test("cancelling does not free the pane while the holder is still driving it", async () => {
+  // Codex re-review, Critical 2. cancelPane used to delete the turn and release
+  // its lease straight away, so another operation could acquire the pane while
+  // the cancelled one was still sending keystrokes to it. Cancellation now only
+  // signals; the holder releases once it has stopped.
+  const { notifier } = fakeNotifier();
+  let releasePost: (() => void) | undefined;
+  const slowPost: Notifier = {
+    ...notifier,
+    async postMessage() {
+      await new Promise<void>((r) => (releasePost = r));
+      return { async update() {} };
+    },
+  };
+  const engine = new TurnEngine(
+    fakeHerdr(() => "blocked"),
+    slowPost,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  const adopting = adopt(engine, fakePairing());
+  for (let i = 0; i < 40 && !releasePost; i++) await sleep(25);
+
+  engine.cancelPane(PANE);
+  assert.equal(engine.isBusy(PANE), true, "still held: the holder has not stopped yet");
+  assert.equal(engine.acquire(PANE, "model-command"), null, "so nothing else may take it");
+
+  releasePost?.();
+  await adopting;
+  for (let i = 0; i < 40 && engine.isBusy(PANE); i++) await sleep(25);
+  assert.ok(engine.acquire(PANE, "model-command"), "and it is available once the holder let go");
+});
+
+test("a cancel mid-submit leaves the pane held until the keystrokes stop", async () => {
+  // Codex re-review, Critical 2, the case the test above cannot reach: here the
+  // turn is already registered and inside its submit sequence, which is exactly
+  // when cancelPane used to delete the state and release the lease immediately —
+  // handing the pane to the next caller while this one was still typing into it.
+  const { notifier } = fakeNotifier();
+  let releasePrompt: (() => void) | undefined;
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("working");
+    },
+    async paneRead() {
+      return ""; // no startup dialog to trip over
+    },
+    async agentPrompt() {
+      await new Promise<void>((r) => (releasePrompt = r));
+    },
+    async paneSendKeys() {},
+    async agentSend() {},
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  const starting = engine.startTurn(fakePairing(), "U1", "hello").catch(() => {});
+  for (let i = 0; i < 60 && !releasePrompt; i++) await sleep(25);
+  assert.ok(releasePrompt, "the turn should be inside its submit sequence");
+
+  engine.cancelPane(PANE);
+  assert.equal(
+    engine.acquire(PANE, "model-command"),
+    null,
+    "nothing may take a pane whose previous holder is still sending keys to it",
+  );
+
+  releasePrompt();
+  await starting;
+  for (let i = 0; i < 60 && engine.isBusy(PANE); i++) await sleep(25);
+  assert.equal(engine.isBusy(PANE), false, "and it comes back once the sequence stops");
+});
+
+test("a poll loop that outlived its turn cannot finalize the one that replaced it", async () => {
+  // Codex re-review, Critical 2, second half: finalize() looked its state up by
+  // pane id, so a stale loop reaching it would have posted the result of — and
+  // torn down — whatever turn owns the pane now.
+  const { notifier, posts } = fakeNotifier();
+  const engine = engineFor(
+    fakeHerdr(() => "blocked"),
+    notifier,
+    600_000,
+  );
+
+  try {
+    assert.equal(await adopt(engine, fakePairing()), true);
+    engine.cancelPane(PANE);
+    for (let i = 0; i < 40 && engine.isBusy(PANE); i++) await sleep(25);
+
+    // A second turn takes the pane; the first loop is gone but its state object
+    // still exists in the closure that was running it.
+    assert.equal(await adopt(engine, fakePairing()), true, "the pane is free for a new turn");
+    const before = posts.length;
+    await sleep(100);
+    assert.equal(engine.isBusy(PANE), true, "the new turn must still hold the pane");
+    assert.ok(
+      posts.length >= before,
+      "and no finalize from the dead loop should have posted a result for it",
+    );
   } finally {
     engine.abortAll();
   }

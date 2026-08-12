@@ -42,6 +42,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Sleeps, but gives up as soon as the signal aborts.
+ *
+ * The poll loop waits five seconds between polls while a prompt is up, and a
+ * plain sleep would hold the pane for that long after a disconnect before the
+ * loop noticed and released it. Since cancellation is now signal-only — the
+ * holder releases, nobody takes the pane from it — how quickly the holder
+ * notices *is* how quickly the pane comes back.
+ */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 export type TurnPhase = "running" | "awaiting-question" | "awaiting-permission";
 
 interface TurnState {
@@ -236,12 +258,12 @@ export class TurnEngine {
    * holding the pane indefinitely.
    */
   cancelPane(paneId: string): void {
+    // Signals only. Releasing here would hand the pane to the next caller while
+    // the current holder is still driving it: a cancel during startTurn's submit
+    // sequence would leave that sequence typing into a pane something else had
+    // already claimed. Whoever holds it notices `cancelled` and releases in its
+    // own finally — the registry is built around that (see leases.ts).
     this.leases.cancel(paneId);
-    const state = this.turns.get(paneId);
-    if (state) {
-      this.turns.delete(paneId);
-      state.lease.release();
-    }
   }
 
   /**
@@ -254,10 +276,9 @@ export class TurnEngine {
    * owns. Returns how many turns were dropped, for the log line.
    */
   abortAll(): number {
-    const count = this.leases.cancelAll();
-    for (const state of this.turns.values()) state.lease.release();
-    this.turns.clear();
-    return count;
+    // Also signal-only, for the same reason. Each poll loop sees the abort on
+    // its next tick, finalizes or returns, and releases on the way out.
+    return this.leases.cancelAll();
   }
 
   async startTurn(pairing: Pairing, requesterUserId: string, text: string, opts: StartTurnOptions = {}): Promise<void> {
@@ -408,6 +429,10 @@ export class TurnEngine {
         const retries = prepared.imageCount > 0 && canVerify ? SUBMIT_RETRIES_WITH_IMAGES : 1;
         for (let i = 0; i < retries; i++) {
           await sleep(this.opts.pollIntervalMs);
+          // A cancel landing mid-sequence must stop the keystrokes, not just the
+          // poll loop afterwards: these Enters go to a live pane, and by now the
+          // thread they belong to may already be disconnected.
+          if (lease.cancelled) break;
           if (canVerify && transcriptSizeSafe(tPath) > offset) break; // submitted
           const recheck = await this.herdr.agentGet(paneId).catch(() => null);
           if (!recheck || (recheck.agentStatus !== "idle" && recheck.agentStatus !== "done")) break;
@@ -421,16 +446,22 @@ export class TurnEngine {
         throw err;
       }
 
-      handedToPollLoop = true;
-      void this.pollLoop(paneId).catch((err) => {
-        console.error(`[turn ${paneId}] poll loop crashed:`, err);
+      // Checked once more before handing over: a cancel arriving during the
+      // submit sequence above must not leave a poll loop running for a thread
+      // that has already been disconnected.
+      if (lease.cancelled) {
         this.turns.delete(paneId);
-        lease.release();
+        return;
+      }
+
+      handedToPollLoop = true;
+      void this.pollLoop(state).catch((err) => {
+        console.error(`[turn ${paneId}] poll loop crashed:`, err);
       });
     } finally {
-      // The poll loop owns the lease from here on and releases it via
-      // finalize(); every other exit — cancelled, thrown, nothing to send — has
-      // to give the pane back itself or it would stay busy forever.
+      // The poll loop releases in its own finally from here on; every other exit
+      // — cancelled, thrown, nothing to send — gives the pane back itself, or it
+      // would stay busy for the life of the process.
       if (!handedToPollLoop) lease.release();
     }
   }
@@ -534,16 +565,19 @@ export class TurnEngine {
       };
       this.turns.set(paneId, state);
 
-      handedToPollLoop = true;
-      void this.pollLoop(paneId).catch((err) => {
-        console.error(`[turn ${paneId}] poll loop crashed:`, err);
+      // Same check as startTurn: the status message above is an await, and a
+      // cancel landing inside it would otherwise start a loop for a pane nobody
+      // is listening to any more.
+      if (lease.cancelled) {
         this.turns.delete(paneId);
-        lease.release();
+        return false;
+      }
+
+      handedToPollLoop = true;
+      void this.pollLoop(state).catch((err) => {
+        console.error(`[turn ${paneId}] poll loop crashed:`, err);
       });
     } finally {
-      // The poll loop owns the lease from here on and releases it via
-      // finalize(); every other exit — cancelled, thrown, nothing to send — has
-      // to give the pane back itself or it would stay busy forever.
       if (!handedToPollLoop) lease.release();
     }
     return handedToPollLoop;
@@ -724,13 +758,25 @@ export class TurnEngine {
     state.phase = "awaiting-permission";
   }
 
-  private async pollLoop(paneId: string): Promise<void> {
-    const state = this.turns.get(paneId);
-    if (!state) return;
+  private async pollLoop(state: TurnState): Promise<void> {
+    const paneId = state.paneId;
+    try {
+      await this.poll(state);
+    } finally {
+      // Every exit returns the pane: cancelled, settled, timed out, thrown. This
+      // used to be the caller's job via finalize() alone, which meant a loop that
+      // returned on a cancelled signal — the ordinary disconnect path — left the
+      // pane held for the life of the process.
+      if (this.turns.get(paneId) === state) this.turns.delete(paneId);
+      state.lease.release();
+    }
+  }
 
+  private async poll(state: TurnState): Promise<void> {
+    const paneId = state.paneId;
     while (!state.lease.signal.aborted) {
       const interval = state.phase === "running" ? this.opts.pollIntervalMs : Math.max(this.opts.pollIntervalMs, 5_000);
-      await sleep(interval);
+      await sleepUnlessAborted(interval, state.lease.signal);
       // Re-check: this loop's turn may have been cancelled (and a new one
       // started for the same pane) while we were asleep. finalize()
       // looks up state by paneId, not by this closure's object identity,
@@ -757,11 +803,11 @@ export class TurnEngine {
           );
           continue;
         }
-        await this.finalize(paneId, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
+        await this.finalize(state, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
         return;
       }
       if (!agent) {
-        await this.finalize(paneId, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
+        await this.finalize(state, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
         return;
       }
 
@@ -813,7 +859,7 @@ export class TurnEngine {
       if (blocked) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
 
       if (Date.now() > state.deadlineAt) {
-        await this.finalize(paneId, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
+        await this.finalize(state, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
         return;
       }
 
@@ -858,15 +904,18 @@ export class TurnEngine {
       }
 
       if (agent.agentStatus === "idle" || agent.agentStatus === "done") {
-        await this.finalize(paneId);
+        await this.finalize(state);
         return;
       }
     }
   }
 
-  private async finalize(paneId: string, warning?: string): Promise<void> {
-    const state = this.turns.get(paneId);
-    if (!state) return;
+  private async finalize(state: TurnState, warning?: string): Promise<void> {
+    const paneId = state.paneId;
+    // By identity, never by pane id alone: a loop that outlived its turn would
+    // otherwise finalize — and post the result of — whichever turn is registered
+    // for the pane now.
+    if (this.turns.get(paneId) !== state) return;
     // The TurnState goes now, but this method still has to scan the outbox and
     // read the files it finds. A turn starting in that window would write its own
     // artifacts into the same directory and get them attributed to (and posted
