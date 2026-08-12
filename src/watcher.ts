@@ -221,8 +221,12 @@ export class BackgroundWatcher {
     }
 
     if (agent.agentStatus === "blocked") {
-      this.watches.delete(pairing.paneId);
-      await this.turnEngine.adoptBlockedTerminal(pairing, {
+      // The watch is dropped only if the engine actually took the handoff. It
+      // used to be deleted first, so an adoption refused because a Slack turn
+      // claimed the pane in the meantime threw away this state — the assistant
+      // text collected so far and the write tracking with it, which neither side
+      // then reported.
+      const adopted = await this.turnEngine.adoptBlockedTerminal(pairing, {
         driver,
         sessionId: state.sessionId,
         transcriptPath: state.transcriptPath,
@@ -233,6 +237,7 @@ export class BackgroundWatcher {
         outboxBaseline: state.outboxBaseline,
         writes: state.writes,
       });
+      if (adopted) this.watches.delete(pairing.paneId);
       return;
     }
 

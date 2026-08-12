@@ -89,7 +89,7 @@ function engineFor(herdr: HerdrClient, notifier: Notifier, turnTimeoutMs: number
   );
 }
 
-function adopt(engine: TurnEngine, pairing: Pairing): Promise<void> {
+function adopt(engine: TurnEngine, pairing: Pairing): Promise<boolean> {
   return engine.adoptBlockedTerminal(pairing, {
     driver: claudeDriver,
     sessionId: "s1",
@@ -368,6 +368,118 @@ test("a failed answer is not left claimed, so it can be retried", async () => {
     const retry = await engine.answerPermissionButton(PANE, 1, "1");
     assert.deepEqual(retry, { ok: true }, "the same prompt must still be answerable after a failure");
     assert.equal(attempts, 2);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("disconnecting during startTurn's setup abandons it instead of prompting the pane", async () => {
+  // Codex review, Critical 3. abortTurn() could only reach a turn that had
+  // already registered, so a disconnect during the attachment download left the
+  // pairing gone and the setup running: it went on to prompt the agent and — now
+  // that a blocked pane is held indefinitely — kept the pane forever, with any
+  // prompt posted into a thread that could no longer answer it.
+  const { notifier, posts } = fakeNotifier();
+  const prompted: string[] = [];
+  let releaseDownload: (() => void) | undefined;
+  const downloadStarted = new Promise<void>((r) => setTimeout(r, 60));
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("idle");
+    },
+    async paneRead() {
+      return "";
+    },
+    async agentPrompt(_paneId: string, text: string) {
+      prompted.push(text);
+    },
+    async agentSend() {},
+    async paneSendKeys() {},
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  // A notifier whose file download blocks, standing in for a slow transfer.
+  const slowNotifier: Notifier = {
+    ...notifier,
+    async fetchIncomingFile() {
+      await new Promise<void>((r) => (releaseDownload = r));
+      return null;
+    },
+  };
+  const engineWithSlowFiles = new TurnEngine(
+    herdr,
+    slowNotifier,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024 * 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  const started = engineWithSlowFiles
+    .startTurn(fakePairing(), "U1", "これを見て", {
+      files: [{ id: "F1", name: "a.png", size: 100 } as never],
+    })
+    .catch(() => {});
+
+  await downloadStarted;
+  assert.equal(engineWithSlowFiles.isBusy(PANE), true, "the pane is held while setting up");
+
+  engineWithSlowFiles.cancelPane(PANE); // the disconnect
+  releaseDownload?.();
+  await started;
+
+  assert.equal(prompted.length, 0, "a cancelled setup must not reach the pane");
+  assert.equal(engineWithSlowFiles.isBusy(PANE), false, "and must not leave the pane held");
+  void engine;
+  void posts;
+});
+
+test("a refused adoption leaves the watcher's handoff intact", async () => {
+  // Codex review, Critical 6. adoptBlockedTerminal() returned void, so the
+  // watcher deleted its watch — collected output and write tracking included —
+  // before finding out whether the engine took it. If a Slack turn had claimed
+  // the pane in between, that state was simply lost.
+  const { notifier } = fakeNotifier();
+  const engine = engineFor(
+    fakeHerdr(() => "blocked"),
+    notifier,
+    600_000,
+  );
+
+  try {
+    const first = await adopt(engine, fakePairing());
+    assert.equal(first, true, "the first adoption is accepted");
+
+    const second = await adopt(engine, fakePairing());
+    assert.equal(second, false, "a pane already held must refuse, and say so");
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a command and a turn cannot drive the same pane at once", async () => {
+  // What `externallyBusy` was for, but as mutual exclusion rather than a shared
+  // flag: previously two overlapping external operations both set the same Set
+  // entry and the first to finish cleared it, freeing a pane still in use.
+  const { notifier } = fakeNotifier();
+  const engine = engineFor(
+    fakeHerdr(() => "blocked"),
+    notifier,
+    600_000,
+  );
+
+  try {
+    const lease = engine.acquire(PANE, "model-command");
+    assert.ok(lease);
+    assert.equal(engine.isBusy(PANE), true);
+
+    await assert.rejects(
+      engine.startTurn(fakePairing(), "U1", "hello"),
+      /busy/,
+      "a turn must not start on a pane a command is driving",
+    );
+    assert.equal(await adopt(engine, fakePairing()), false, "nor may the watcher adopt it");
+
+    lease.release();
+    assert.equal(engine.isBusy(PANE), false);
   } finally {
     engine.abortAll();
   }

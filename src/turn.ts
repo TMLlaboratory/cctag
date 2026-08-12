@@ -15,6 +15,7 @@ import {
 } from "./attachments.js";
 import type { HerdrClient } from "./herdr/client.js";
 import type { AgentInfo } from "./herdr/types.js";
+import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
@@ -79,7 +80,9 @@ interface TurnState {
   /** Consecutive herdr query failures, reset by any success. Distinguishes a
    *  flaky herdr from a pane that is genuinely gone. */
   herdrFailures: number;
-  abort: AbortController;
+  /** This turn's claim on the pane. Its signal is what the poll loop watches,
+   *  so cancelling the lease stops the loop; released by finalize/abort. */
+  lease: PaneLease;
   // AskUserQuestion / permission prompts are read off the pane, not the
   // transcript — see agents/claude/prompts.ts for why. Each newly-posted
   // prompt gets a fresh id so stale button clicks (from an already-resolved
@@ -181,15 +184,12 @@ export class TurnEngine {
   // rejects terminal_id as an agent-command target, and paneId also survives
   // the CLI inside the pane restarting, which terminal_id would not.
   private turns = new Map<string, TurnState>();
-  // Panes busy for a reason other than an active turn (e.g. commands.ts
-  // running a /model or /plan TUI command) — kept separate from `turns` so
-  // isBusy() covers both, and the BackgroundWatcher doesn't try to watch the
-  // same instance a non-turn command is currently driving.
-  private externallyBusy = new Set<string>();
-  // Panes in the middle of startTurn()'s async setup, before a TurnState
-  // exists in `turns` yet — closes the race where two concurrent calls for
-  // the same pane could both pass the busy check.
-  private reserving = new Set<string>();
+  // The single source of truth for "who has this pane". Replaced a trio of
+  // Sets (turns + externallyBusy + reserving) behind one boolean isBusy():
+  // that could say a pane was taken but not by whom, so a claim was always two
+  // steps with awaits in between, and whichever holder finished first freed a
+  // pane another was still driving. See leases.ts.
+  private readonly leases = new PaneLeaseRegistry();
 
   constructor(
     private readonly herdr: HerdrClient,
@@ -201,22 +201,34 @@ export class TurnEngine {
   ) {}
 
   isBusy(paneId: string): boolean {
-    return this.turns.has(paneId) || this.externallyBusy.has(paneId) || this.reserving.has(paneId);
+    return this.leases.isHeld(paneId);
   }
 
-  markBusy(paneId: string): void {
-    this.externallyBusy.add(paneId);
+  /**
+   * Takes a pane for work that isn't a turn — a `/model` or `/mode` command
+   * driving the TUI directly. The caller must release it in a `finally`, and
+   * must re-check `cancelled` after anything it awaits.
+   */
+  acquire(paneId: string, reason: string): PaneLease | null {
+    return this.leases.tryAcquire(paneId, reason);
   }
 
-  clearBusy(paneId: string): void {
-    this.externallyBusy.delete(paneId);
-  }
-
-  async abortTurn(paneId: string): Promise<void> {
+  /**
+   * Stops whatever holds this pane: aborts a turn outright, and signals
+   * cancellation to work that is still setting up so it abandons before driving
+   * the pane. Used by `disconnect`, which previously could only reach a turn
+   * that had already registered — a disconnect during startTurn's attachment
+   * download left the pairing gone but the setup running, so it went on to send
+   * the prompt and post a prompt into a thread that could no longer answer it,
+   * holding the pane indefinitely.
+   */
+  cancelPane(paneId: string): void {
+    this.leases.cancel(paneId);
     const state = this.turns.get(paneId);
-    if (!state) return;
-    state.abort.abort();
-    this.turns.delete(paneId);
+    if (state) {
+      this.turns.delete(paneId);
+      state.lease.release();
+    }
   }
 
   /**
@@ -229,28 +241,30 @@ export class TurnEngine {
    * owns. Returns how many turns were dropped, for the log line.
    */
   abortAll(): number {
-    const count = this.turns.size;
-    for (const state of this.turns.values()) state.abort.abort();
+    const count = this.leases.cancelAll();
+    for (const state of this.turns.values()) state.lease.release();
     this.turns.clear();
     return count;
   }
 
   async startTurn(pairing: Pairing, requesterUserId: string, text: string, opts: StartTurnOptions = {}): Promise<void> {
     const paneId = pairing.paneId;
-    // Reserve the slot synchronously, before any `await` — otherwise two
-    // concurrent calls for the same pane (e.g. a duplicate Slack event)
-    // can both pass the busy check before either inserts into `turns`,
-    // leaving one turn's state silently overwritten and untracked.
-    if (this.isBusy(paneId)) {
+    // Claimed synchronously, before any `await` — otherwise two concurrent
+    // calls for the same pane (e.g. a duplicate Slack event) can both pass the
+    // check before either registers, leaving one turn's state silently
+    // overwritten and untracked.
+    const lease = this.leases.tryAcquire(paneId, "turn");
+    if (!lease) {
       throw new Error("busy");
     }
-    this.reserving.add(paneId);
+    let handedToPollLoop = false;
 
     try {
       const agent = await this.herdr.agentGet(paneId);
       if (!agent) {
         throw new Error("agent-not-found");
       }
+      if (lease.cancelled) return;
       const driver = driverFor(agent.agent);
 
       // Downloading happens here, inside the reservation, not in the caller:
@@ -259,6 +273,11 @@ export class TurnEngine {
       // then reject this one as busy after all that work.
       const files = opts.files ?? [];
       const prepared = await this.prepareAttachments(pairing, files);
+      // The longest await in the method by far, and the one `disconnect` is most
+      // likely to land inside. Nothing has touched the pane yet, so abandoning
+      // here is clean — whereas going on would prompt an agent whose thread no
+      // longer exists to answer it.
+      if (lease.cancelled) return;
       if (prepared === null) return; // attachments unusable here; already explained in-thread
       if (files.length > 0 && prepared.saved.length === 0 && !text.trim()) return; // nothing left to send
       // A bare attachment with no words still has to say *something*, or the
@@ -310,6 +329,7 @@ export class TurnEngine {
         }
       }
 
+      if (lease.cancelled) return; // last exit before anything is posted or sent
       const statusHandle = await this.notifier.postMessage(pairing.channel, pairing.threadTs ?? "", "⚙️ 実行中…");
 
       const state: TurnState = {
@@ -331,7 +351,7 @@ export class TurnEngine {
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         herdrFailures: 0,
-        abort: new AbortController(),
+        lease,
         currentPromptId: 0,
       };
       this.turns.set(paneId, state);
@@ -388,12 +408,17 @@ export class TurnEngine {
         throw err;
       }
 
+      handedToPollLoop = true;
       void this.pollLoop(paneId).catch((err) => {
         console.error(`[turn ${paneId}] poll loop crashed:`, err);
         this.turns.delete(paneId);
+        lease.release();
       });
     } finally {
-      this.reserving.delete(paneId);
+      // The poll loop owns the lease from here on and releases it via
+      // finalize(); every other exit — cancelled, thrown, nothing to send — has
+      // to give the pane back itself or it would stay busy forever.
+      if (!handedToPollLoop) lease.release();
     }
   }
 
@@ -454,13 +479,16 @@ export class TurnEngine {
    * was Slack-initiated or discovered mid-flight; no input is sent, since
    * the terminal is already sitting at the prompt.
    */
-  async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<void> {
+  async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<boolean> {
     const paneId = pairing.paneId;
-    // Same reservation as startTurn() — a Slack-initiated turn could start
-    // for this pane in the window between the watcher's isBusy() check
-    // and this method actually registering a TurnState.
-    if (this.isBusy(paneId)) return;
-    this.reserving.add(paneId);
+    // Same claim as startTurn() — a Slack-initiated turn could start for this
+    // pane in the window between the watcher's check and this method actually
+    // registering a TurnState. Reported back so the watcher knows whether its
+    // handoff was taken: it used to discard its collected output before finding
+    // out, losing it when the adoption was refused.
+    const lease = this.leases.tryAcquire(paneId, "adopted-terminal");
+    if (!lease) return false;
+    let handedToPollLoop = false;
 
     try {
       const statusHandle = await this.notifier.postMessage(
@@ -488,18 +516,24 @@ export class TurnEngine {
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         herdrFailures: 0,
-        abort: new AbortController(),
+        lease,
         currentPromptId: 0,
       };
       this.turns.set(paneId, state);
 
+      handedToPollLoop = true;
       void this.pollLoop(paneId).catch((err) => {
         console.error(`[turn ${paneId}] poll loop crashed:`, err);
         this.turns.delete(paneId);
+        lease.release();
       });
     } finally {
-      this.reserving.delete(paneId);
+      // The poll loop owns the lease from here on and releases it via
+      // finalize(); every other exit — cancelled, thrown, nothing to send — has
+      // to give the pane back itself or it would stay busy forever.
+      if (!handedToPollLoop) lease.release();
     }
+    return handedToPollLoop;
   }
 
   async answerQuestionButton(paneId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
@@ -678,15 +712,15 @@ export class TurnEngine {
     const state = this.turns.get(paneId);
     if (!state) return;
 
-    while (!state.abort.signal.aborted) {
+    while (!state.lease.signal.aborted) {
       const interval = state.phase === "running" ? this.opts.pollIntervalMs : Math.max(this.opts.pollIntervalMs, 5_000);
       await sleep(interval);
-      // Re-check: this loop's turn may have been aborted (and a new one
+      // Re-check: this loop's turn may have been cancelled (and a new one
       // started for the same pane) while we were asleep. finalize()
       // looks up state by paneId, not by this closure's object identity,
       // so a stale loop reaching it after abort could delete/finalize a
       // different, newly-started turn.
-      if (state.abort.signal.aborted) return;
+      if (state.lease.signal.aborted) return;
 
       // `null` and a thrown error mean different things and must not be
       // conflated: agentGet() returns null only for herdr's own "no such pane"
@@ -814,17 +848,18 @@ export class TurnEngine {
   private async finalize(paneId: string, warning?: string): Promise<void> {
     const state = this.turns.get(paneId);
     if (!state) return;
-    // Removing the TurnState is what makes the pane look free again, but this
-    // method still has to scan the outbox and read the files it finds. A turn
-    // starting in that window would write its own artifacts into the same
-    // directory and get them attributed to (and posted for) this one — so keep
-    // the pane busy until the uploads are done.
-    this.externallyBusy.add(paneId);
+    // The TurnState goes now, but this method still has to scan the outbox and
+    // read the files it finds. A turn starting in that window would write its own
+    // artifacts into the same directory and get them attributed to (and posted
+    // for) this one — so the lease is held across the uploads and only released
+    // at the end. That used to need a second marker (externallyBusy) precisely
+    // because "busy" and "has a TurnState" were the same thing; holding a lease
+    // says it directly.
     this.turns.delete(paneId);
     try {
       await this.reportTurnResult(paneId, state, warning);
     } finally {
-      this.externallyBusy.delete(paneId);
+      state.lease.release();
     }
   }
 

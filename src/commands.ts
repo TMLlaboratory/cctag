@@ -149,22 +149,26 @@ export class CommandHandler {
         );
         return;
       }
-      if (this.turnEngine.isBusy(pairing.paneId)) {
+      // Claimed before the agentGet, not after: the check and the claim used to
+      // be separated by that await, so a message arriving in between passed the
+      // same check and drove the same TUI.
+      const lease = this.turnEngine.acquire(pairing.paneId, "model-command");
+      if (!lease) {
         await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
         return;
       }
-      const agent = await this.herdr.agentGet(pairing.paneId);
-      if (!agent) {
-        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
-        return;
-      }
-      const driver = driverFor(agent.agent);
-      this.turnEngine.markBusy(pairing.paneId);
       try {
+        const agent = await this.herdr.agentGet(pairing.paneId);
+        if (!agent) {
+          await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+          return;
+        }
+        if (lease.cancelled) return;
+        const driver = driverFor(agent.agent);
         const reply = await driver.runModelCommand(this.herdr, agent, modelMatch[1].trim());
         await this.notifier.postReply(channel, threadTs, reply);
       } finally {
-        this.turnEngine.clearBusy(pairing.paneId);
+        lease.release();
       }
       return;
     }
@@ -255,7 +259,10 @@ export class CommandHandler {
           await this.notifier.postReply(channel, threadTs, "このスレッドは接続されていません。");
           return;
         }
-        await this.turnEngine.abortTurn(pairing.paneId);
+        // Reaches work that is still setting up, not just a registered turn:
+        // a disconnect during startTurn's attachment download used to leave the
+        // pairing gone and the setup running.
+        this.turnEngine.cancelPane(pairing.paneId);
         this.pairingStore.remove(pairing.key);
         await this.notifier.postReply(channel, threadTs, "🔌 接続を解除しました。");
         return;
@@ -373,18 +380,18 @@ export class CommandHandler {
   ): Promise<void> {
     const modes = driver.modes;
     if (!modes) return; // callers gate on this; defensive no-op if reached anyway
-    if (this.turnEngine.isBusy(paneId)) {
+    const lease = this.turnEngine.acquire(paneId, "mode-command");
+    if (!lease) {
       await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
       return;
     }
-    const agent = await this.herdr.agentGet(paneId);
-    if (!agent) {
-      await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
-      return;
-    }
-
-    this.turnEngine.markBusy(paneId);
     try {
+      const agent = await this.herdr.agentGet(paneId);
+      if (!agent) {
+        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+        return;
+      }
+      if (lease.cancelled) return;
       let current = modes.parseCurrent(await this.herdr.paneRead(agent.paneId, { source: "recent", lines: 12 }));
       if (current === null) {
         // Don't blind-cycle from an unknown state — pressing Shift+Tab would
@@ -417,7 +424,7 @@ export class CommandHandler {
         );
       }
     } finally {
-      this.turnEngine.clearBusy(paneId);
+      lease.release();
     }
   }
 
