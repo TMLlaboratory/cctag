@@ -151,6 +151,85 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
 }
 
 /**
+ * Signatures of the renderer Claude Code uses when any of a question's options
+ * carries a `preview`: the option list moves to a narrow left column and the
+ * preview is drawn in a box beside it. Chosen per question, so one dialog can
+ * show this for one question and the classic list for the next (measured).
+ *
+ * There is no numbered "Type something." row here — the free-text row is an
+ * unnumbered "Chat about this" — which is why the classic parser bails on it,
+ * and why this needs its own terminator.
+ */
+const CHAT_ROW_RE = /^\s*(?:\d+\.\s*)?Chat about this\s*$/;
+const NOTES_ROW_RE = /Notes:|press n to add notes/;
+/** Left edge of the preview box. Deliberately excludes `─`, which also draws
+ *  the full-width separator rules and can appear in preview content. */
+const BOX_EDGE_RE = /[┌│└├┐┘┤]/;
+/** A wrapped continuation of the option above: indented, unnumbered, non-empty. */
+const CONTINUATION_RE = /^\s{2,}\S/;
+
+/**
+ * Reads the preview renderer's option list.
+ *
+ * The screen cannot be parsed line-by-line as-is: a label too long for the
+ * narrow column wraps onto following lines, and every one of those lines also
+ * carries a slice of the preview box, so the two columns are interleaved. The
+ * fix is to cut each line at the box's left edge before reading anything, which
+ * is index-based and so unaffected by the wide characters that make display
+ * columns and string offsets disagree.
+ *
+ * Returns null when the pane is not showing this renderer, leaving the classic
+ * parser and the permission path untouched.
+ */
+export function parsePreviewQuestionPane(paneText: string): AskUserQuestionPaneInfo | null {
+  const raw = paneText.split("\n");
+  if (!raw.some((l) => CHAT_ROW_RE.test(l))) return null;
+
+  // Cut the preview column away. A line that was nothing but preview becomes
+  // blank, which is exactly what ends a wrapped label.
+  const lines = raw.map((line) => {
+    const edge = line.search(BOX_EDGE_RE);
+    return (edge === -1 ? line : line.slice(0, edge)).replace(/\s+$/, "");
+  });
+
+  const endIdx = lines.findIndex((l) => CHAT_ROW_RE.test(l) || NOTES_ROW_RE.test(l));
+  const limit = endIdx === -1 ? lines.length : endIdx;
+
+  const options: AskUserQuestionOption[] = [];
+  let firstOptionIdx = -1;
+  for (let i = 0; i < limit; i++) {
+    const m = OPTION_LINE_RE.exec(lines[i]);
+    if (!m) continue;
+    const num = parseInt(m[1], 10);
+    if (num !== options.length + 1) continue; // must run 1..n in order
+    if (firstOptionIdx === -1) firstOptionIdx = i;
+
+    let label = m[3].trim();
+    for (let j = i + 1; j < limit; j++) {
+      if (!lines[j].trim() || NUMBERED_START_RE.test(lines[j]) || !CONTINUATION_RE.test(lines[j])) break;
+      // Joined without a separator: the break is mid-word, not between words —
+      // "落ち着いたネイビー＆アイ" + "ボリーを基調にした" is one label.
+      label += lines[j].trim();
+    }
+    options.push({ label });
+  }
+  if (options.length < 2 || firstOptionIdx === -1) return null;
+
+  let question = "";
+  for (let i = firstOptionIdx - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.trim() || NUMBERED_START_RE.test(line) || QUESTION_TAB_BAR_RE.test(line) || RULE_LINE_RE.test(line)) {
+      continue;
+    }
+    question = line.trim();
+    break;
+  }
+
+  // Previews are single-select only, so there are no checkboxes to read.
+  return { header: "質問", question, options, multiSelect: false };
+}
+
+/**
  * The four permission/plan modes Claude Code cycles through with Shift+Tab,
  * in ring order (each Shift+Tab advances to the next; wraps around). The
  * `footer` regexes match the mode-status line at the very bottom of the TUI

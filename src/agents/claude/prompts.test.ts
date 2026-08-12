@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAskUserQuestionPane } from "./prompts.js";
+import { parseAskUserQuestionPane, parsePreviewQuestionPane } from "./prompts.js";
 
 // Fixtures taken from a real pane. A two-question AskUserQuestion was raised on
 // purpose — one question with option previews, one without — because that shape
@@ -88,4 +88,72 @@ test("a pane with a gap in its option numbers is refused outright", () => {
 
 test("a pane showing no question dialog at all parses as none", () => {
   assert.equal(parseAskUserQuestionPane("❯ \n  just a prompt box\n"), null);
+});
+
+// --- the preview renderer -----------------------------------------------------
+// Captured verbatim from a pane while a two-question dialog was up, first
+// question carrying previews. The label of option 1 wrapped across three lines
+// and every one of those lines also carries a slice of the preview box, which is
+// what the classic parser cannot survive. Parsed labels were checked against the
+// tool input recorded in the transcript afterwards and match it exactly.
+const PREVIEW_PANE = [
+  "←  ☐ 配色  ☐ フォント  ✔ Submit  →",
+  "",
+  "配色はどちらにしますか？",
+  "",
+  "❯ 1. 落ち着いたネイビー＆アイ     ┌─────────────────────────────────────────────────────────────┐",
+  "    ボリーを基調にした学術的な    │ 背景色: #F7F5EF (アイボリー)                                │",
+  "    配色                          │ メインアクセント: #1F3A5F (ネイビー)                        │",
+  "  2. 明るいティール＆コーラル     │ サブアクセント: #8C7A5B (くすみゴールド)                    │",
+  "    のコントラスト配色            │ テキスト: #23272B (ほぼ黒)                                  │",
+  "                                  │                                                             │",
+  "                                  │ 用途イメージ:                                               │",
+  "                                  │ - 見出し: ネイビー地に白文字                                │",
+  "                                  └─────────────────────────────────────────────────────────────┘",
+  "",
+  "                                  Notes: press n to add notes",
+  "",
+  "─".repeat(120),
+  "  Chat about this",
+  "",
+  "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel",
+].join("\n");
+
+test("the preview renderer's wrapped labels are rejoined and the preview column dropped", () => {
+  const info = parsePreviewQuestionPane(PREVIEW_PANE);
+  assert.ok(info, "this is the shape that reached Slack as a raw screen dump");
+  assert.equal(info.question, "配色はどちらにしますか？");
+  assert.deepEqual(
+    info.options.map((o) => o.label),
+    ["落ち着いたネイビー＆アイボリーを基調にした学術的な配色", "明るいティール＆コーラルのコントラスト配色"],
+    "verified against the AskUserQuestion input the transcript recorded for this very dialog",
+  );
+  assert.equal(info.multiSelect, false, "previews are single-select only");
+});
+
+test("the classic parser still refuses the preview renderer, so the two do not fight", () => {
+  // There is no numbered "Type something." row in this renderer — the free-text
+  // row is an unnumbered "Chat about this" — which is precisely why it needs its
+  // own parser rather than a loosened classic one.
+  assert.equal(parseAskUserQuestionPane(PREVIEW_PANE), null);
+});
+
+test("the preview parser refuses a classic dialog, so ordering cannot break it", () => {
+  const classic = ["☐ 実装方針", "", "どの方式で？", "", "❯ 1. A方式", "  2. B方式", "  3. Type something."].join("\n");
+  assert.equal(parsePreviewQuestionPane(classic), null);
+});
+
+test("a permission menu is not mistaken for a preview question", () => {
+  const permission = [
+    "Bash command",
+    "",
+    "  rm -rf build/",
+    "",
+    "Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+    "",
+    "Esc to cancel · Tab to amend",
+  ].join("\n");
+  assert.equal(parsePreviewQuestionPane(permission), null, "no Chat about this row means this is not that renderer");
 });
