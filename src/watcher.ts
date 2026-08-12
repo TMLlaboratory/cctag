@@ -47,9 +47,14 @@ interface WatchState {
  * watching) it baselines at the transcript's current end instead of reading
  * from scratch, so it never re-posts what a turn already reported.
  */
+/** How often to repeat a still-failing pairing in the log, in ticks. */
+const FAILURE_LOG_EVERY = 100;
+
 export class BackgroundWatcher {
   private watches = new Map<string, WatchState>(); // key: paneId
   private busyLastTick = new Set<string>();
+  /** Consecutive check failures per pane, for log throttling only. */
+  private failureStreak = new Map<string, number>();
 
   private running = false;
 
@@ -88,6 +93,7 @@ export class BackgroundWatcher {
       if (!liveKeys.has(key)) {
         this.watches.delete(key);
         this.busyLastTick.delete(key);
+        this.failureStreak.delete(key);
       }
     }
 
@@ -97,9 +103,28 @@ export class BackgroundWatcher {
         continue;
       }
       const resumingFromActiveTurn = this.busyLastTick.delete(pairing.paneId);
-      await this.checkPairing(pairing, resumingFromActiveTurn).catch((err) =>
-        console.error(`[watcher] pairing ${pairing.key} check failed:`, err),
-      );
+      try {
+        await this.checkPairing(pairing, resumingFromActiveTurn);
+        this.failureStreak.delete(pairing.paneId);
+      } catch (err) {
+        // Kept, not consumed: this tick achieved nothing, so the next one still
+        // has to rebaseline or it would read a transcript from before the turn
+        // that just ended and replay it.
+        if (resumingFromActiveTurn) this.busyLastTick.add(pairing.paneId);
+
+        // Only the first of a run is logged in full. herdr's server being down
+        // once produced 16,309 of these, each with a stack trace, which buried
+        // everything else in the log; the state itself is harmless (a throw means
+        // "unknown, look again next tick") so the flood was the only damage.
+        const streak = (this.failureStreak.get(pairing.paneId) ?? 0) + 1;
+        this.failureStreak.set(pairing.paneId, streak);
+        const message = err instanceof Error ? err.message : String(err);
+        if (streak === 1) {
+          console.error(`[watcher] pairing ${pairing.key} check failed:`, message);
+        } else if (streak % FAILURE_LOG_EVERY === 0) {
+          console.error(`[watcher] pairing ${pairing.key} still failing (${streak} in a row): ${message}`);
+        }
+      }
     }
   }
 

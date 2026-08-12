@@ -626,3 +626,47 @@ test("a poll loop that outlived its turn cannot finalize the one that replaced i
     engine.abortAll();
   }
 });
+
+test("a failed pane read does not surrender a prompt already posted to Slack", async () => {
+  // Codex re-review, Critical 5. Only agentGet's exceptions were tolerated; a
+  // paneRead throw escaped the loop, and the crash handler released the pane —
+  // so one herdr hiccup while a prompt was up handed it to the watcher, which
+  // re-adopted and posted the same prompt again, discarding the collected output.
+  const { notifier, posts } = fakeNotifier();
+  let reads = 0;
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    // The first reads fail, i.e. before the prompt has been posted and while the
+    // loop is still on its fast interval — the failures have to land somewhere
+    // the test can reach without waiting out the five-second floor a posted
+    // prompt switches to.
+    async paneRead() {
+      reads += 1;
+      if (reads <= 2) throw new Error("herdr command timed out");
+      return PERMISSION_PANE;
+    },
+    async agentSend() {},
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(300);
+
+    assert.equal(engine.isBusy(PANE), true, "the prompt's owner must keep the pane");
+    assert.equal(
+      posts.filter((p) => p.includes("許可リクエスト")).length,
+      1,
+      "and must not re-post the prompt it already delivered",
+    );
+    assert.equal(
+      posts.filter((p) => p.includes("herdrへの問い合わせ") || p.includes("インスタンスが終了")).length,
+      0,
+      "two failures in a row are not a dead pane",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});

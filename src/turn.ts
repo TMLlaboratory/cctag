@@ -868,10 +868,32 @@ export class TurnEngine {
         // BackgroundWatcher from re-adopting the pane and posting the same
         // prompt again; and a pane sitting at a prompt is not one a new turn
         // could start on anyway — text sent to it would land in the dialog.
-        const paneText = await this.herdr.paneRead(state.paneId, {
-          source: state.driver.paneReadSource,
-          lines: BLOCKED_PANE_LINES,
-        });
+        // Tolerated the same way agentGet's failures are, and for a sharper
+        // reason: an exception here used to escape the loop entirely, and the
+        // crash handler released the pane — so a single herdr hiccup while a
+        // prompt was up handed the pane to the watcher, which re-adopted it and
+        // posted the same prompt again, losing the collected output on the way.
+        // Ownership of a prompt already delivered to Slack must not turn on one
+        // failed read.
+        let paneText: string;
+        try {
+          paneText = await this.herdr.paneRead(state.paneId, {
+            source: state.driver.paneReadSource,
+            lines: BLOCKED_PANE_LINES,
+          });
+          state.herdrFailures = 0;
+        } catch (err) {
+          state.herdrFailures += 1;
+          if (state.herdrFailures <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+            console.error(
+              `[turn ${paneId}] pane read failed (${state.herdrFailures}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+              err instanceof Error ? err.message : err,
+            );
+            continue;
+          }
+          await this.finalize(state, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
+          return;
+        }
         const prompt = state.driver.parseBlockedPane(paneText);
         const fingerprint = promptFingerprint(prompt);
 
