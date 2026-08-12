@@ -17,6 +17,7 @@ import {
   extractToolOutcomes,
   extractToolUseSummaries,
   locateClaudeTranscript,
+  readPendingQuestions,
   type TranscriptRecord,
 } from "./transcript.js";
 import { resolvePlanFile } from "./plan.js";
@@ -96,6 +97,11 @@ export const claudeDriver: AgentDriver = {
   },
 
   parseStartupPrompt: parseClaudeStartupPrompt,
+
+  readPendingQuestions(cwd, sessionId) {
+    const path = locateClaudeTranscript(cwd, sessionId);
+    return path ? readPendingQuestions(path) : null;
+  },
 
   parseBlockedPane(paneText): BlockedPrompt {
     const aq = parseAskUserQuestionPane(paneText);

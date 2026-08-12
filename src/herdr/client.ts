@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { AgentInfo, AgentStatus } from "./types.js";
+import type { AgentExplain, AgentExplainRule, AgentInfo, AgentStatus } from "./types.js";
 import { HerdrError } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -87,6 +87,61 @@ export class HerdrClient {
       }
       throw err;
     }
+  }
+
+  /**
+   * herdr's own classification of what is on the pane right now.
+   *
+   * Unlike every other command here, `agent explain` prints human-readable text
+   * by default and only emits JSON with `--json` (undocumented in its `--help`,
+   * verified against a live pane), hence the extra flag.
+   *
+   * Returns null rather than throwing when herdr can't answer: this is
+   * supplementary information, so a caller that already has a pane read must be
+   * able to carry on without it.
+   */
+  async agentExplain(paneId: string): Promise<AgentExplain | null> {
+    interface RawRule {
+      id?: string;
+      matched?: boolean;
+      priority?: number;
+      region?: string;
+      state?: string;
+    }
+    const toRule = (raw: RawRule | undefined | null): AgentExplainRule | null =>
+      raw?.id
+        ? {
+            id: raw.id,
+            matched: raw.matched === true,
+            priority: typeof raw.priority === "number" ? raw.priority : 0,
+            region: raw.region ?? "",
+            state: raw.state ?? "",
+          }
+        : null;
+
+    let json: unknown;
+    try {
+      json = await this.run(["agent", "explain", paneId, "--json"]);
+    } catch {
+      return null;
+    }
+    const raw = json as {
+      state?: string;
+      matched_rule?: RawRule | null;
+      evaluated_rules?: RawRule[];
+      visible_blocker?: boolean;
+      manifest_version?: string | null;
+      remote_update_status?: string | null;
+    };
+    if (typeof raw.state !== "string") return null;
+    return {
+      state: normalizeStatus(raw.state),
+      matchedRule: toRule(raw.matched_rule),
+      evaluatedRules: (raw.evaluated_rules ?? []).map(toRule).filter((r): r is AgentExplainRule => r !== null),
+      visibleBlocker: raw.visible_blocker === true,
+      manifestVersion: raw.manifest_version ?? null,
+      remoteUpdateStatus: raw.remote_update_status ?? null,
+    };
   }
 
   /**

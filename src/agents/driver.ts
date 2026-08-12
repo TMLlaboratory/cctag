@@ -1,6 +1,9 @@
 import type { HerdrClient } from "../herdr/client.js";
 import { claudeDriver } from "./claude/driver.js";
+import type { PendingQuestions } from "./claude/transcript.js";
 import { codexDriver } from "./codex/driver.js";
+
+export type { PendingQuestion, PendingQuestions } from "./claude/transcript.js";
 
 export interface PermissionChoice {
   num: string;
@@ -126,6 +129,18 @@ export interface AgentDriver {
    * like "numbered options waiting on Enter" counts.
    */
   parseStartupPrompt?(paneText: string): string | null;
+  /**
+   * The question dialog currently waiting, taken from the session transcript
+   * rather than the screen. Absent for drivers with no structured equivalent.
+   *
+   * herdr says *whether* a form is up (its `live_blocked_form` rule); this says
+   * *what it asks*, exactly, with no dependence on how the TUI chose to draw it
+   * — which varies with option previews, question count and terminal width, and
+   * is what defeated the pane parser. Returns null when nothing is pending, so a
+   * caller must still fall back to the screen (permission prompts never appear
+   * here; see readPendingQuestions for the measurements).
+   */
+  readPendingQuestions?(cwd: string, sessionId: string | null): PendingQuestions | null;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
