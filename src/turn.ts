@@ -902,7 +902,13 @@ export class TurnEngine {
           // next one in a multi-question flow — each is independently
           // parsed off the pane; see prompts.ts).
           await this.postPrompt(state, paneText, prompt, fingerprint);
-        } else if (fingerprint !== null && state.promptFingerprint !== null && fingerprint !== state.promptFingerprint) {
+        } else if (fingerprint !== null && fingerprint !== state.promptFingerprint) {
+          // Includes the case where the posted prompt had no identity at all.
+          // What was posted for it is a raw screen dump with no usable buttons,
+          // so replacing that with a prompt we *can* read is strictly better —
+          // and it can only happen once, since the replacement has a fingerprint.
+          // Requiring the old one to be non-null meant an unparseable prompt
+          // permanently blinded this check: every prompt after it was invisible.
           // A DIFFERENT prompt is showing than the one posted, without the pane
           // ever leaving `blocked`: the pending one was answered at the keyboard
           // and the agent went straight into the next. Nothing else reports

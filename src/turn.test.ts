@@ -670,3 +670,42 @@ test("a failed pane read does not surrender a prompt already posted to Slack", a
     engine.abortAll();
   }
 });
+
+test("an unparseable prompt does not blind the check for every prompt after it", async () => {
+  // Codex re-review, Critical 4. The replacement check required the *posted*
+  // prompt to have a fingerprint, so one unparseable prompt turned the check off
+  // for good: it was posted as a raw screen dump with buttons that could not
+  // answer it, and — the pane never leaving `blocked` — every prompt that
+  // replaced it stayed invisible for the life of the turn.
+  const { notifier, posts } = fakeNotifier();
+  let pane = ["some dialog cctag cannot read", "no options here at all"].join("\n");
+  const engine = engineFor(
+    fakeHerdr(
+      () => "blocked",
+      () => pane,
+    ),
+    notifier,
+    600_000,
+  );
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(300);
+    assert.equal(
+      posts.filter((p) => p.includes("許可リクエスト")).length,
+      1,
+      "the unreadable pane is posted as the parse-failure fallback",
+    );
+
+    pane = PERMISSION_PANE; // answered at the keyboard; a readable prompt follows
+    await sleep(5_600);
+
+    assert.equal(
+      posts.filter((p) => p.includes("許可リクエスト")).length,
+      2,
+      "the readable prompt that replaced it must be posted too",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});

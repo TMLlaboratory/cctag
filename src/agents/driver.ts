@@ -189,15 +189,32 @@ export interface AgentDriver {
 export function promptFingerprint(prompt: BlockedPrompt): string | null {
   if (prompt.kind === "question") {
     const info = prompt.info;
-    return ["q", info.header, info.question, ...info.options.map((o) => o.label)].join(" ");
+    // Descriptions and the multi-select flag are part of the question's identity:
+    // without them, two consecutive prompts sharing a question and its labels but
+    // differing in their explanations read as the same prompt. The checkbox
+    // *state* stays excluded — that is the part a person toggles with space — but
+    // whether the question is multi-select at all cannot change under them.
+    return [
+      "q",
+      info.header,
+      info.question,
+      info.multiSelect ? "multi" : "single",
+      ...info.options.map((o) => `${o.label}\u0000${o.description ?? ""}`),
+    ].join("\u0001");
   }
   if (!prompt.menu) return null;
   const choices = prompt.menu.choices.map((c) => `${c.num}.${c.label}`).join(" ");
-  // The snippet carries the cursor glyph on whichever option is selected, and
-  // its indentation shifts with it — strip both so navigating the menu reads as
-  // the same prompt.
-  const context = prompt.menu.snippet.replace(/[›❯>]/g, "").replace(/\s+/g, " ").trim();
-  return ["p", choices, context].join(" ");
+  // The cursor glyph sits at the start of whichever option is selected, and the
+  // indentation shifts with it, so both are normalized away — but only there.
+  // Stripping those characters everywhere collapsed real differences in the text
+  // being asked about: `echo x > out` and `echo x out` produced one fingerprint.
+  const context = prompt.menu.snippet
+    .split("\n")
+    .map((line) => line.replace(/^\s*[›❯>]\s?/, "").trim())
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return ["p", choices, context].join("\u0001");
 }
 
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;
