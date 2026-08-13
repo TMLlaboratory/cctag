@@ -1,4 +1,4 @@
-import type { AgentDriver, BlockedPrompt } from "../driver.js";
+import type { AgentDriver, AskUserQuestionPaneInfo, BlockedPrompt } from "../driver.js";
 import type { HerdrClient } from "../../herdr/client.js";
 import {
   BACKTAB,
@@ -10,6 +10,9 @@ import {
   parseCurrentMode,
   parsePermissionMenu,
   parsePreviewQuestionPane,
+  classicAnchorIndex,
+  permissionAnchorIndex,
+  previewAnchorIndex,
   stripFooterChrome,
 } from "./prompts.js";
 import {
@@ -21,6 +24,18 @@ import {
   type TranscriptRecord,
 } from "./transcript.js";
 import { resolvePlanFile } from "./plan.js";
+
+/** Same question, by everything visible about it — see answerQuestionOption. */
+function sameQuestion(
+  a: { question: string; options: { label: string }[] },
+  b: { question: string; options: { label: string }[] },
+): boolean {
+  return (
+    a.question === b.question &&
+    a.options.length === b.options.length &&
+    a.options.every((o, i) => o.label === b.options[i].label)
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,8 +114,24 @@ export const claudeDriver: AgentDriver = {
   parseStartupPrompt: parseClaudeStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
-    const aq = parseAskUserQuestionPane(paneText) ?? parsePreviewQuestionPane(paneText);
-    if (aq) return { kind: "question", info: aq };
+    // Whichever dialog sits lowest on the screen is the live one — a read wide
+    // enough for a tall prompt also holds already-answered ones above it. Trying
+    // the parsers in a fixed order instead let a stale classic dialog above a
+    // live preview question win, and a stale preview question above a live
+    // permission menu do the same: the wrong prompt was posted, or the right one
+    // never was.
+    const candidates: { at: number; parse: () => AskUserQuestionPaneInfo | null }[] = [
+      { at: classicAnchorIndex(paneText), parse: () => parseAskUserQuestionPane(paneText) },
+      { at: previewAnchorIndex(paneText), parse: () => parsePreviewQuestionPane(paneText) },
+    ];
+    const permissionAt = permissionAnchorIndex(paneText);
+    for (const candidate of candidates.filter((c) => c.at >= 0).sort((a, b) => b.at - a.at)) {
+      // A permission menu below a question dialog means the question is gone —
+      // its own options are numbered too, so it must not be parsed as one.
+      if (permissionAt > candidate.at) break;
+      const info = candidate.parse();
+      if (info) return { kind: "question", info };
+    }
     const menu = parsePermissionMenu(paneText);
     const feedbackNum = findPlanFeedbackOption(paneText);
     return {
@@ -115,20 +146,33 @@ export const claudeDriver: AgentDriver = {
     await herdr.agentSend(paneId, value);
   },
 
-  async answerQuestionOption(herdr, paneId, optionNum, answered) {
+  async answerQuestionOption(herdr, paneId, optionNum, answered, signal) {
     await herdr.agentSend(paneId, String(optionNum));
     await sleep(400);
+    // Deliberately not caught. Without a successful read there is no way to know
+    // whether the digit confirmed, and reporting success would let the caller
+    // mark the Slack prompt answered while the pane still waits — the prompt
+    // would then be re-posted on the next poll. Throwing leaves it answerable.
+    const after = await herdr.paneRead(paneId, { source: "recent", lines: 200 });
+
     // Whether that digit already confirmed depends on which renderer drew the
     // question, and the two are chosen per question, so the pane is the only
     // reliable witness. Still showing the same question means the digit merely
     // moved the cursor (the preview renderer) and Enter is still owed. Anything
     // else — the next question, the submit menu, a working pane — means it
-    // confirmed and moving on, where an Enter would answer something else.
-    const after = await herdr.paneRead(paneId, { source: "recent", lines: 200 }).catch(() => "");
-    const still = after ? parsePreviewQuestionPane(after) : null;
-    if (still && still.question === answered.question) {
-      await herdr.paneSendKeys(paneId, "Enter");
-    }
+    // confirmed and moved on, where an Enter would answer something else.
+    //
+    // Compared on the options too, not the question text alone: a following
+    // question that happens to repeat the wording would otherwise look like the
+    // same prompt and take an Enter meant for its predecessor.
+    const still = parsePreviewQuestionPane(after);
+    if (!still || !sameQuestion(still, answered)) return;
+
+    // The pane may have been handed to something else while we waited: the
+    // holder releases as soon as it is asked to stop, and this runs outside that
+    // loop. A read is harmless, a keystroke is not.
+    if (signal?.aborted) return;
+    await herdr.paneSendKeys(paneId, "Enter");
   },
 
   async answerQuestionFreeText(herdr, paneId, info, text) {

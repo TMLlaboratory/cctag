@@ -144,6 +144,10 @@ export interface AgentDriver {
     paneId: string,
     optionNum: number,
     answered: AskUserQuestionPaneInfo,
+    /** Aborted when the pane's owner has been asked to stop. Checked before the
+     *  confirming keystroke, which is the part that must not reach a pane
+     *  something else may already have claimed. */
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
   answerQuestionFreeText?(
@@ -186,6 +190,12 @@ export interface AgentDriver {
  * pane doesn't parse, so an empty or garbled read is never mistaken for a
  * change.
  */
+/** Drops every space, so a value rebuilt from wrapped lines compares equal
+ *  however the terminal happened to break it. */
+function squash(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
 export function promptFingerprint(prompt: BlockedPrompt): string | null {
   if (prompt.kind === "question") {
     const info = prompt.info;
@@ -199,7 +209,12 @@ export function promptFingerprint(prompt: BlockedPrompt): string | null {
       info.header,
       info.question,
       info.multiSelect ? "multi" : "single",
-      ...info.options.map((o) => `${o.label}\u0000${o.description ?? ""}`),
+      // Whitespace stripped, not just collapsed: a description is rebuilt from
+      // however many lines the column wrapped it into, joined with spaces, so
+      // resizing the terminal changes where those spaces fall. Comparing with
+      // them in would have re-posted a prompt that was still pending — the
+      // false-positive direction this fingerprint exists to avoid.
+      ...info.options.map((o) => `${squash(o.label)}\u0000${squash(o.description ?? "")}`),
     ].join("\u0001");
   }
   if (!prompt.menu) return null;

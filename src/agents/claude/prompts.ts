@@ -18,6 +18,14 @@ import type { AskUserQuestionOption, AskUserQuestionPaneInfo, PermissionChoice, 
 const NUMBERED_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(.+?)\s*$/;
 const CURSOR_LINE_RE = /❯\s*\d+\./;
 
+export function permissionAnchorIndex(paneText: string): number {
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CURSOR_LINE_RE.test(lines[i])) return i;
+  }
+  return -1;
+}
+
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
   const lines = paneText.split("\n");
 
@@ -72,6 +80,24 @@ const QUESTION_TAB_BAR_RE = /[☐☒].*(?:Submit|→)|(?:←|→).*[☐☒]/;
 /** A horizontal rule the TUI uses as a separator, never content. */
 const RULE_LINE_RE = /^[\s─━—-]+$/;
 
+/**
+ * Line index of the row each parser anchors on, or -1.
+ *
+ * Exported so the driver can pick the parser whose anchor sits *lowest* on the
+ * screen rather than trying them in a fixed order. A pane read wide enough for a
+ * tall dialog also holds already-answered ones above it, and each parser
+ * anchoring on the last row *of its own kind* is not enough: a stale classic
+ * dialog above a live preview one still gave the classic parser something to
+ * find, and being tried first it won.
+ */
+export function classicAnchorIndex(paneText: string): number {
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (TYPE_SOMETHING_RE.test(lines[i])) return i;
+  }
+  return -1;
+}
+
 /** Returns null if this pane text isn't showing an AskUserQuestion menu. */
 export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneInfo | null {
   const lines = paneText.split("\n");
@@ -98,16 +124,20 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
   // back with a null first option and one of the descriptions as its question.
   const expected = typeSomethingNum - 1;
   if (expected < 1) return null;
+
+  // Walked upward from the anchor and stopped at option 1, so only the dialog on
+  // screen is read. Scanning the whole window instead meant a stale multi-select
+  // question above the live one turned `multiSelect` on and never off, and the
+  // live single-select question then got no buttons at all.
   const optionIdx: number[] = [];
   const options: AskUserQuestionOption[] = [];
   let multiSelect = false;
-  for (let i = 0; i < typeSomethingIdx; i++) {
+  for (let i = typeSomethingIdx - 1; i >= 0; i--) {
     const m = OPTION_LINE_RE.exec(lines[i]);
     if (!m) continue;
     const num = parseInt(m[1], 10);
     if (num < 1 || num > expected) continue;
-    // Last sighting wins, for the same reason the anchor is the last row: the
-    // option lines nearest the anchor belong to the dialog actually on screen.
+    if (options[num - 1] !== undefined) continue; // nearest the anchor wins
     if (m[2] !== undefined) multiSelect = true;
 
     let description = "";
@@ -117,6 +147,7 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
     }
     options[num - 1] = { label: m[3], description: description || undefined };
     optionIdx[num - 1] = i;
+    if (num === 1) break;
   }
   // Explicit index check, not `.some()`, for the sparse-array reason above.
   for (let i = 0; i < expected; i++) {
@@ -169,6 +200,20 @@ const NOTES_ROW_RE = /Notes:|press n to add notes/;
 /** Left edge of the preview box. Deliberately excludes `─`, which also draws
  *  the full-width separator rules and can appear in preview content. */
 const BOX_EDGE_RE = /[┌│└├┐┘┤]/;
+/**
+ * Rejoins a label the narrow column wrapped, restoring the separator the wrap
+ * consumed — or not, when there was none.
+ *
+ * Japanese wraps mid-word, so "落ち着いたネイビー＆アイ" + "ボリーを基調にした" is one
+ * word and must be joined flush. Latin text wraps at spaces, and joining flush
+ * there produced "Long optionlabel" — a label that no longer matched the one the
+ * agent offered.
+ */
+function joinWrapped(sofar: string, next: string): string {
+  const needsSpace = /[A-Za-z0-9)\]}.,;:!?]$/.test(sofar) && /^[A-Za-z0-9(\[{"']/.test(next);
+  return (needsSpace ? " " : "") + next;
+}
+
 /** A wrapped continuation of the option above: indented, unnumbered, non-empty. */
 const CONTINUATION_RE = /^\s{2,}\S/;
 
@@ -185,6 +230,14 @@ const CONTINUATION_RE = /^\s{2,}\S/;
  * Returns null when the pane is not showing this renderer, leaving the classic
  * parser and the permission path untouched.
  */
+export function previewAnchorIndex(paneText: string): number {
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CHAT_ROW_RE.test(lines[i]) || NOTES_ROW_RE.test(lines[i])) return i;
+  }
+  return -1;
+}
+
 export function parsePreviewQuestionPane(paneText: string): AskUserQuestionPaneInfo | null {
   const raw = paneText.split("\n");
   if (!raw.some((l) => CHAT_ROW_RE.test(l))) return null;
@@ -221,9 +274,7 @@ export function parsePreviewQuestionPane(paneText: string): AskUserQuestionPaneI
       let label = m[3].trim();
       for (let k = j + 1; k < limit; k++) {
         if (!lines[k].trim() || NUMBERED_START_RE.test(lines[k]) || !CONTINUATION_RE.test(lines[k])) break;
-        // Joined without a separator: the wrap is mid-word, not between words —
-        // "落ち着いたネイビー＆アイ" + "ボリーを基調にした" is one label.
-        label += lines[k].trim();
+        label += joinWrapped(label, lines[k].trim());
       }
       found.unshift({ num, idx: j, label });
       if (num === 1) break;

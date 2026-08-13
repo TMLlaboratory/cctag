@@ -181,7 +181,16 @@ function fakeHerdr(paneAfterDigit: () => string): {
   return { herdr, sent };
 }
 
-const PREVIEW_INFO = { header: "質問", question: "配色はどちらにしますか？", options: [], multiSelect: false };
+const PREVIEW_LABELS = [
+  "落ち着いたネイビー＆アイボリーを基調にした学術的な配色",
+  "明るいティール＆コーラルのコントラスト配色",
+];
+const PREVIEW_INFO = {
+  header: "質問",
+  question: "配色はどちらにしますか？",
+  options: PREVIEW_LABELS.map((label) => ({ label })),
+  multiSelect: false,
+};
 
 test("the preview renderer gets the Enter its digit does not supply", async () => {
   // Measured: in this renderer a digit only moves the cursor. Without the Enter
@@ -215,4 +224,136 @@ test("a different preview question on screen gets no Enter either", async () => 
   const { herdr, sent } = fakeHerdr(() => other);
   await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO);
   assert.deepEqual(sent, ["text:1"]);
+});
+
+test("a following question that repeats the wording does not inherit the Enter", async () => {
+  // Codex re-review round 3, Critical 2. Comparing the question text alone meant a
+  // next question phrased identically looked like the one just answered, and took
+  // an Enter that confirmed *its* default option.
+  const sameWordingDifferentOptions = PREVIEW_PANE.replace(
+    "  2. 明るいティール＆コーラル     │ サブアクセント: #8C7A5B (くすみゴールド)                    │",
+    "  2. 全く別の選択肢               │ サブアクセント: #8C7A5B (くすみゴールド)                    │",
+  );
+  const { herdr, sent } = fakeHerdr(() => sameWordingDifferentOptions);
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO);
+  assert.deepEqual(sent, ["text:1"], "different options mean a different question");
+});
+
+test("a cancelled pane gets the digit but never the confirming Enter", async () => {
+  // Codex re-review round 3, Critical 3. This runs outside the poll loop, which
+  // releases the pane as soon as it is asked to stop — so by the time the Enter
+  // would be sent, something else may hold the pane.
+  const { herdr, sent } = fakeHerdr(() => PREVIEW_PANE);
+  const controller = new AbortController();
+  controller.abort();
+  await claudeDriver.answerQuestionOption!(herdr, "w0:p1", 2, PREVIEW_INFO, controller.signal);
+  assert.deepEqual(sent, ["text:2"], "no keystroke may follow the release");
+});
+
+test("a failed re-read is reported, not treated as answered", async () => {
+  // Codex re-review round 3, Critical 4. Swallowing it meant no Enter was sent
+  // while the caller marked the Slack prompt answered — the pane stayed waiting
+  // and the same prompt came back on the next poll.
+  const herdr = {
+    async agentSend() {},
+    async paneSendKeys() {},
+    async paneRead() {
+      throw new Error("herdr command timed out");
+    },
+  } as unknown as Parameters<NonNullable<typeof claudeDriver.answerQuestionOption>>[0];
+  await assert.rejects(
+    claudeDriver.answerQuestionOption!(herdr, "w0:p1", 1, PREVIEW_INFO),
+    /herdr command timed out/,
+  );
+});
+
+test("the live dialog is the lowest one, not the first parser to match", async () => {
+  // Codex re-review round 3, Critical 1. A stale classic dialog above a live
+  // preview question used to win simply because its parser ran first.
+  const stalePlusLive = [
+    "☐ 古い質問",
+    "",
+    "これは既に回答済みの質問です",
+    "",
+    "❯ 1. 古い選択肢A",
+    "  2. 古い選択肢B",
+    "  3. Type something.",
+    "",
+    PREVIEW_PANE,
+  ].join("\n");
+  const prompt = claudeDriver.parseBlockedPane(stalePlusLive);
+  assert.equal(prompt.kind, "question");
+  if (prompt.kind !== "question") return;
+  assert.equal(prompt.info.question, "配色はどちらにしますか？", "the live one");
+  assert.deepEqual(prompt.info.options.map((o) => o.label), PREVIEW_LABELS);
+});
+
+test("a permission menu below a stale question is parsed as a permission menu", () => {
+  // The other direction of the same fix: the question is gone, and its numbered
+  // options must not be read as the menu that replaced it.
+  const staleQuestionThenPermission = [
+    PREVIEW_PANE,
+    "",
+    "Bash command",
+    "",
+    "  rm -rf build/",
+    "",
+    "Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+  ].join("\n");
+  const prompt = claudeDriver.parseBlockedPane(staleQuestionThenPermission);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.deepEqual(prompt.menu?.choices.map((c) => c.label), ["Yes", "No"]);
+});
+
+test("a stale multi-select question above does not strip the live one of its buttons", () => {
+  // Codex re-review round 3, Moderate 1. multiSelect was turned on by any checkbox
+  // anywhere in the window and never turned off, so a live single-select question
+  // was posted as free-text-only.
+  const staleMultiThenLive = [
+    "☒ 古い質問",
+    "",
+    "どれを含めますか？",
+    "",
+    "❯ 1. [x] ログ",
+    "  2. [ ] 通知",
+    "  3. Type something.",
+    "",
+    "☐ 実装方針",
+    "",
+    "どの方式で進めますか？",
+    "",
+    "❯ 1. A方式",
+    "  2. B方式",
+    "  3. Type something.",
+  ].join("\n");
+  const info = parseAskUserQuestionPane(staleMultiThenLive);
+  assert.equal(info?.question, "どの方式で進めますか？");
+  assert.equal(info?.multiSelect, false, "the live question is single-select");
+  assert.deepEqual(info?.options.map((o) => o.label), ["A方式", "B方式"]);
+});
+
+test("a Latin label wrapped at a space is rejoined with that space", () => {
+  // Codex re-review round 3, Moderate 2. Joining flush is right for Japanese,
+  // which wraps mid-word, but it ran Latin words together — the label no longer
+  // matched the one the agent offered.
+  const pane = [
+    "Which layout?",
+    "",
+    "❯ 1. Long option label that     ┌────────────┐",
+    "    wraps across lines          │ preview    │",
+    "  2. Short one                  └────────────┘",
+    "",
+    "                                Notes: press n to add notes",
+    "  Chat about this",
+  ].join("\n");
+  const info = parsePreviewQuestionPane(pane);
+  assert.deepEqual(info?.options.map((o) => o.label), ["Long option label that wraps across lines", "Short one"]);
+});
+
+test("a Japanese label wrapped mid-word is still rejoined flush", () => {
+  const info = parsePreviewQuestionPane(PREVIEW_PANE);
+  assert.equal(info?.options[0].label, PREVIEW_LABELS[0], "no space may be introduced mid-word");
 });

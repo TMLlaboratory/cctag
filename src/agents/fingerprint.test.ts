@@ -71,3 +71,23 @@ test("labels cannot be run together to forge a match", () => {
 test("an unparseable pane has no identity rather than a fake one", () => {
   assert.equal(promptFingerprint({ kind: "permission", menu: null, isPlanPrompt: false }), null);
 });
+
+test("rewrapping a description does not change the prompt's identity", () => {
+  // Codex re-review round 3. A description is rebuilt from however many lines the
+  // column wrapped it into, joined with spaces, so resizing the terminal moves
+  // those spaces — and comparing with them in re-posted a prompt that was still
+  // pending, the false-positive direction that matters most.
+  const narrow = promptFingerprint(
+    question({ options: [{ label: "A", description: "視認性が高く スクリーン 表示向き" }, { label: "B" }] }),
+  );
+  const wide = promptFingerprint(
+    question({ options: [{ label: "A", description: "視認性が高くスクリーン表示向き" }, { label: "B" }] }),
+  );
+  assert.equal(narrow, wide);
+});
+
+test("descriptions that genuinely differ are still told apart", () => {
+  const a = promptFingerprint(question({ options: [{ label: "A", description: "速いが荒い" }, { label: "B" }] }));
+  const b = promptFingerprint(question({ options: [{ label: "A", description: "遅いが正確" }, { label: "B" }] }));
+  assert.notEqual(a, b, "stripping whitespace must not flatten real differences");
+});

@@ -99,9 +99,17 @@ interface TurnState {
    * it and posted the same prompt again, once per timeout window, forever.
    */
   deadlineAt: number;
-  /** Consecutive herdr query failures, reset by any success. Distinguishes a
-   *  flaky herdr from a pane that is genuinely gone. */
-  herdrFailures: number;
+  /**
+   * Consecutive failures per herdr operation, each reset only by that same
+   * operation succeeding.
+   *
+   * One shared counter did not work: agentGet runs first on every poll, so its
+   * success reset the count before paneRead was even attempted. A pane whose
+   * reads failed persistently therefore never got past "first failure", and —
+   * being blocked — had its deadline pushed forward each time too, so the turn
+   * held the pane forever while making no progress at all.
+   */
+  failures: { agentGet: number; paneRead: number };
   /** This turn's claim on the pane. Its signal is what the poll loop watches,
    *  so cancelling the lease stops the loop; released by finalize/abort. */
   lease: PaneLease;
@@ -384,11 +392,20 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
-        herdrFailures: 0,
+        failures: { agentGet: 0, paneRead: 0 },
         lease,
         currentPromptId: 0,
       };
       this.turns.set(paneId, state);
+
+      // Checked again after the post above: that await is where a disconnect is
+      // most likely to land now that the earlier ones are covered, and what
+      // follows sends the prompt to a live pane.
+      if (lease.cancelled) {
+        this.turns.delete(paneId);
+        await statusHandle.update("（切断されました）").catch(() => {});
+        return;
+      }
 
       const normalized = promptText
         .replace(/<@[^>|]+(\|[^>]+)?>/g, "")
@@ -559,7 +576,7 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
-        herdrFailures: 0,
+        failures: { agentGet: 0, paneRead: 0 },
         lease,
         currentPromptId: 0,
       };
@@ -600,7 +617,7 @@ export class TurnEngine {
     state.answering = true; // claimed — see TurnState.answering
     try {
       const answer = state.driver.answerQuestionOption
-        ? state.driver.answerQuestionOption(this.herdr, state.paneId, optionIndex + 1, info)
+        ? state.driver.answerQuestionOption(this.herdr, state.paneId, optionIndex + 1, info, state.lease.signal)
         : state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
       await answer;
     } catch (err) {
@@ -793,12 +810,12 @@ export class TurnEngine {
       let agent: AgentInfo | null;
       try {
         agent = await this.herdr.agentGet(paneId);
-        state.herdrFailures = 0;
+        state.failures.agentGet = 0;
       } catch (err) {
-        state.herdrFailures += 1;
-        if (state.herdrFailures <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+        state.failures.agentGet += 1;
+        if (state.failures.agentGet <= HERDR_FAILURES_BEFORE_GIVING_UP) {
           console.error(
-            `[turn ${paneId}] herdr query failed (${state.herdrFailures}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+            `[turn ${paneId}] herdr query failed (${state.failures.agentGet}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
             err instanceof Error ? err.message : err,
           );
           continue;
@@ -881,12 +898,12 @@ export class TurnEngine {
             source: state.driver.paneReadSource,
             lines: BLOCKED_PANE_LINES,
           });
-          state.herdrFailures = 0;
+          state.failures.paneRead = 0;
         } catch (err) {
-          state.herdrFailures += 1;
-          if (state.herdrFailures <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+          state.failures.paneRead += 1;
+          if (state.failures.paneRead <= HERDR_FAILURES_BEFORE_GIVING_UP) {
             console.error(
-              `[turn ${paneId}] pane read failed (${state.herdrFailures}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+              `[turn ${paneId}] pane read failed (${state.failures.paneRead}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
               err instanceof Error ? err.message : err,
             );
             continue;

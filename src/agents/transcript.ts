@@ -24,7 +24,20 @@ export function transcriptSizeSafe(path: string): number {
 export function transcriptCreatedAfter(path: string, sinceMs: number): boolean {
   try {
     const { birthtimeMs } = statSync(path);
-    return birthtimeMs > 0 && birthtimeMs >= sinceMs;
+    // NaN as well as 0: an unusable value must take the conservative branch, and
+    // `NaN >= x` being false would only reach it by accident.
+    if (!Number.isFinite(birthtimeMs) || birthtimeMs <= 0) return false;
+    // No tolerance on the comparison, deliberately. A tolerance was tried, to
+    // cover filesystems reporting creation to the second — the concern being that
+    // a file created just after watching began could carry a birth time from just
+    // before it, and lose its first turn. But it also admits a transcript created
+    // shortly *before* watching, which is precisely the transient-resolution case
+    // this guard exists for, and a test caught the regression. Measured on this
+    // platform, birth times resolve to well under a millisecond (0.05s apart on
+    // consecutively created files), so the precision the tolerance protected
+    // against is not the precision on offer; and of the two failures, dropping
+    // one turn beats replaying a whole session into the thread.
+    return birthtimeMs >= sinceMs;
   } catch {
     return false;
   }
