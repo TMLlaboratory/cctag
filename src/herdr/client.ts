@@ -90,6 +90,31 @@ export class HerdrClient {
   }
 
   /**
+   * Whether the pane itself still exists, regardless of what is running in it.
+   *
+   * The distinction agentGet cannot make: quitting the CLI to restart it leaves
+   * the pane at a shell prompt, and `agent get` then answers `agent_not_found` —
+   * indistinguishable from a closed terminal unless the pane is asked about
+   * separately (verified on a live pane: `pane get` still returned it, with
+   * agent_status "unknown"). Pairings are addressed by pane id precisely so they
+   * survive that restart, so telling the two apart is what keeps them.
+   *
+   * Throws on anything other than a not-found answer: a herdr timeout must not be
+   * reported as a missing pane.
+   */
+  async paneExists(paneId: string): Promise<boolean> {
+    try {
+      await this.run(["pane", "get", paneId]);
+      return true;
+    } catch (err) {
+      if (err instanceof HerdrError && /not found|no such|unknown target/i.test(err.stderr ?? err.message)) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  /**
    * herdr's own classification of what is on the pane right now.
    *
    * Unlike every other command here, `agent explain` prints human-readable text

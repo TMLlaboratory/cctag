@@ -78,6 +78,9 @@ test("a pane that has gone away is reported once and unpaired", async () => {
       async agentGet() {
         return null; // herdr's own "no such pane"
       },
+      async paneExists() {
+        return false; // and the pane itself is gone too
+      },
     } as unknown as HerdrClient;
 
     const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20);
@@ -372,4 +375,62 @@ test("a transcript that only failed to resolve for a moment is not read from the
       `an existing transcript must not be replayed, got ${JSON.stringify(replies)}`,
     );
   });
+});
+
+test("a pane whose CLI was quit keeps its pairing", async () => {
+  // Codex re-review, Moderate 2 — a hypothesis it could not settle from the
+  // repository, confirmed on a live pane: quitting Claude Code leaves the pane at
+  // a shell prompt, and `agent get` then answers agent_not_found while `pane get`
+  // still returns the pane. Unpairing on the first alone tore the thread down
+  // during the very restart that pane-id addressing exists to survive
+  // (pairing.ts), so restarting the CLI would have meant reconnecting.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = storeWithPairing(dir);
+    const { notifier, replies } = fakeNotifier();
+    const herdr = {
+      async agentGet() {
+        return null; // no agent...
+      },
+      async paneExists() {
+        return true; // ...but the pane is still there
+      },
+    } as unknown as HerdrClient;
+
+    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20);
+    watcher.start();
+    await sleep(150);
+    watcher.stop();
+
+    assert.equal(store.list().length, 1, "the pairing must survive a restart");
+    assert.equal(replies.length, 0, "and nothing should be announced in the thread");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pane that is really gone is still unpaired", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = storeWithPairing(dir);
+    const { notifier, replies } = fakeNotifier();
+    const herdr = {
+      async agentGet() {
+        return null;
+      },
+      async paneExists() {
+        return false;
+      },
+    } as unknown as HerdrClient;
+
+    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20);
+    watcher.start();
+    await sleep(150);
+    watcher.stop();
+
+    assert.equal(store.list().length, 0);
+    assert.equal(replies.filter((r) => r.includes("インスタンスが見つかりません")).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

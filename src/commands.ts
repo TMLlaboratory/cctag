@@ -347,8 +347,7 @@ export class CommandHandler {
       await this.turnEngine.startTurn(pairing, userId, text, { files });
     } catch (err) {
       if (err instanceof Error && err.message === "agent-not-found") {
-        this.pairingStore.remove(pairing.key);
-        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
+        await this.reportAgentMissing(channel, threadTs, pairing);
         return;
       }
       // startTurn re-checks busy under its own synchronous reservation, so two
@@ -477,8 +476,7 @@ export class CommandHandler {
       await this.turnEngine.startTurn(pairing, userId, combined);
     } catch (err) {
       if (err instanceof Error && err.message === "agent-not-found") {
-        this.pairingStore.remove(pairing.key);
-        await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
+        await this.reportAgentMissing(channel, threadTs, pairing);
         return;
       }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
@@ -541,6 +539,39 @@ export class CommandHandler {
     const driver = driverFor(agent.agent);
     const suffix = driver.kind === "claude" ? "" : `（${driver.displayName}）`;
     await this.notifier.postReply(channel, threadTs, `✅ 接続しました: ${agent.cwd}${suffix}`);
+  }
+
+  /**
+   * Explains a pane whose agent could not be found, and decides whether the
+   * pairing survives it.
+   *
+   * Only a pane that is gone justifies unpairing. A pane that is still there
+   * without an agent is the middle of a CLI restart — pairings are addressed by
+   * pane id so they live through exactly that (pairing.ts) — and dropping it
+   * there would make restarting the CLI mean reconnecting the thread. Verified
+   * on a live pane: quitting Claude Code left `agent get` answering
+   * agent_not_found while `pane get` still returned the pane.
+   */
+  private async reportAgentMissing(channel: string, threadTs: string, pairing: { key: string; paneId: string }): Promise<void> {
+    let paneStillThere = false;
+    try {
+      paneStillThere = await this.herdr.paneExists(pairing.paneId);
+    } catch {
+      // Couldn't tell — assume the pane is there, since keeping a pairing is the
+      // recoverable mistake and dropping one is not.
+      paneStillThere = true;
+    }
+    if (paneStillThere) {
+      await this.notifier.postReply(
+        channel,
+        threadTs,
+        "⚠️ このペインでエージェントが動いていません（終了した直後かもしれません）。" +
+          "ターミナルで起動し直せば、このスレッドはそのまま使えます。",
+      );
+      return;
+    }
+    this.pairingStore.remove(pairing.key);
+    await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
   }
 
   async handleAskUserQuestionButton(ctx: AskUserQuestionButtonContext): Promise<void> {

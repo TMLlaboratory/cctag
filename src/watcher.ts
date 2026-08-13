@@ -58,6 +58,8 @@ export class BackgroundWatcher {
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
+  /** Panes seen alive but without an agent, so the wait is logged once, not every tick. */
+  private agentlessPanes = new Set<string>();
 
   private running = false;
 
@@ -97,6 +99,7 @@ export class BackgroundWatcher {
         this.watches.delete(key);
         this.busyLastTick.delete(key);
         this.failureStreak.delete(key);
+        this.agentlessPanes.delete(key);
       }
     }
 
@@ -154,6 +157,21 @@ export class BackgroundWatcher {
 
     const agent = await this.herdr.agentGet(pairing.paneId);
     if (!agent) {
+      // "No agent" is not "no pane". Quitting the CLI to restart it in the same
+      // pane leaves that pane at a shell prompt, and agent get then answers
+      // agent_not_found — so unpairing on that alone tore down a pairing during
+      // the very restart pane-id addressing exists to survive (pairing.ts).
+      // Verified on a live pane: agent get failed while pane get still returned
+      // it. A throw propagates, since a herdr timeout is not a missing pane.
+      if (await this.herdr.paneExists(pairing.paneId)) {
+        if (!this.agentlessPanes.has(pairing.paneId)) {
+          this.agentlessPanes.add(pairing.paneId);
+          console.log(`[watcher] pane ${pairing.paneId} has no agent running — keeping ${pairing.key}`);
+        }
+        this.watches.delete(pairing.paneId);
+        return;
+      }
+
       // Closing the terminal used to be invisible from Slack: the thread stayed
       // paired and this returned quietly every 7s forever, so the only way to
       // discover it was to send a message and get startTurn's agent-not-found.
@@ -182,6 +200,7 @@ export class BackgroundWatcher {
         .catch((err) => console.error(`[watcher] could not report ${pairing.paneId} gone:`, err));
       return;
     }
+    this.agentlessPanes.delete(pairing.paneId);
     const driver = driverFor(agent.agent);
 
     const existing = this.watches.get(pairing.paneId);
