@@ -43,24 +43,32 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Sleeps, but gives up as soon as the signal aborts.
+ * Waits before the next poll, giving up as soon as the lease is cancelled.
  *
- * The poll loop waits five seconds between polls while a prompt is up, and a
- * plain sleep would hold the pane for that long after a disconnect before the
- * loop noticed and released it. Since cancellation is now signal-only — the
- * holder releases, nobody takes the pane from it — how quickly the holder
- * notices *is* how quickly the pane comes back.
+ * The wait is five seconds while a prompt is up, and the holder releases the pane
+ * on its way out — so how fast it notices cancellation *is* how fast the pane
+ * comes back.
+ *
+ * Deliberately not woken by an answer, though that would make the status line and
+ * the result arrive sooner. Tried, and it re-posted the prompt that had just been
+ * answered: the pane still reports `blocked` for a moment after the keystroke, and
+ * a loop resuming inside that moment sees a blocked pane with a running turn and
+ * treats it as a new prompt. The answer already posts its own status line, so the
+ * only cost of waiting is a stale elapsed time.
  */
-function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
+function waitBeforeNextPoll(state: TurnState, ms: number): Promise<void> {
+  if (state.lease.signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(done, ms);
-    function done(): void {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      signal.removeEventListener("abort", done);
+      state.lease.signal.removeEventListener("abort", done);
       resolve();
-    }
-    signal.addEventListener("abort", done, { once: true });
+    };
+    const timer = setTimeout(done, ms);
+    state.lease.signal.addEventListener("abort", done, { once: true });
   });
 }
 
@@ -626,6 +634,7 @@ export class TurnEngine {
     }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label), []).catch(() => {});
     this.markPromptResolved(state);
+    await this.restartStatusLine(state);
     return { ok: true };
   }
 
@@ -647,6 +656,7 @@ export class TurnEngine {
     }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, freeText), []).catch(() => {});
     this.markPromptResolved(state);
+    await this.restartStatusLine(state);
     return { ok: true };
   }
 
@@ -664,6 +674,7 @@ export class TurnEngine {
     }
     await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
     this.markPromptResolved(state);
+    await this.restartStatusLine(state);
     return { ok: true };
   }
 
@@ -697,7 +708,34 @@ export class TurnEngine {
     }
     await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
     this.markPromptResolved(state);
+    await this.restartStatusLine(state);
     return { ok: true };
+  }
+
+  /**
+   * Posts a fresh status line and makes it the turn's.
+   *
+   * Answering from Slack left no visible sign that anything was happening: the
+   * status line belongs to the message the turn opened with — for an adopted
+   * terminal, "入力待ちを検出しました", posted before the prompt and by then well up
+   * the thread — so the only feedback next to the button was the prompt text
+   * changing. Reported from real use: the answer looked like it had gone nowhere,
+   * the next message was sent, and it came back rejected as busy while the
+   * terminal was in fact working.
+   *
+   * A new message costs one line per answer and puts the running state where the
+   * click was. Best-effort: failing to post it must not fail the answer, which
+   * has already reached the pane.
+   */
+  private async restartStatusLine(state: TurnState): Promise<void> {
+    const handle = await this.notifier
+      .postMessage(state.pairing.channel, state.pairing.threadTs ?? "", "⚙️ 実行中…")
+      .catch(() => null);
+    if (!handle) return;
+    state.statusHandle = handle;
+    // So the poll loop's next tick refreshes it with the elapsed time and tool
+    // instead of waiting out its three-second throttle.
+    state.lastStatusUpdateAt = 0;
   }
 
   /** Clears everything tied to the prompt just answered and hands the turn back
@@ -793,7 +831,7 @@ export class TurnEngine {
     const paneId = state.paneId;
     while (!state.lease.signal.aborted) {
       const interval = state.phase === "running" ? this.opts.pollIntervalMs : Math.max(this.opts.pollIntervalMs, 5_000);
-      await sleepUnlessAborted(interval, state.lease.signal);
+      await waitBeforeNextPoll(state, interval);
       // Re-check: this loop's turn may have been cancelled (and a new one
       // started for the same pane) while we were asleep. finalize()
       // looks up state by paneId, not by this closure's object identity,

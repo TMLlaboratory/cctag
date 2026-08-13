@@ -709,3 +709,80 @@ test("an unparseable prompt does not blind the check for every prompt after it",
     engine.abortAll();
   }
 });
+
+test("answering from Slack puts a status line where the answer was", async () => {
+  // Reported from real use: pressing a button produced no visible sign of work,
+  // because the status line belongs to the message the turn opened with — for an
+  // adopted terminal, "入力待ちを検出しました", posted before the prompt and by then
+  // well up the thread. The answer looked like it had gone nowhere, the next
+  // message was sent, and it came back rejected as busy while the terminal was in
+  // fact working.
+  const { notifier, posts } = fakeNotifier();
+  const engine = engineFor(
+    fakeHerdr(() => "blocked"),
+    notifier,
+    600_000,
+  );
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200);
+    const before = posts.filter((p) => p.includes("実行中")).length;
+
+    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1"), { ok: true });
+
+    assert.equal(
+      posts.filter((p) => p.includes("実行中")).length,
+      before + 1,
+      "a running status line must appear after the answer",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("the new status line is the one the poll loop then updates", async () => {
+  // Otherwise it would post "実行中…" once and then keep editing the old message up
+  // the thread, which is the same invisibility in a new place.
+  const events: string[] = [];
+  let status: AgentInfo["agentStatus"] = "blocked";
+  const tracking: Notifier = {
+    async postReply() {},
+    async postMessage(_c, _t, text) {
+      const tag = text.slice(0, 6);
+      events.push(`post[${tag}]`);
+      return {
+        async update(t: string) {
+          events.push(`update[${tag}]=${t.slice(0, 6)}`);
+        },
+      };
+    },
+  };
+  const engine = new TurnEngine(
+    fakeHerdr(() => status),
+    tracking,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200);
+    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1"), { ok: true });
+    status = "working"; // the agent picks the work up
+    events.length = 0;
+    // Past the five-second floor the loop is waiting out: an answer deliberately
+    // does not cut that short, because resuming inside the moment the pane still
+    // reports `blocked` re-posted the prompt just answered.
+    await sleep(5_600);
+
+    const refreshed = events.filter((e) => e.startsWith("update[⚙️ 実行中]"));
+    assert.ok(refreshed.length > 0, `the new line must be the one refreshed, got ${JSON.stringify(events)}`);
+    assert.ok(
+      !events.some((e) => e.startsWith("update[🖥️ ターミ")),
+      "and the message the turn opened with is left alone",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});

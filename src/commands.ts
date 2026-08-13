@@ -47,6 +47,17 @@ function helpTextFor(driver: AgentDriver | null): string {
   return CLAUDE_HELP_TEXT;
 }
 
+/**
+ * Says what is being waited for, not just that something is.
+ *
+ * Reported from real use: a button press produced no visible sign of work, so the
+ * next message was sent and came back rejected — with no way to tell whether the
+ * answer had even landed. The status line now reappears next to the answer (see
+ * TurnEngine.restartStatusLine), and this points at it.
+ */
+const BUSY_MESSAGE =
+  "⏳ このインスタンスは実行中です（このスレッドの `⚙️ 実行中…` の行が現在の状態です）。完了すると結果が投稿されるので、それから送ってください。";
+
 const MODEL_COMMAND_RE = /^model\s+(\S[\s\S]*)$/i;
 const MODE_COMMAND_RE = /^mode\s+(\S+)$/i;
 const LOG_COMMAND_RE = /^log(?:\s+([\s\S]+))?$/i;
@@ -154,7 +165,7 @@ export class CommandHandler {
       // same check and drove the same TUI.
       const lease = this.turnEngine.acquire(pairing.paneId, "model-command");
       if (!lease) {
-        await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+        await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
         return;
       }
       try {
@@ -336,7 +347,7 @@ export class CommandHandler {
       return;
     }
     if (this.turnEngine.isBusy(pairing.paneId)) {
-      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
       return;
     }
 
@@ -354,7 +365,7 @@ export class CommandHandler {
       // messages arriving together can reach it past the check above — that's
       // the ordinary "wait your turn" case, not an error worth showing raw.
       if (err instanceof Error && err.message === "busy") {
-        await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+        await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
         return;
       }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
@@ -381,7 +392,7 @@ export class CommandHandler {
     if (!modes) return; // callers gate on this; defensive no-op if reached anyway
     const lease = this.turnEngine.acquire(paneId, "mode-command");
     if (!lease) {
-      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
       return;
     }
     try {
@@ -445,7 +456,7 @@ export class CommandHandler {
       return;
     }
     if (this.turnEngine.isBusy(pairing.paneId)) {
-      await this.notifier.postReply(channel, threadTs, "⏳ 現在の応答が完了するまでお待ちください。");
+      await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
       return;
     }
     if (!this.notifier.getThreadHistorySinceLastBotPost) {
