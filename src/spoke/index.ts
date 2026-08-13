@@ -55,7 +55,6 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       );
       const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
       const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
-      watcher.start();
       ws.once("close", () => {
         // Both halves have to stop, not just the watcher: this connection's
         // engine holds poll loops whose only way to reach Slack was the notifier
@@ -139,7 +138,24 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
           limits.maxFileBytes = narrowed;
         }
         console.log("[spoke] registered with hub");
+        // Only now. Until the Hub has accepted this connection it refuses to act
+        // on anything, and refuses *successfully*: an unauthorized post_message
+        // comes back as `{ msgId: "" }`, not an error. A watcher started earlier
+        // could therefore adopt a blocked pane, believe it had posted the prompt,
+        // and hold that pane while Slack showed nothing at all.
+        watcher.start();
       } catch (err) {
+        // Closing the socket is the point. Rejecting alone left it open with the
+        // watcher and engine of this attempt still live, while the reconnect loop
+        // built a second set against a new connection — two engines polling the
+        // same panes, which is exactly what abortAll() exists to prevent.
+        watcher.stop();
+        turnEngine.abortAll();
+        try {
+          ws.close();
+        } catch {
+          /* already closing */
+        }
         reject(err);
         return;
       }
