@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAskUserQuestionPane, parsePreviewQuestionPane } from "./prompts.js";
+import { parseAskUserQuestionPane, parsePreviewQuestionPane, previewAnchorIndex } from "./prompts.js";
 import { claudeDriver } from "./driver.js";
 
 // Fixtures taken from a real pane. A two-question AskUserQuestion was raised on
@@ -356,4 +356,45 @@ test("a Latin label wrapped at a space is rejoined with that space", () => {
 test("a Japanese label wrapped mid-word is still rejoined flush", () => {
   const info = parsePreviewQuestionPane(PREVIEW_PANE);
   assert.equal(info?.options[0].label, PREVIEW_LABELS[0], "no space may be introduced mid-word");
+});
+
+test("a classic dialog is not hijacked by the preview parser", () => {
+  // Regression from the anchor-lowest rule, caught on a live prompt: the classic
+  // list ends with a *numbered* "Chat about this" below its numbered "Type
+  // something.", so accepting either form of that row made every classic dialog
+  // look like a preview one — and, its chat row being lowest, win the comparison.
+  // The symptoms in Slack were an extra option reading "Type something." and each
+  // label glued to its own description.
+  const classic = [
+    "月曜の試験運用の受講者は何名くらいですか？",
+    "",
+    "❯ 1. 数名（関係者のみ）",
+    "     コスト・負荷とも問題なし。",
+    "  2. 20〜30名（1クラス）",
+    "     対話コストが実測できる規模。",
+    "  3. 50名以上",
+    "     設計を先に確認する必要。",
+    "  4. Type something.",
+    "─".repeat(80),
+    "  5. Chat about this",
+  ].join("\n");
+
+  assert.equal(previewAnchorIndex(classic), -1, "a numbered chat row is not this renderer's");
+  const prompt = claudeDriver.parseBlockedPane(classic);
+  assert.equal(prompt.kind, "question");
+  if (prompt.kind !== "question") return;
+  assert.deepEqual(
+    prompt.info.options.map((o) => o.label),
+    ["数名（関係者のみ）", "20〜30名（1クラス）", "50名以上"],
+    "three real options — the free-text row is not one of them",
+  );
+  assert.equal(prompt.info.options[0].description, "コスト・負荷とも問題なし。", "kept separate from the label");
+});
+
+test("the preview renderer's own unnumbered chat row still anchors it", () => {
+  assert.ok(previewAnchorIndex(PREVIEW_PANE) > 0);
+  const prompt = claudeDriver.parseBlockedPane(PREVIEW_PANE);
+  assert.equal(prompt.kind, "question");
+  if (prompt.kind !== "question") return;
+  assert.deepEqual(prompt.info.options.map((o) => o.label), PREVIEW_LABELS);
 });

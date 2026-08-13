@@ -118,26 +118,58 @@ export function askUserQuestionBlocks(paneId: string, promptId: number, info: As
     return blocks;
   }
 
+  // Long options belong in the message, not on the buttons. A button caps at 75
+  // characters and does not wrap, so a paragraph-length choice arrived as an
+  // unreadable slab with its distinguishing part cut off — reported from a real
+  // prompt whose four options each ran past a hundred characters. The full text
+  // goes in a numbered list, and the buttons carry just enough to match a number
+  // to what it means.
+  const needsList = info.options.some((o) => o.label.length > BUTTON_LABEL_BUDGET || o.description);
+  if (needsList) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: info.options
+          .map((o, i) => `*${i + 1}.* ${o.label}${o.description ? `\n    ${o.description}` : ""}`)
+          .join("\n"),
+      },
+    });
+  }
+
+  const shown = info.options.slice(0, MAX_OPTION_BUTTONS);
   blocks.push({
     type: "actions",
-    elements: info.options.slice(0, 4).map((o, i) => ({
+    elements: shown.map((o, i) => ({
       type: "button",
-      text: { type: "plain_text", text: `${i + 1}. ${o.label}`.slice(0, 75) },
+      text: { type: "plain_text", text: buttonLabel(i + 1, o.label) },
       value: JSON.stringify({ k: "aq", t: paneId, p: promptId, o: i } satisfies AqButtonValue),
       action_id: `aq_answer_${i}`,
     })),
   });
-  const descriptions = info.options
-    .map((o, i) => (o.description ? `${i + 1}. ${o.description}` : null))
-    .filter(Boolean);
-  if (descriptions.length) {
-    blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: descriptions.join(" ／ ") }] });
-  }
-  blocks.push({
-    type: "context",
-    elements: [{ type: "mrkdwn", text: "ボタンを押すか、このスレッドに返信すると自由記述で回答できます" }],
-  });
+
+  // Said out loud rather than left to be noticed. Options past the button limit
+  // used to be dropped in silence, so a prompt with more of them looked as though
+  // it had fewer — and the missing ones were unanswerable.
+  const hidden = info.options.length - shown.length;
+  const hint =
+    hidden > 0
+      ? `ボタンは${MAX_OPTION_BUTTONS}件までです。残り${hidden}件を選ぶ場合や自由に答える場合は、このスレッドに返信してください`
+      : "ボタンを押すか、このスレッドに返信すると自由記述で回答できます";
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: hint }] });
   return blocks;
+}
+
+/** How much of an option's own words a button carries. Slack's own cap is 75 and
+ *  buttons do not wrap, so the useful limit is whatever stays scannable. */
+const BUTTON_LABEL_BUDGET = 24;
+/** Buttons per prompt. Slack allows more, but a row of them stops being readable
+ *  — and the numbered list above carries every option regardless. */
+const MAX_OPTION_BUTTONS = 5;
+
+function buttonLabel(num: number, label: string): string {
+  const head = label.length > BUTTON_LABEL_BUDGET ? `${label.slice(0, BUTTON_LABEL_BUDGET - 1)}…` : label;
+  return `${num}. ${head}`.slice(0, 75);
 }
 
 export function askUserQuestionAnsweredText(header: string, answer: string): string {

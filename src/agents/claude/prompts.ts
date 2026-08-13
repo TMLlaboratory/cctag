@@ -195,7 +195,14 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
  * unnumbered "Chat about this" — which is why the classic parser bails on it,
  * and why this needs its own terminator.
  */
-const CHAT_ROW_RE = /^\s*(?:\d+\.\s*)?Chat about this\s*$/;
+// Unnumbered on purpose, and this is what tells the two renderers apart. The
+// classic list also ends with a "Chat about this" row — but a *numbered* one,
+// right after its numbered "Type something." — so accepting either form made
+// every classic dialog look like a preview one, and since its chat row sits
+// lowest on the screen it won the anchor comparison and mis-parsed the dialog:
+// the "Type something." row came through as a real option and each label was
+// glued to its own description. Measured on a live prompt.
+const CHAT_ROW_RE = /^\s*Chat about this\s*$/;
 const NOTES_ROW_RE = /Notes:|press n to add notes/;
 /** Left edge of the preview box. Deliberately excludes `─`, which also draws
  *  the full-width separator rules and can appear in preview content. */
