@@ -66,6 +66,9 @@ export interface MentionContext {
   channel: string;
   threadTs: string;
   userId: string;
+  /** Display name of the sender, resolved by whichever side holds the token.
+   *  Absent from an older Hub, which just leaves the message unattributed. */
+  userName?: string;
   /** Already mention-stripped and composer-attribution-stripped. */
   text: string;
   /** This message's own Slack ts — used by `log` to exclude itself from fetched thread history. */
@@ -140,6 +143,7 @@ export class CommandHandler {
 
   async handleMention(ctx: MentionContext): Promise<void> {
     const { channel, threadTs, userId, text, ts } = ctx;
+    const sender = this.senderLabel(ctx);
     const files = ctx.files ?? [];
 
     // An attachment is unambiguously a turn, never a command: `connect` and
@@ -147,7 +151,7 @@ export class CommandHandler {
     // mention through the command switch would send "@cctag" + a screenshot
     // (empty text) to the help branch instead of to the agent.
     if (files.length > 0) {
-      await this.dispatchTurn(channel, threadTs, userId, text, files);
+      await this.dispatchTurn(channel, threadTs, userId, text, files, sender);
       return;
     }
 
@@ -227,7 +231,7 @@ export class CommandHandler {
 
     const logMatch = LOG_COMMAND_RE.exec(text);
     if (logMatch) {
-      await this.handleLog(channel, threadTs, userId, ts, logMatch[1]?.trim());
+      await this.handleLog(channel, threadTs, userId, ts, logMatch[1]?.trim(), sender);
       return;
     }
 
@@ -330,19 +334,31 @@ export class CommandHandler {
     }
 
     // Anything else: treat as a turn message.
-    await this.dispatchTurn(channel, threadTs, userId, text, []);
+    await this.dispatchTurn(channel, threadTs, userId, text, [], sender);
   }
 
   /**
    * The common tail of every path that ends in "send this to the agent":
    * resolve the pairing, download any attachments, and start the turn.
    */
+  /**
+   * Names the sender only when it is not the owner — the same asymmetry the
+   * button actor uses, and for the same reason. An unattributed message reads
+   * exactly as one typed at the terminal does, so nothing changes for a thread
+   * one person uses; a name appearing is the signal that somebody else is asking.
+   */
+  private senderLabel(ctx: { userId: string; userName?: string }): string | undefined {
+    if (!ctx.userId || this.isOwner(ctx.userId)) return undefined;
+    return ctx.userName ?? ctx.userId;
+  }
+
   private async dispatchTurn(
     channel: string,
     threadTs: string,
     userId: string,
     text: string,
     files: IncomingFile[],
+    sender?: string,
   ): Promise<void> {
     const pairing = this.pairingStore.get(channel, threadTs);
     if (!pairing) {
@@ -362,7 +378,7 @@ export class CommandHandler {
       // Attachments are downloaded inside startTurn, not here: the busy check
       // above is only meaningful if nothing slow happens between it and the
       // pane actually being reserved.
-      await this.turnEngine.startTurn(pairing, userId, text, { files });
+      await this.turnEngine.startTurn(pairing, userId, attributed(text, sender), { files });
     } catch (err) {
       if (err instanceof Error && err.message === "agent-not-found") {
         await this.reportAgentMissing(channel, threadTs, pairing);
@@ -452,7 +468,14 @@ export class CommandHandler {
    * message in this thread. With no instruction, defaults to asking the
    * agent to act on whatever the log contains.
    */
-  private async handleLog(channel: string, threadTs: string, userId: string, ts: string, instruction?: string): Promise<void> {
+  private async handleLog(
+    channel: string,
+    threadTs: string,
+    userId: string,
+    ts: string,
+    instruction?: string,
+    sender?: string,
+  ): Promise<void> {
     const pairing = this.pairingStore.get(channel, threadTs);
     if (!pairing) {
       await this.notifier.postReply(
@@ -487,7 +510,7 @@ export class CommandHandler {
       "[Slackスレッドの履歴（cctagの最終発言以降）]",
       lines.join("\n"),
       "---",
-      instruction || "上記を踏まえて対応してください。",
+      attributed(instruction || "上記を踏まえて対応してください。", sender),
     ].join("\n");
 
     try {
@@ -648,6 +671,29 @@ export class CommandHandler {
     if (asQuestion.ok) return;
     await this.turnEngine.answerPlanFeedback(pairing.paneId, ctx.text);
   }
+}
+
+/**
+ * Marks a message as coming from somebody other than the owner.
+ *
+ * There is no mechanism upstream to lean on — Claude Code has no notion of more
+ * than one human in a session (anthropics/claude-code#60082 is open and
+ * unimplemented), and the practice the community has settled on is exactly this:
+ * say who is speaking, in the text.
+ *
+ * The frame states two facts and stops there: who, and that it is not the owner.
+ * Deliberately no instruction about how to weigh it — an agent that has been told
+ * to treat a name as lesser authority is a poor place to put a safety property,
+ * and the useful thing here is context, not policy.
+ *
+ * Stateless on purpose. Nothing has to be switched on or off, because the
+ * asymmetry carries the meaning: the owner's own messages and anything typed at
+ * the terminal look identical and unmarked, so there is no mode to leave and no
+ * "that was the last one" to announce.
+ */
+export function attributed(text: string, sender?: string): string {
+  if (!sender) return text;
+  return `[Slack: ${sender} さんからの依頼です（オーナー本人ではありません）]\n${text}`;
 }
 
 export function stripMention(text: string): string {

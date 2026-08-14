@@ -50,10 +50,12 @@ export async function buildApp(config: Config) {
     // resolving there would slip past that guard.
     const resolved = await resolveUserMentions(app.client, event.text ?? "", botUserId, mentionCache);
     const text = stripMention(stripComposerAttribution(resolved));
+    const senderId = event.user ?? "";
     await commands.handleMention({
       channel: event.channel,
       threadTs: threadTsOf(event),
-      userId: event.user ?? "",
+      userId: senderId,
+      userName: senderId ? await displayNameFor(app.client, senderId, mentionCache) : undefined,
       text,
       ts: event.ts,
       files: incomingFilesFrom(event as unknown as FileBearingEvent),

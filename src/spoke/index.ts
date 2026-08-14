@@ -73,12 +73,22 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       };
 
       rpc.onCall("app_mention", async (payload) => {
-        const p = payload as { channel: string; threadTs: string; userId: string; text: string; ts: string; files?: IncomingFile[] };
+        const p = payload as {
+          channel: string;
+          threadTs: string;
+          userId: string;
+          userName?: string;
+          text: string;
+          ts: string;
+          files?: IncomingFile[];
+        };
         const text = stripMention(stripComposerAttribution(p.text));
         await commands.handleMention({
           channel: p.channel,
           threadTs: p.threadTs,
           userId: p.userId,
+          // Absent from an older Hub — the message is then simply unattributed.
+          userName: p.userName,
           text,
           ts: p.ts,
           // Absent when the Hub predates attachment support — an older Hub just
