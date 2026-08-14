@@ -105,16 +105,33 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
       });
 
       rpc.onCall("aq_answer", async (payload) => {
-        const p = payload as { channel: string; threadTs: string; value: string };
+        // actor* are absent from an older Hub, which simply leaves answers unmarked.
+        const p = payload as { channel: string; threadTs: string; value: string; actorUserId?: string; actorName?: string };
         const v = JSON.parse(p.value) as { t: string; p: number; o: number };
-        await commands.handleAskUserQuestionButton({ channel: p.channel, threadTs: p.threadTs, terminalId: v.t, promptId: v.p, optionIndex: v.o });
+        await commands.handleAskUserQuestionButton({
+          channel: p.channel,
+          threadTs: p.threadTs,
+          terminalId: v.t,
+          promptId: v.p,
+          optionIndex: v.o,
+          actorUserId: p.actorUserId,
+          actorName: p.actorName,
+        });
         return {};
       });
 
       rpc.onCall("perm_choice", async (payload) => {
-        const p = payload as { channel: string; threadTs: string; value: string };
+        const p = payload as { channel: string; threadTs: string; value: string; actorUserId?: string; actorName?: string };
         const v = JSON.parse(p.value) as { t: string; p: number; n: string };
-        await commands.handlePermissionButton({ channel: p.channel, threadTs: p.threadTs, terminalId: v.t, promptId: v.p, num: v.n });
+        await commands.handlePermissionButton({
+          channel: p.channel,
+          threadTs: p.threadTs,
+          terminalId: v.t,
+          promptId: v.p,
+          num: v.n,
+          actorUserId: p.actorUserId,
+          actorName: p.actorName,
+        });
         return {};
       });
 

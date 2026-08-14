@@ -197,6 +197,27 @@ interface RepliesMessage {
  * Lookups are cached across a call, and a failed lookup leaves the id in place
  * rather than deleting text nobody can recover.
  */
+/**
+ * A person's display name, cached. Shared by mention resolution and by whoever
+ * needs to record who did something.
+ *
+ * Returns undefined rather than the raw id when the lookup fails: an id in place
+ * of a name reads as noise, and callers can leave the field out instead.
+ */
+export async function displayNameFor(
+  client: WebClient,
+  userId: string,
+  cache = new Map<string, string>(),
+): Promise<string | undefined> {
+  const cached = cache.get(userId);
+  if (cached) return cached;
+  const info = await client.users.info({ user: userId }).catch(() => null);
+  const name = info?.user?.profile?.display_name || info?.user?.real_name || info?.user?.name;
+  if (!name) return undefined;
+  cache.set(userId, name);
+  return name;
+}
+
 export async function resolveUserMentions(
   client: WebClient,
   text: string,
@@ -205,10 +226,8 @@ export async function resolveUserMentions(
 ): Promise<string> {
   const ids = [...new Set([...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g)].map((m) => m[1]))];
   for (const id of ids) {
-    if (id === botUserId || cache.has(id)) continue;
-    const info = await client.users.info({ user: id }).catch(() => null);
-    const name = info?.user?.profile?.display_name || info?.user?.real_name || info?.user?.name;
-    if (name) cache.set(id, name);
+    if (id === botUserId) continue;
+    await displayNameFor(client, id, cache);
   }
   return text.replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (whole, id: string) => {
     if (id === botUserId) return whole;

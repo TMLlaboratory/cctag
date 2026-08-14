@@ -608,7 +608,14 @@ export class TurnEngine {
     return handedToPollLoop;
   }
 
-  async answerQuestionButton(paneId: string, promptId: number, optionIndex: number): Promise<AnswerResult> {
+  async answerQuestionButton(
+    paneId: string,
+    promptId: number,
+    optionIndex: number,
+    /** Set only when somebody other than the owner pressed it — see
+     *  CommandHandler.actorLabel for why the owner's own answers stay unmarked. */
+    actor?: string,
+  ): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
     if (
       !state ||
@@ -632,7 +639,7 @@ export class TurnEngine {
       state.answering = false; // nothing was accepted; let the user try again
       throw err;
     }
-    await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label), []).catch(() => {});
+    await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label, actor), []).catch(() => {});
     this.markPromptResolved(state);
     await this.restartStatusLine(state);
     return { ok: true };
@@ -660,7 +667,13 @@ export class TurnEngine {
     return { ok: true };
   }
 
-  async answerPermissionButton(paneId: string, promptId: number, num: string): Promise<AnswerResult> {
+  async answerPermissionButton(
+    paneId: string,
+    promptId: number,
+    num: string,
+    /** See answerQuestionButton's. */
+    actor?: string,
+  ): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId || state.answering) {
       return { ok: false, reason: "not-pending" };
@@ -672,7 +685,8 @@ export class TurnEngine {
       state.answering = false;
       throw err;
     }
-    await state.promptHandle?.update(`→ ${num} を送信しました`, []).catch(() => {});
+    const by = actor ? `（${actor}）` : "";
+    await state.promptHandle?.update(`→ ${num} を送信しました${by}`, []).catch(() => {});
     this.markPromptResolved(state);
     await this.restartStatusLine(state);
     return { ok: true };

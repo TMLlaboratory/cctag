@@ -786,3 +786,70 @@ test("the new status line is the one the poll loop then updates", async () => {
     engine.abortAll();
   }
 });
+
+test("an answer records who pressed it when that was not the owner", async () => {
+  // Nothing in the thread said who had acted on it. Slack guarantees the actor on
+  // a button payload — unlike anything typed into a message — so it is worth
+  // recording; the owner's own answers stay unmarked, which keeps a thread only
+  // they use looking exactly as it did.
+  const { notifier } = fakeNotifier();
+  const updates: string[] = [];
+  const recording: Notifier = {
+    ...notifier,
+    async postMessage(_c, _t, text) {
+      return {
+        async update(t: string) {
+          if (text.includes("許可")) updates.push(t);
+        },
+      };
+    },
+  };
+  const engine = new TurnEngine(
+    fakeHerdr(() => "blocked"),
+    recording,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200);
+    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1", "佐藤"), { ok: true });
+    assert.ok(
+      updates.some((u) => u.includes("佐藤")),
+      `the actor must be recorded, got ${JSON.stringify(updates)}`,
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("the owner's own answer is left unmarked", async () => {
+  const { notifier } = fakeNotifier();
+  const updates: string[] = [];
+  const recording: Notifier = {
+    ...notifier,
+    async postMessage(_c, _t, text) {
+      return {
+        async update(t: string) {
+          if (text.includes("許可")) updates.push(t);
+        },
+      };
+    },
+  };
+  const engine = new TurnEngine(
+    fakeHerdr(() => "blocked"),
+    recording,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [fakePairing()] },
+  );
+
+  try {
+    await adopt(engine, fakePairing());
+    await sleep(200);
+    await engine.answerPermissionButton(PANE, 1, "1"); // no actor — the owner
+    assert.deepEqual(updates, ["→ 1 を送信しました"], "unmarked means the owner, as it always has");
+  } finally {
+    engine.abortAll();
+  }
+});

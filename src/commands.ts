@@ -85,7 +85,14 @@ export interface PairSelectContext {
   terminalId: string;
 }
 
-export interface AskUserQuestionButtonContext {
+/** Who pressed a button. Slack supplies the id, so unlike anything typed into a
+ *  message it cannot be forged. */
+export interface ButtonActor {
+  actorUserId?: string;
+  actorName?: string;
+}
+
+export interface AskUserQuestionButtonContext extends ButtonActor {
   channel: string;
   threadTs: string;
   // Despite the name, this is the paneId round-tripped through the Slack
@@ -96,7 +103,7 @@ export interface AskUserQuestionButtonContext {
   optionIndex: number;
 }
 
-export interface PermissionButtonContext {
+export interface PermissionButtonContext extends ButtonActor {
   channel: string;
   threadTs: string;
   // See AskUserQuestionButtonContext.terminalId — same paneId-via-`t` round trip.
@@ -585,15 +592,39 @@ export class CommandHandler {
     await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。ペアリングを解除しました。");
   }
 
+  /**
+   * Names the actor only when it is not the owner.
+   *
+   * An unmarked answer therefore means the owner's own — the same thing it has
+   * always meant, and the same convention a message typed at the terminal
+   * follows. A name appearing at all is the signal worth noticing: somebody else
+   * acted on this thread. Marking every answer instead would put the owner's own
+   * name on every line of a thread only they use.
+   */
+  private actorLabel(ctx: ButtonActor): string | undefined {
+    if (!ctx.actorUserId || this.isOwner(ctx.actorUserId)) return undefined;
+    return ctx.actorName ?? ctx.actorUserId;
+  }
+
   async handleAskUserQuestionButton(ctx: AskUserQuestionButtonContext): Promise<void> {
-    const result = await this.turnEngine.answerQuestionButton(ctx.terminalId, ctx.promptId, ctx.optionIndex);
+    const result = await this.turnEngine.answerQuestionButton(
+      ctx.terminalId,
+      ctx.promptId,
+      ctx.optionIndex,
+      this.actorLabel(ctx),
+    );
     if (!result.ok) {
       await this.notifier.postReply(ctx.channel, ctx.threadTs, "⚠️ この質問は既に回答済みです。");
     }
   }
 
   async handlePermissionButton(ctx: PermissionButtonContext): Promise<void> {
-    const result = await this.turnEngine.answerPermissionButton(ctx.terminalId, ctx.promptId, ctx.num);
+    const result = await this.turnEngine.answerPermissionButton(
+      ctx.terminalId,
+      ctx.promptId,
+      ctx.num,
+      this.actorLabel(ctx),
+    );
     if (!result.ok) {
       await this.notifier.postReply(ctx.channel, ctx.threadTs, "⚠️ このリクエストは既に処理済みです。");
     }

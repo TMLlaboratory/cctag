@@ -6,7 +6,7 @@ import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
 import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "./files.js";
-import { resolveUserMentions, SlackNotifier } from "./notifier.js";
+import { displayNameFor, resolveUserMentions, SlackNotifier } from "./notifier.js";
 
 const { App } = Bolt;
 
@@ -81,6 +81,7 @@ export async function buildApp(config: Config) {
     const actionBody = body as unknown as {
       channel?: { id: string };
       message?: { ts: string; thread_ts?: string };
+      user?: { id?: string };
       actions: Array<{ value?: string }>;
     };
     const channel = actionBody.channel?.id;
@@ -88,7 +89,16 @@ export async function buildApp(config: Config) {
     const raw = actionBody.actions[0]?.value;
     if (!channel || !threadTs || !raw) return;
     const value = JSON.parse(raw) as { t: string; p: number; o: number };
-    await commands.handleAskUserQuestionButton({ channel, threadTs, terminalId: value.t, promptId: value.p, optionIndex: value.o });
+    const actorUserId = actionBody.user?.id;
+    await commands.handleAskUserQuestionButton({
+      channel,
+      threadTs,
+      terminalId: value.t,
+      promptId: value.p,
+      optionIndex: value.o,
+      actorUserId,
+      actorName: actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined,
+    });
   });
 
   app.action(/^perm_choice_/, async ({ ack, body }) => {
@@ -96,6 +106,7 @@ export async function buildApp(config: Config) {
     const actionBody = body as unknown as {
       channel?: { id: string };
       message?: { ts: string; thread_ts?: string };
+      user?: { id?: string };
       actions: Array<{ value?: string }>;
     };
     const channel = actionBody.channel?.id;
@@ -103,7 +114,16 @@ export async function buildApp(config: Config) {
     const raw = actionBody.actions[0]?.value;
     if (!channel || !threadTs || !raw) return;
     const value = JSON.parse(raw) as { t: string; p: number; n: string };
-    await commands.handlePermissionButton({ channel, threadTs, terminalId: value.t, promptId: value.p, num: value.n });
+    const actorUserId = actionBody.user?.id;
+    await commands.handlePermissionButton({
+      channel,
+      threadTs,
+      terminalId: value.t,
+      promptId: value.p,
+      num: value.n,
+      actorUserId,
+      actorName: actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined,
+    });
   });
 
   // Free-text answers to a pending AskUserQuestion: any plain thread reply

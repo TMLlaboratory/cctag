@@ -172,8 +172,8 @@ function buttonLabel(num: number, label: string): string {
   return `${num}. ${head}`.slice(0, 75);
 }
 
-export function askUserQuestionAnsweredText(header: string, answer: string): string {
-  return `✅ *${header}* → ${answer}`;
+export function askUserQuestionAnsweredText(header: string, answer: string, actor?: string): string {
+  return `✅ *${header}* → ${answer}${actor ? `（${actor}）` : ""}`;
 }
 
 interface PermButtonValue {

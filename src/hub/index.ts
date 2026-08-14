@@ -10,6 +10,7 @@ import { WsRpc } from "../ws/rpc.js";
 import {
   downloadSlackFile,
   formatThreadHistorySinceLastBotPost,
+  displayNameFor,
   resolveUserMentions,
   uploadBinaryFile,
 } from "../slack/notifier.js";
@@ -363,6 +364,7 @@ async function runServer(): Promise<void> {
       const actionBody = body as {
         channel?: { id: string };
         message?: { ts: string; thread_ts?: string };
+        user?: { id?: string };
         actions: Array<{ value?: string }>;
       };
       const channel = actionBody.channel?.id;
@@ -376,7 +378,14 @@ async function runServer(): Promise<void> {
         await notConnectedReply(channel, threadTs);
         return;
       }
-      await spoke.call(kind, { channel, threadTs, value: raw }).catch((err) => console.error(`[hub] ${kind} dispatch failed:`, err));
+      // Who pressed it. Slack guarantees this field, so unlike anything typed into
+      // a message it cannot be forged — which is what makes it worth recording.
+      // Resolved here because the Spoke has no token to turn an id into a name.
+      const actorUserId = actionBody.user?.id;
+      const actorName = actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined;
+      await spoke
+        .call(kind, { channel, threadTs, value: raw, actorUserId, actorName })
+        .catch((err) => console.error(`[hub] ${kind} dispatch failed:`, err));
     };
   app.action(/^aq_answer_/, actionRoute("aq_answer"));
   app.action(/^perm_choice_/, actionRoute("perm_choice"));
