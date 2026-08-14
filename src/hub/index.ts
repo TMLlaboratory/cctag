@@ -7,7 +7,12 @@ import type { IncomingFile } from "../attachments.js";
 import { loadHubConfig } from "../config.js";
 import { TokenStore } from "./tokenStore.js";
 import { WsRpc } from "../ws/rpc.js";
-import { downloadSlackFile, formatThreadHistorySinceLastBotPost, uploadBinaryFile } from "../slack/notifier.js";
+import {
+  downloadSlackFile,
+  formatThreadHistorySinceLastBotPost,
+  resolveUserMentions,
+  uploadBinaryFile,
+} from "../slack/notifier.js";
 import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "../slack/files.js";
 
 const { App } = Bolt;
@@ -76,6 +81,8 @@ async function runServer(): Promise<void> {
 
   const authTest = await app.client.auth.test().catch(() => null);
   const botUserId = (authTest?.user_id as string | undefined) ?? undefined;
+  /** Long-lived: the same handful of people mention each other repeatedly. */
+  const mentionCache = new Map<string, string>();
 
   function spokeFor(ownerUserId: string): WsRpc | undefined {
     return spokesByOwner.get(ownerUserId);
@@ -297,8 +304,11 @@ async function runServer(): Promise<void> {
     }
     const files = incomingFilesFrom(event as unknown as FileBearingEvent);
     rememberFileOwner(files, ownerUserId);
+    // Resolved here because only this side holds the token that can turn a user id
+    // into a name; the Spoke would otherwise have to drop them.
+    const text = await resolveUserMentions(app.client, event.text ?? "", botUserId, mentionCache);
     await spoke
-      .call("app_mention", { channel, threadTs, userId, text: event.text ?? "", ts: event.ts, files })
+      .call("app_mention", { channel, threadTs, userId, text, ts: event.ts, files })
       .catch((err) => console.error("[hub] app_mention dispatch failed:", err));
   });
 

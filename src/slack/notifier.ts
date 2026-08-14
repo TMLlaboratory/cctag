@@ -183,6 +183,40 @@ interface RepliesMessage {
  * (hub/index.ts) — both hold a real @slack/bolt WebClient, just wired
  * through different entry points.
  */
+/**
+ * Replaces `<@U…>` mention markup with the person's display name.
+ *
+ * Needed because only the side holding the bot token can resolve a user id, and
+ * everything downstream had to cope without it: live messages had every mention
+ * deleted outright, so "「@佐藤 の指摘と @松浦 の案」" reached the agent as
+ * "「 の指摘と  の案」" and the question no longer said anything; thread history
+ * kept the raw ids, which are no more use to a reader than to a model.
+ *
+ * The bot's own mention is left alone — it is the command trigger, and the Spoke
+ * strips it (commands.ts's stripMention) once nothing else looks like markup.
+ * Lookups are cached across a call, and a failed lookup leaves the id in place
+ * rather than deleting text nobody can recover.
+ */
+export async function resolveUserMentions(
+  client: WebClient,
+  text: string,
+  botUserId?: string,
+  cache = new Map<string, string>(),
+): Promise<string> {
+  const ids = [...new Set([...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g)].map((m) => m[1]))];
+  for (const id of ids) {
+    if (id === botUserId || cache.has(id)) continue;
+    const info = await client.users.info({ user: id }).catch(() => null);
+    const name = info?.user?.profile?.display_name || info?.user?.real_name || info?.user?.name;
+    if (name) cache.set(id, name);
+  }
+  return text.replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (whole, id: string) => {
+    if (id === botUserId) return whole;
+    const name = cache.get(id);
+    return name ? `@${name}` : whole;
+  });
+}
+
 export async function formatThreadHistorySinceLastBotPost(
   client: WebClient,
   channel: string,
@@ -214,10 +248,14 @@ export async function formatThreadHistorySinceLastBotPost(
   }
 
   const nameCache = new Map<string, string>();
+  // Separate from nameCache on purpose: that one falls back to the raw id when a
+  // lookup fails, which is fine as a label but would turn a mention into "@U05RU…"
+  // — worse than leaving the markup alone.
+  const mentionCache = new Map<string, string>();
   const lines: string[] = [];
   for (const m of messages.slice(lastBotIdx + 1)) {
     if (m.ts === excludeTs || !m.text) continue;
-    const text = stripComposerAttribution(m.text).trim();
+    const text = await resolveUserMentions(client, stripComposerAttribution(m.text).trim(), botUserId, mentionCache);
     if (!text) continue;
     let label: string;
     if (m.bot_id) {

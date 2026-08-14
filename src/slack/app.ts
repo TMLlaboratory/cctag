@@ -6,7 +6,7 @@ import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
 import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "./files.js";
-import { SlackNotifier } from "./notifier.js";
+import { resolveUserMentions, SlackNotifier } from "./notifier.js";
 
 const { App } = Bolt;
 
@@ -14,7 +14,7 @@ function threadTsOf(event: { thread_ts?: string; ts: string }): string {
   return event.thread_ts ?? event.ts;
 }
 
-export function buildApp(config: Config) {
+export async function buildApp(config: Config) {
   const herdr = new HerdrClient(config.herdrBin);
   const pairingStore = new PairingStore();
 
@@ -23,6 +23,11 @@ export function buildApp(config: Config) {
     appToken: config.slackAppToken,
     socketMode: true,
   });
+
+  // Needed to leave cctag's own mention in place while resolving everyone else's:
+  // that one is the command trigger and stripMention takes it off afterwards.
+  const authTest = await app.client.auth.test().catch(() => null);
+  const botUserId = (authTest?.user_id as string | undefined) ?? undefined;
 
   const limits = { maxFileBytes: config.maxFileBytes, maxFileCount: config.maxFileCount };
   const notifier = new SlackNotifier(app.client, config.slackBotToken, limits);
@@ -35,9 +40,16 @@ export function buildApp(config: Config) {
   const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
   new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier).start();
 
+  const mentionCache = new Map<string, string>();
   app.event("app_mention", async ({ event }) => {
     if ("bot_id" in event && event.bot_id) return;
-    const text = stripMention(stripComposerAttribution(event.text ?? ""));
+    // Other people's mentions become names before the bot's own is stripped, or
+    // "「@佐藤 の指摘」" would reach the agent as "「 の指摘」". Deliberately only on
+    // this path: the plain-message path ignores anything with a mention in it,
+    // which is what keeps human-to-human chatter out of a pending prompt, and
+    // resolving there would slip past that guard.
+    const resolved = await resolveUserMentions(app.client, event.text ?? "", botUserId, mentionCache);
+    const text = stripMention(stripComposerAttribution(resolved));
     await commands.handleMention({
       channel: event.channel,
       threadTs: threadTsOf(event),

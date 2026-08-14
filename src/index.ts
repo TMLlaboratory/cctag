@@ -3,7 +3,7 @@ import { buildApp } from "./slack/app.js";
 
 async function main() {
   const config = loadConfig();
-  const app = buildApp(config);
+  const app = await buildApp(config);
 
   await app.start();
   console.log("⚡️ cctag is running (Socket Mode)");
