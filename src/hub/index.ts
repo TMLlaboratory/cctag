@@ -308,6 +308,9 @@ async function runServer(): Promise<void> {
     // Resolved here because only this side holds the token that can turn a user id
     // into a name; the Spoke would otherwise have to drop them.
     const text = await resolveUserMentions(app.client, event.text ?? "", botUserId, mentionCache);
+    // Sent whether or not the Spoke has any use for it yet: only this side holds a
+    // token that can turn a user id into a name, so a Spoke that wants to say who
+    // asked has no way to find out on its own.
     const userName = userId ? await displayNameFor(app.client, userId, mentionCache) : undefined;
     await spoke
       .call("app_mention", { channel, threadTs, userId, userName, text, ts: event.ts, files })
