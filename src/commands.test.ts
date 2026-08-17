@@ -84,8 +84,27 @@ test("a Hub too old to send the actor simply leaves answers unmarked", async () 
 test("a message from somebody else says who it is from", async () => {
   const { attributed } = await import("./commands.js");
   const out = attributed("この方針で進めて", "佐藤");
-  assert.match(out, /^\[Slack: 佐藤 さんからの依頼です（オーナー本人ではありません）\]\n/);
+  assert.match(out, /^\[Slack: 佐藤（共同作業者）\]\n/);
   assert.ok(out.endsWith("この方針で進めて"), "the message itself is untouched");
+});
+
+test("the frame does not negate the owner's authority", async () => {
+  // The first wording said "（オーナー本人ではありません）", and in use that made the
+  // agent hold off answering until the situation was explained to it. Negating the
+  // authorized party is not the neutral fact it looks like — and it is the wrong
+  // place for authority anyway, which lives in the pane being on the owner's
+  // machine and in the permission prompt.
+  const { attributed } = await import("./commands.js");
+  const out = attributed("進めて", "佐藤");
+  for (const phrase of ["ではありません", "オーナー", "権限", "許可されて"]) {
+    assert.ok(!out.includes(phrase), `must not frame the sender as lacking standing (found ${phrase})`);
+  }
+});
+
+test("the frame stays short, since its length is itself a signal", async () => {
+  const { attributed } = await import("./commands.js");
+  const frame = attributed("x", "佐藤").split("\n")[0];
+  assert.ok(frame.length <= 24, `got ${frame.length} chars: ${frame}`);
 });
 
 test("the owner's message is passed through exactly as before", async () => {

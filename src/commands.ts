@@ -674,17 +674,25 @@ export class CommandHandler {
 }
 
 /**
- * Marks a message as coming from somebody other than the owner.
+ * Says who a message is from, when it is not the owner.
  *
  * There is no mechanism upstream to lean on — Claude Code has no notion of more
  * than one human in a session (anthropics/claude-code#60082 is open and
  * unimplemented), and the practice the community has settled on is exactly this:
  * say who is speaking, in the text.
  *
- * The frame states two facts and stops there: who, and that it is not the owner.
- * Deliberately no instruction about how to weigh it — an agent that has been told
- * to treat a name as lesser authority is a poor place to put a safety property,
- * and the useful thing here is context, not policy.
+ * The wording matters more than it looks. This first read "（オーナー本人ではあり
+ * ません）", and an earlier version of this comment claimed the frame carried no
+ * policy — which was wrong. Negating the authorized party is not a neutral fact;
+ * it reads as one, and in use it made the agent hold off answering until the
+ * situation was explained to it. Naming the relationship positively says the same
+ * thing about who is speaking without asking for that hesitation.
+ *
+ * It is also the wrong place for authority in the first place. The pane runs on
+ * the owner's machine and destructive work stops at a permission prompt — that is
+ * where the boundary actually is. A frame that downgrades authority buys no
+ * safety and costs a turn of hesitation, so this one carries context and nothing
+ * else, and stays short: a long parenthetical is itself something to attend to.
  *
  * Stateless on purpose. Nothing has to be switched on or off, because the
  * asymmetry carries the meaning: the owner's own messages and anything typed at
@@ -693,7 +701,7 @@ export class CommandHandler {
  */
 export function attributed(text: string, sender?: string): string {
   if (!sender) return text;
-  return `[Slack: ${sender} さんからの依頼です（オーナー本人ではありません）]\n${text}`;
+  return `[Slack: ${sender}（共同作業者）]\n${text}`;
 }
 
 export function stripMention(text: string): string {
