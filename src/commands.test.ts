@@ -84,7 +84,7 @@ test("a Hub too old to send the actor simply leaves answers unmarked", async () 
 test("a message from somebody else says who it is from", async () => {
   const { attributed } = await import("./commands.js");
   const out = attributed("この方針で進めて", "佐藤");
-  assert.match(out, /^\[Slack: 佐藤（共同作業者）\]\n/);
+  assert.match(out, /^\[Slack: 佐藤\]\n/);
   assert.ok(out.endsWith("この方針で進めて"), "the message itself is untouched");
 });
 
@@ -104,7 +104,19 @@ test("the frame does not negate the owner's authority", async () => {
 test("the frame stays short, since its length is itself a signal", async () => {
   const { attributed } = await import("./commands.js");
   const frame = attributed("x", "佐藤").split("\n")[0];
-  assert.ok(frame.length <= 24, `got ${frame.length} chars: ${frame}`);
+  assert.ok(frame.length <= 16, `got ${frame.length} chars: ${frame}`);
+});
+
+test("the frame claims nothing about the sender beyond their name", async () => {
+  // "（共同作業者）" was tried and was sometimes false: any member of the channel can
+  // mention cctag in a paired thread, so the relationship is not something cctag
+  // can know. The name is the only part that is always true.
+  const { attributed } = await import("./commands.js");
+  const frame = attributed("進めて", "佐藤").split("\n")[0];
+  for (const claim of ["共同作業者", "学生", "教員", "ゲスト", "外部"]) {
+    assert.ok(!frame.includes(claim), `must not assert a relationship (found ${claim})`);
+  }
+  assert.ok(frame.includes("佐藤"), "the name itself must survive");
 });
 
 test("the owner's message is passed through exactly as before", async () => {

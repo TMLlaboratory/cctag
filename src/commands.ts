@@ -681,18 +681,22 @@ export class CommandHandler {
  * unimplemented), and the practice the community has settled on is exactly this:
  * say who is speaking, in the text.
  *
- * The wording matters more than it looks. This first read "（オーナー本人ではあり
- * ません）", and an earlier version of this comment claimed the frame carried no
- * policy — which was wrong. Negating the authorized party is not a neutral fact;
- * it reads as one, and in use it made the agent hold off answering until the
- * situation was explained to it. Naming the relationship positively says the same
- * thing about who is speaking without asking for that hesitation.
+ * The wording took three attempts, and each failure is worth keeping.
  *
- * It is also the wrong place for authority in the first place. The pane runs on
- * the owner's machine and destructive work stops at a permission prompt — that is
- * where the boundary actually is. A frame that downgrades authority buys no
- * safety and costs a turn of hesitation, so this one carries context and nothing
- * else, and stays short: a long parenthetical is itself something to attend to.
+ * It first read "（オーナー本人ではありません）", and an earlier version of this comment
+ * claimed the frame carried no policy — which was wrong. Negating the authorized
+ * party is not a neutral fact; it reads as one, and in use it made the agent hold
+ * off answering until the situation was explained to it.
+ *
+ * Then "（共同作業者）", which asked for no hesitation but claimed something cctag
+ * cannot know: any member of the channel can mention it in a paired thread, so the
+ * relationship is not guaranteed and the frame was sometimes simply false.
+ *
+ * What survives is the name alone. It is the only thing here that is always true,
+ * and describing the relationship was never the job: authority lives in the pane
+ * running on the owner's machine and in the permission prompt, not in a label.
+ * Being the shortest version is a bonus — a long parenthetical is itself something
+ * to attend to.
  *
  * Stateless on purpose. Nothing has to be switched on or off, because the
  * asymmetry carries the meaning: the owner's own messages and anything typed at
@@ -701,7 +705,7 @@ export class CommandHandler {
  */
 export function attributed(text: string, sender?: string): string {
   if (!sender) return text;
-  return `[Slack: ${sender}（共同作業者）]\n${text}`;
+  return `[Slack: ${sender}]\n${text}`;
 }
 
 export function stripMention(text: string): string {
