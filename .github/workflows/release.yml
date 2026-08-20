@@ -1,0 +1,73 @@
+name: Release
+
+# Builds cctag / cctag-hub / cctag-spoke for 4 platforms and publishes them
+# to a GitHub Release. A single ubuntu-latest job, not a per-OS matrix: bun's
+# `--target` flag cross-compiles, so one runner covers darwin and linux, arm64
+# and x64, without needing macOS runners at all.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The official bun distribution, not a Nix-provided one — same reason
+      # scripts/build-native.sh avoids Nix's bun (a nix-linked binary loses
+      # its ICU dependency the moment a Nix GC runs; the official build links
+      # against the system's own ICU instead).
+      - name: Set up official Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # 4 platform targets × 3 entry points = 12 builds, all from this one
+      # runner via bun's cross-compiling --target flag.
+      - name: Build all platform/entry binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          declare -A entries=(
+            [cctag]=src/index.ts
+            [cctag-hub]=src/hub/index.ts
+            [cctag-spoke]=src/spoke/index.ts
+          )
+          targets=(bun-darwin-arm64 bun-darwin-x64 bun-linux-arm64 bun-linux-x64)
+
+          for target in "${targets[@]}"; do
+            platform="${target#bun-}"
+            for name in "${!entries[@]}"; do
+              entry="${entries[$name]}"
+              outfile="dist/${name}-${platform}"
+              echo "==> Building ${outfile} from ${entry} (--target=${target})"
+              bun build --compile --target="${target}" "${entry}" --outfile "${outfile}"
+            done
+          done
+
+          echo "==> Built binaries:"
+          ls -la dist
+
+      - name: Compute SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # Bare binaries, not tar/zip archives: the Homebrew formula for this
+      # project (a later, separate step) uses `using: :nounzip` against
+      # these files directly, matching how omp does it.
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME"
