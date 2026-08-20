@@ -1,17 +1,168 @@
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import type { AttachmentLimits } from "./attachments.js";
 
-// Lets one machine run multiple instances (e.g. one Spoke per Slack
-// workspace) from a single checkout: point CCTAG_ENV_FILE at a different
-// .env per instance (set it in that instance's launchd plist / systemd unit
-// / wrapper script — it must come from the real process environment, not
-// from a .env file, since it decides which .env file to load).
-loadDotenv(process.env.CCTAG_ENV_FILE ? { path: process.env.CCTAG_ENV_FILE } : undefined);
+function xdgConfigHome(): string {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+}
+
+/**
+ * The single-instance default config location for a binary-distributed
+ * install (`brew install cctag`, run `cctag-spoke` from anywhere) — and the
+ * only path this file will ever auto-scaffold a template into (see
+ * writeConfigTemplateAndExit below). Follows the XDG base-dir convention,
+ * since a single compiled binary has no repository checkout to hold a
+ * `.env.example` next to.
+ */
+const DEFAULT_CONFIG_PATH = join(xdgConfigHome(), "cctag", "config.env");
+
+/**
+ * Picks the first candidate that exists, in order — never merges multiple
+ * sources, so behavior stays predictable. A free function (not inlined
+ * below) so the precedence itself — path 1 beats path 2 beats path 3 — is
+ * testable against fake candidates/exists() without touching the real
+ * filesystem or environment.
+ */
+export function resolveEnvFile(candidates: Array<string | undefined>, exists: (path: string) => boolean): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate && exists(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+// Fixed, cwd-independent search order — read the FIRST match only. This
+// exists so a single-binary install finds its config without either failing
+// outright or silently reading an unrelated `.env` from whatever directory
+// the process happened to be started in.
+//
+// 1. CCTAG_ENV_FILE, if set — unchanged meaning: the explicit override that
+//    lets one machine run multiple instances from a single checkout (see
+//    the namespacing this enables at src/hub/index.ts's tokenStorePath and
+//    src/spoke/index.ts's pairingStorePathFor).
+// 2. ~/.config/cctag/config.env (XDG_CONFIG_HOME-aware) — the new
+//    single-instance default for a binary-distributed install.
+// 3. ./.env (relative to cwd) — today's default, unchanged: this is what
+//    keeps `cp .env.example .env && npm run dev` working from a checkout.
+//
+// Finding zero of these is explicitly NOT an error by itself — the
+// production Hub runs under systemd with `EnvironmentFile=`, which injects
+// variables straight into the real process environment and correctly has no
+// env file on disk at all. See required() below for what happens next.
+const cctagEnvFile = process.env.CCTAG_ENV_FILE;
+const xdgConfigPath = DEFAULT_CONFIG_PATH;
+const cwdEnvPath = join(process.cwd(), ".env");
+
+const loadedEnvPath = resolveEnvFile([cctagEnvFile, xdgConfigPath, cwdEnvPath], existsSync);
+if (loadedEnvPath) {
+  loadDotenv({ path: loadedEnvPath });
+  console.log(`[config] read env file: ${loadedEnvPath}`);
+} else {
+  // Not an error — see the search-order comment above. required() below is
+  // what actually decides whether this matters.
+  console.log("[config] no env file found in any search path");
+}
+
+/**
+ * Names all 3 search locations and states which one (if any) was actually
+ * read, path-only, for a missing-variable error message.
+ */
+function describeSearchPaths(): string {
+  const entries: Array<[string, string | undefined]> = [
+    ["$CCTAG_ENV_FILE", cctagEnvFile],
+    ["~/.config/cctag/config.env", xdgConfigPath],
+    ["./.env", cwdEnvPath],
+  ];
+  const described = entries
+    .map(([label, path]) => {
+      if (!path) return `${label} (not set)`;
+      return path === loadedEnvPath ? `${label} (${path}) [read]` : `${label} (${path}, not read)`;
+    })
+    .join(", ");
+  return loadedEnvPath ? described : `${described} — none read`;
+}
+
+/**
+ * Every key required() is ever asked for, across every mode (standalone,
+ * Spoke, Hub) — the single source of truth for the auto-scaffolded
+ * template's contents, and for the test asserting the template doesn't
+ * drift from what's actually required. Not every key here is required by
+ * every mode (e.g. a Spoke never checks SLACK_BOT_TOKEN); the template is
+ * one file covering all three, same as .env.example.
+ */
+export const REQUIRED_ENV_KEYS = [
+  "SLACK_BOT_TOKEN",
+  "SLACK_APP_TOKEN",
+  "CCTAG_OWNER_USER_ID",
+  "CCTAG_HUB_URL",
+  "CCTAG_SPOKE_TOKEN",
+] as const;
+
+/**
+ * Embedded as a string constant, not read from .env.example at runtime: a
+ * `bun --compile` single binary (scripts/build-native.sh) has no repository
+ * checkout, so .env.example won't exist on the machine running it. Every
+ * key in REQUIRED_ENV_KEYS must appear here — enforced by a test in
+ * config.test.ts — since a template missing one would still crash with
+ * "Missing required environment variable" right after telling the user
+ * they were done.
+ */
+export const CONFIG_TEMPLATE = `# cctag config — fill in the values below and re-run.
+# These come from whoever operates the Hub/Slack app, not from this machine.
+
+# --- Standalone / Hub mode ---
+# Slack app credentials (Socket Mode) — see manifest.yaml for the app manifest.
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+
+# Slack user ID of the cctag owner (only this user may run connect/disconnect).
+CCTAG_OWNER_USER_ID=
+
+# --- Spoke mode ---
+# Ask your Hub operator for these. CCTAG_OWNER_USER_ID above is shared with
+# standalone/Hub mode.
+CCTAG_HUB_URL=
+CCTAG_SPOKE_TOKEN=
+`;
+
+/**
+ * Fires in exactly one case: a required variable is missing AND no config
+ * file was found anywhere (loadedEnvPath is undefined — see required()'s
+ * caller). Never touches an existing file (that path never reaches here:
+ * an existing-but-incomplete file means loadedEnvPath is set, so
+ * required() throws instead), and never fires just because no file was
+ * found (the systemd Hub case: required() returns early when the real
+ * process environment already has the value, so this is never called).
+ */
+function writeConfigTemplateAndExit(missingVarName: string): never {
+  mkdirSync(dirname(DEFAULT_CONFIG_PATH), { recursive: true });
+  writeFileSync(DEFAULT_CONFIG_PATH, CONFIG_TEMPLATE, { mode: 0o600 });
+  try {
+    chmodSync(DEFAULT_CONFIG_PATH, 0o600); // belt-and-suspenders against umask — see tokenStore.ts's save()
+  } catch {
+    /* best-effort — directory may be owned by another user in unusual setups */
+  }
+  console.log(
+    `[config] ${missingVarName} is not set. Searched (in order): ${describeSearchPaths()}. ` +
+      `Wrote a starting template to ${DEFAULT_CONFIG_PATH} (mode 0600).\n` +
+      `Fill in the values there (ask whoever operates your Hub/Slack app for them) and run this again.`,
+  );
+  process.exit(1);
+}
 
 function required(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`Missing required environment variable: ${name}`);
-  return v;
+  if (v) return v;
+  if (!loadedEnvPath) {
+    // No config file exists anywhere AND a required variable is missing —
+    // the one case this file auto-scaffolds. See writeConfigTemplateAndExit's
+    // doc comment for why "no file found" alone is not enough on its own.
+    writeConfigTemplateAndExit(name);
+  }
+  throw new Error(
+    `Missing required environment variable: ${name}. Searched (in order): ${describeSearchPaths()}.`,
+  );
 }
 
 /**

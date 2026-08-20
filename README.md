@@ -232,6 +232,17 @@ npm install
 npm run dev   # or: npm run build && npm start
 ```
 
+Config is discovered in a fixed, cwd-independent order: `CCTAG_ENV_FILE` (if
+set) → `~/.config/cctag/config.env` → `./.env` — the first match found is
+read, and the rest are ignored. A binary-distributed install (no
+checkout, e.g. `brew install cctag`) doesn't have a `.env.example` to copy,
+so put its config at `~/.config/cctag/config.env` instead; if that file and
+a required variable are both missing, the binary writes a starting
+template there itself and tells you to fill it in. Running under systemd
+with `EnvironmentFile=` (see [Running a
+Hub](#running-a-hub-for-more-than-one-person) below) needs no file at all —
+having zero config files present is the normal, correct state there.
+
 `npm run typecheck` and `npm test` cover the parts that are cheap to check
 without a live Slack workspace — attachment limits, the outbound-file rules,
 denied-write correlation, and the download size guard. The parts that need a
@@ -339,6 +350,12 @@ $EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HE
 npm run build
 npm run start:spoke   # or dev:spoke while iterating
 ```
+
+Running from a binary install instead of this checkout? Put the same
+values at `~/.config/cctag/config.env` (see the config-discovery note under
+[Running standalone](#running-standalone) above) rather than `./.env` —
+that path is found from any working directory, so `cctag-spoke` behaves the
+same no matter where you launch it from.
 
 The Spoke reconnects automatically (with backoff) if the connection drops.
 Pairing state lives locally on your machine

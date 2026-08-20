@@ -205,6 +205,15 @@ npm install
 npm run dev   # または: npm run build && npm start
 ```
 
+設定ファイルの探索順はcwdに依存しない固定順序: `CCTAG_ENV_FILE`（設定されていれば）
+→ `~/.config/cctag/config.env` → `./.env` — 最初に見つかったものだけを読み、残りは
+無視する。バイナリ配布インストール（チェックアウトなし、例: `brew install cctag`）には
+コピー元の`.env.example`が存在しないので、代わりに`~/.config/cctag/config.env`に設定を
+置く。そのファイルと必須変数の両方が見つからない場合は、バイナリ自身がその場所に
+雛形ファイルを書き出し、埋めるよう案内する。systemdの`EnvironmentFile=`配下（後述の
+[Hubを動かす](#hubを動かす2人以上で使う場合)を参照）で動かす場合はファイル自体が
+不要 — 設定ファイルが1つもない状態がそこでは正常。
+
 ### Hubを動かす（2人以上で使う場合）
 
 Hubにはスタンドアロンモードと同じ`SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`に加え、公開された`wss://`
@@ -296,6 +305,11 @@ $EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HE
 npm run build
 npm run start:spoke   # 開発中は dev:spoke でも可
 ```
+
+チェックアウトではなくバイナリインストールから動かす場合は、同じ値を`./.env`ではなく
+`~/.config/cctag/config.env`に置くこと（上の[スタンドアロンで動かす](#スタンドアロンで動かす)
+の設定探索の説明を参照）— こちらはどの作業ディレクトリから起動しても見つかるので、
+`cctag-spoke`をどこから起動しても同じ挙動になる。
 
 Spokeは接続が切れても（バックオフしつつ）自動的に再接続する。ペアリング状態は自分のマシンに
 ローカルに保存され（`~/.cctag/pairings-<hub-url>.json`、Hubごとに名前空間が分かれる）、Hub側は
