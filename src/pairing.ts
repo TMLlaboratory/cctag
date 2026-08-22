@@ -57,7 +57,35 @@ export class PairingStore {
       // guards against)
     }
     const list = JSON.parse(raw) as Pairing[]; // a parse failure should throw loudly, not start empty
-    for (const p of list) this.pairings.set(p.key, p);
+    for (const p of list) {
+      const missing = PairingStore.missingFields(p);
+      if (missing.length > 0) {
+        // Entries written before daa33a3 (or otherwise corrupted) may lack
+        // paneId — herdr has no terminalId target anymore, so passing one of
+        // these through hangs `checkPairing` on `herdr agent get undefined`
+        // forever and the thread silently stops getting replies. Drop it
+        // from the in-memory map instead of loading it; we deliberately
+        // don't rewrite the file here (see save() — this method only reads),
+        // so the stale entry stays on disk until the next add()/remove()
+        // triggers a save() and it's dropped for good.
+        const thread = p?.threadTs ? `${p.channel}:${p.threadTs}` : (p?.channel ?? p?.key ?? "<unknown>");
+        console.error(
+          `[pairing] dropping invalid pairing for ${thread} (missing: ${missing.join(", ")}). ` +
+            `Run /connect again in that Slack thread to fix it.`,
+        );
+        continue;
+      }
+      this.pairings.set(p.key, p);
+    }
+  }
+
+  /** Returns the names of required Pairing fields that are missing or blank on `p`. */
+  private static missingFields(p: Pairing): string[] {
+    const missing: string[] = [];
+    if (typeof p?.key !== "string" || p.key === "") missing.push("key");
+    if (typeof p?.channel !== "string" || p.channel === "") missing.push("channel");
+    if (typeof p?.paneId !== "string" || p.paneId === "") missing.push("paneId");
+    return missing;
   }
 
   private save(): void {
