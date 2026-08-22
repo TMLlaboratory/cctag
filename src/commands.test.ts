@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { CommandHandler } from "./commands.js";
 import type { HerdrClient } from "./herdr/client.js";
 import type { Notifier } from "./notifier.js";
-import type { PairingStore } from "./pairing.js";
+import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 
 const OWNER = "U_OWNER";
@@ -122,6 +122,91 @@ test("the frame claims nothing about the sender beyond their name", async () => 
 test("the owner's message is passed through exactly as before", async () => {
   const { attributed } = await import("./commands.js");
   assert.equal(attributed("この方針で進めて", undefined), "この方針で進めて");
+});
+
+// --- `log`: empty scanned history vs. an inline instruction -------------------
+
+const PAIRING: Pairing = {
+  key: "C1:1.1",
+  channel: "C1",
+  threadTs: "1.1",
+  paneId: "wA:p1",
+  terminalId: "t1",
+  cwd: "/repo",
+  pairedBy: OWNER,
+  pairedAt: "2026-01-01T00:00:00.000Z",
+};
+
+/** Wires a CommandHandler for `log`-path tests: a fixed pairing, an
+ *  always-idle engine that records startTurn's text, and a notifier whose
+ *  history stub and postReply calls are both observable. */
+function logHandler(historyLines: string[]) {
+  const startTurnCalls: string[] = [];
+  const replies: string[] = [];
+  const engine = {
+    isBusy: () => false,
+    async startTurn(_pairing: Pairing, _userId: string, text: string) {
+      startTurnCalls.push(text);
+    },
+  } as unknown as TurnEngine;
+  const pairingStore = { get: () => PAIRING } as unknown as PairingStore;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+    async postMessage() {
+      return { async update() {} };
+    },
+    async getThreadHistorySinceLastBotPost() {
+      return historyLines;
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler({} as HerdrClient, pairingStore, engine, notifier, OWNER);
+  return { handler, startTurnCalls, replies };
+}
+
+test("log with an inline instruction runs the turn even when scanned history is empty", async () => {
+  // Reproduces the bug: an empty `@cctag` mention posts the help text, which the
+  // history scanner then treats as cctag's own last message, so `log <instruction>`
+  // right after it sees zero lines of history despite carrying its own instruction.
+  const { handler, startTurnCalls, replies } = logHandler([]);
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "log 上記を直してpushして",
+    ts: "1.2",
+  });
+  assert.deepEqual(replies, [], "must not short-circuit with the no-new-messages reply");
+  assert.deepEqual(startTurnCalls, ["上記を直してpushして"]);
+});
+
+test("log with no instruction and empty scanned history still reports nothing new", async () => {
+  const { handler, startTurnCalls, replies } = logHandler([]);
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "log",
+    ts: "1.2",
+  });
+  assert.deepEqual(startTurnCalls, [], "no instruction and no history means nothing to act on");
+  assert.deepEqual(replies, ["cctagの最終発言以降、新しいメッセージはありませんでした。"]);
+});
+
+test("log with non-empty scanned history keeps combining history and instruction as before", async () => {
+  const { handler, startTurnCalls, replies } = logHandler(["佐藤: レビューコメントです"]);
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "log",
+    ts: "1.2",
+  });
+  assert.deepEqual(replies, []);
+  assert.equal(startTurnCalls.length, 1);
+  assert.match(startTurnCalls[0], /佐藤: レビューコメントです/);
+  assert.match(startTurnCalls[0], /上記を踏まえて対応してください。/);
 });
 
 test("the frame states who, and nothing about how to treat them", async () => {
