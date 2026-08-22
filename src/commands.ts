@@ -501,17 +501,25 @@ export class CommandHandler {
       await this.notifier.postReply(channel, threadTs, `❌ 履歴取得エラー: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    if (lines.length === 0) {
+    // Empty history alone isn't reason to bail: a preceding auto-reply (e.g. the
+    // empty-mention help text) counts as "cctag's last message" to the scanner
+    // above just as much as a real turn result does, so `log <instruction>`
+    // right after one sees no history at all even though it has its own
+    // instruction to act on. Only bail when there's neither.
+    if (lines.length === 0 && !instruction) {
       await this.notifier.postReply(channel, threadTs, "cctagの最終発言以降、新しいメッセージはありませんでした。");
       return;
     }
 
-    const combined = [
-      "[Slackスレッドの履歴（cctagの最終発言以降）]",
-      lines.join("\n"),
-      "---",
-      attributed(instruction || "上記を踏まえて対応してください。", sender),
-    ].join("\n");
+    const combined =
+      lines.length > 0
+        ? [
+            "[Slackスレッドの履歴（cctagの最終発言以降）]",
+            lines.join("\n"),
+            "---",
+            attributed(instruction || "上記を踏まえて対応してください。", sender),
+          ].join("\n")
+        : attributed(instruction!, sender);
 
     try {
       await this.turnEngine.startTurn(pairing, userId, combined);
