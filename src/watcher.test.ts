@@ -264,6 +264,21 @@ function writeTranscript(dir: string, name: string, texts: string[]): void {
   writeFileSync(join(dir, name), lines.join("\n") + "\n");
 }
 
+/** A transcript holding one complete turn: a real user message, the assistant's
+ *  reply, and the `turn_duration` record the CLI closes a turn with. */
+function writeCompletedTurn(dir: string, name: string, text: string): void {
+  mkdirSync(dir, { recursive: true });
+  const lines = [
+    { type: "user", message: { role: "user", content: "やって" } },
+    {
+      type: "assistant",
+      message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+    },
+    { type: "system", subtype: "turn_duration", durationMs: 1234 },
+  ].map((r) => JSON.stringify(r));
+  writeFileSync(join(dir, name), lines.join("\n") + "\n");
+}
+
 /** A pane reporting no session id, whose status the test can flip. */
 function rotatingHerdr(cwd: string, status: () => AgentInfo["agentStatus"]): HerdrClient {
   return {
@@ -366,6 +381,44 @@ test("a transcript that appears after watching began is read whole, not skipped"
       replies.some((r) => r.includes("ターミナル側の最初の応答")),
       `the first turn should have been reported, got ${JSON.stringify(replies)}`,
     );
+  });
+});
+
+test("a pane herdr reports as working forever still gets its terminal-side response posted", async () => {
+  // The production failure: a lingering background shell makes herdr report
+  // `working` permanently (background_shell_working outranks every idle rule),
+  // so `nowSettled` never became true and text this loop had already collected
+  // was never posted. The transcript's own turn boundary is what settles it —
+  // note that setStatus is never called here, unlike every test above.
+  await withRotationFixture(async ({ tDir, replies, start }) => {
+    start();
+    await sleep(80);
+
+    writeCompletedTurn(tDir, "session-a.jsonl", "ターミナル側で書いた結果");
+    await sleep(220); // notice the transcript, then tail and settle it
+
+    const hits = replies.filter((r) => r.includes("ターミナル側で書いた結果"));
+    assert.equal(hits.length, 1, `posted exactly once while stuck at working, got ${JSON.stringify(replies)}`);
+
+    // And not again on later ticks: the corrected status is what gets stored,
+    // so `wasActive` goes false instead of latching on herdr's stale `working`.
+    await sleep(160);
+    assert.equal(replies.filter((r) => r.includes("ターミナル側で書いた結果")).length, 1, "must not re-report");
+  });
+});
+
+test("a working pane with no turn boundary in its transcript is left running", async () => {
+  // The other direction, and the one that must not regress: assistant text with
+  // no completion record is a turn still in progress. Reporting it would release
+  // the pane mid-turn and drop the rest of the output.
+  await withRotationFixture(async ({ tDir, replies, start }) => {
+    start();
+    await sleep(80);
+
+    writeTranscript(tDir, "session-a.jsonl", ["まだ途中の出力"]);
+    await sleep(260);
+
+    assert.deepEqual(replies, [], "silence from herdr plus no boundary means keep waiting");
   });
 });
 

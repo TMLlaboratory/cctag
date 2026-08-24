@@ -52,9 +52,25 @@ export interface ToolOutcome {
   ok: boolean;
 }
 
+/**
+ * A turn boundary in the agent's own transcript — what SettleTracker decides
+ * completion from, instead of trusting herdr's `agent_status` (see settle.ts).
+ *
+ * `turnId` is carried where the format supplies one (Codex does; Claude Code
+ * doesn't) so a completion can be matched to its start rather than inferred
+ * from order alone.
+ */
+export type TurnLifecycleEvent =
+  | { kind: "started"; turnId?: string }
+  | { kind: "completed"; turnId?: string }
+  | { kind: "aborted"; turnId?: string };
+
 export interface TurnOutput {
   texts: string[];
   toolNames: string[];
+  /** Turn boundaries seen in this batch, in order. Absent = this driver
+   *  reports none, which leaves completion to herdr's status as before. */
+  lifecycle?: TurnLifecycleEvent[];
   /**
    * `SendUserFile` calls the agent made — the explicit "send this to the user"
    * signal, and the route we prefer over inferring intent from writes.

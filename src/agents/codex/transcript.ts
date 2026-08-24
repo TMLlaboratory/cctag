@@ -2,6 +2,8 @@ import { closeSync, openSync, readdirSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { TurnLifecycleEvent } from "../driver.js";
+
 const SESSIONS_ROOT = join(homedir(), ".codex", "sessions");
 
 interface CodexContentBlock {
@@ -16,6 +18,7 @@ interface CodexPayload {
   content?: CodexContentBlock[];
   cwd?: string;
   session_id?: string;
+  turn_id?: string;
 }
 
 export interface CodexRecord {
@@ -171,4 +174,30 @@ export function extractCodexTurnOutput(records: CodexRecord[]): { texts: string[
     }
   }
   return { texts, toolNames };
+}
+
+/**
+ * Turn boundaries in a Codex rollout.
+ *
+ * Codex states these outright, which makes it the easier of the two formats:
+ * `event_msg` records carry `task_started` and `task_complete` (with `turn_id`,
+ * `duration_ms`, `completed_at`), plus `turn_aborted` for an interrupted turn.
+ * Measured across 86 local rollouts: 46 starts against 45 completes and 1
+ * abort — exactly one end per start.
+ *
+ * These are the only `event_msg` records read. The rest are deliberately
+ * ignored, `agent_message` above all: extractCodexTurnOutput takes assistant
+ * text from `response_item` records because `event_msg`/`agent_message`
+ * duplicates it, and reading both double-posts to Slack.
+ */
+export function extractCodexLifecycle(records: CodexRecord[]): TurnLifecycleEvent[] {
+  const events: TurnLifecycleEvent[] = [];
+  for (const r of records) {
+    if (r.type !== "event_msg" || !r.payload) continue;
+    const { type, turn_id: turnId } = r.payload;
+    if (type === "task_started") events.push({ kind: "started", turnId });
+    else if (type === "task_complete") events.push({ kind: "completed", turnId });
+    else if (type === "turn_aborted") events.push({ kind: "aborted", turnId });
+  }
+  return events;
 }

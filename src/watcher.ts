@@ -6,6 +6,7 @@ import { snapshotOutbox, WrittenFileTracker, type DirSnapshot } from "./attachme
 import { postSegmented } from "./slack/post.js";
 import { readNewRecords, transcriptCreatedAfter, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
+import { SettleTracker } from "./settle.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 
 function sleep(ms: number): Promise<void> {
@@ -27,6 +28,12 @@ interface WatchState {
   /** Write tracking for terminal-initiated work, kept here so it survives to
    *  the report (or to the handoff, if the terminal blocks first). */
   writes: WrittenFileTracker;
+  /**
+   * Decides settling from the transcript, because herdr's `working` cannot be
+   * trusted to clear — see settle.ts. Lives as long as the watch (not the
+   * turn): each `started` it sees re-arms it for the next terminal-side turn.
+   */
+  settle: SettleTracker;
 }
 
 /**
@@ -296,6 +303,7 @@ export class BackgroundWatcher {
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
         writes: new WrittenFileTracker(),
+        settle: new SettleTracker(),
       });
       return;
     }
@@ -310,9 +318,16 @@ export class BackgroundWatcher {
       // is only ever seen by this loop, and if it later blocks, the write it
       // already completed has to survive into the adopted turn.
       state.writes.ingest(output);
+      state.settle.observe(output.lifecycle ?? []);
     }
 
-    if (agent.agentStatus === "blocked") {
+    // herdr's status, corrected where the transcript contradicts a `working`
+    // that will never clear (settle.ts). A pane stuck that way never reached
+    // the settle check below, so terminal-side output was collected here and
+    // then never posted.
+    const status = state.settle.effectiveStatus(agent.agentStatus);
+
+    if (status === "blocked") {
       // The watch is dropped only if the engine actually took the handoff. It
       // used to be deleted first, so an adoption refused because a Slack turn
       // claimed the pane in the meantime threw away this state — the assistant
@@ -334,7 +349,7 @@ export class BackgroundWatcher {
     }
 
     const wasActive = state.lastStatus === "working" || state.lastStatus === "blocked";
-    const nowSettled = agent.agentStatus === "idle" || agent.agentStatus === "done";
+    const nowSettled = status === "idle" || status === "done";
 
     if (wasActive && nowSettled) {
       if (state.collected.length > 0) {
@@ -361,7 +376,10 @@ export class BackgroundWatcher {
       );
     }
 
-    state.lastStatus = agent.agentStatus;
+    // The corrected status, not herdr's: storing `working` for a pane the
+    // transcript has already closed out would leave `wasActive` true forever,
+    // so every later tick would re-report the same settle.
+    state.lastStatus = status;
   }
 
   /**
