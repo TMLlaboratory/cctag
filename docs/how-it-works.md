@@ -354,5 +354,5 @@ HubはSlackアプリのトークン単位で1ワークスペースに固定さ�
 
 ## 参考
 
-- ソースコード: https://github.com/moiku/claude-code-tag
+- ソースコード: https://github.com/TMLlaboratory/cctag
 - herdr: https://herdr.dev

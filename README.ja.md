@@ -213,7 +213,7 @@ Hubにはスタンドアロンモードと同じ`SLACK_BOT_TOKEN`/`SLACK_APP_TOK
 このマシンにherdr・Claude Code・Codex CLIは**不要**。
 
 ```bash
-git clone https://github.com/moiku/claude-code-tag.git /opt/cctag
+git clone https://github.com/TMLlaboratory/cctag.git /opt/cctag
 cd /opt/cctag && npm install && npm run build
 cat > .env <<EOF
 SLACK_BOT_TOKEN=xoxb-...
@@ -288,8 +288,8 @@ CCTAG_ENV_FILE=/opt/cctag/.env.workspace2 node dist/hub/index.js token issue <na
 登録しておくこと — 上の[herdrのインストール](#herdrのインストールmacos向け注意点)参照。
 
 ```bash
-git clone https://github.com/moiku/claude-code-tag.git
-cd claude-code-tag
+git clone https://github.com/TMLlaboratory/cctag.git
+cd cctag
 npm install
 cp .env.example .env
 $EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN

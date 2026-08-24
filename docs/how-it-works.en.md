@@ -412,5 +412,5 @@ keystrokes would collide.
 
 ## See also
 
-- Source: https://github.com/moiku/claude-code-tag
+- Source: https://github.com/TMLlaboratory/cctag
 - herdr: https://herdr.dev

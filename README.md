@@ -248,7 +248,7 @@ instance is plenty. This machine does **not** need herdr, Claude Code, or
 Codex CLI.
 
 ```bash
-git clone https://github.com/moiku/claude-code-tag.git /opt/cctag
+git clone https://github.com/TMLlaboratory/cctag.git /opt/cctag
 cd /opt/cctag && npm install && npm run build
 cat > .env <<EOF
 SLACK_BOT_TOKEN=xoxb-...
@@ -331,8 +331,8 @@ instance(s) are registered as herdr agents first — see [Installing
 herdr](#installing-herdr-macos-notes) above.
 
 ```bash
-git clone https://github.com/moiku/claude-code-tag.git
-cd claude-code-tag
+git clone https://github.com/TMLlaboratory/cctag.git
+cd cctag
 npm install
 cp .env.example .env
 $EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN
