@@ -123,6 +123,98 @@ test("a herdr error is not reported as a closed terminal", async () => {
   }
 });
 
+// --- a pane that outlives its agent ----------------------------------------
+
+/** A live pane with nothing running in it: `agent get` finds no agent, but the
+ *  pane itself is still there — what quitting the CLI looks like, and equally
+ *  what exiting it for good looks like. */
+function agentlessHerdr(): HerdrClient {
+  return {
+    async agentGet() {
+      return null;
+    },
+    async paneExists() {
+      return true;
+    },
+  } as unknown as HerdrClient;
+}
+
+test("a pane whose agent quit is kept while the CLI could still be restarting", async () => {
+  // The grace period exists for exactly this: restarting the CLI in the same
+  // pane briefly leaves it agentless, and unpairing then would tear down the
+  // pairing that pane-id addressing exists to carry through a restart.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = storeWithPairing(dir);
+    const { notifier, replies } = fakeNotifier();
+
+    const watcher = new BackgroundWatcher(agentlessHerdr(), store, idleEngine, notifier, 20, 10_000);
+    watcher.start();
+    await sleep(150); // several ticks, all well inside the grace period
+    watcher.stop();
+
+    assert.equal(replies.length, 0, "nothing should be posted while the restart window is open");
+    assert.equal(store.list().length, 1, "the pairing must survive a CLI restart");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pane still agentless after the grace period is unpaired and reported once", async () => {
+  // Without an upper bound this waited forever: exiting the agent and leaving
+  // the terminal open — the ordinary way to end a session — left the thread
+  // paired to an empty pane, with every later message to it failing.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = storeWithPairing(dir);
+    const { notifier, replies } = fakeNotifier();
+
+    const watcher = new BackgroundWatcher(agentlessHerdr(), store, idleEngine, notifier, 20, 40);
+    watcher.start();
+    await sleep(300); // ticks past the 40ms grace, then keeps ticking
+    watcher.stop();
+
+    const notices = replies.filter((r) => r.includes("終了したままです"));
+    assert.equal(notices.length, 1, `reported exactly once, got ${notices.length}`);
+    assert.equal(store.list().length, 0, "the stale pairing must be dropped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an agent coming back inside the grace period resets the wait", async () => {
+  // The reset is what keeps a pane that flips in and out of agentless — a
+  // restart, or a session id that lands a tick late — from accumulating its
+  // way to an unpair across unrelated spells.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  try {
+    const store = storeWithPairing(dir);
+    const { notifier, replies } = fakeNotifier();
+    let calls = 0;
+    const herdr = {
+      async agentGet() {
+        calls += 1;
+        // Agentless, then back, then agentless again: neither spell alone is
+        // long enough to expire, and the wait must not carry over between them.
+        return calls === 2 ? fakeAgent() : null;
+      },
+      async paneExists() {
+        return true;
+      },
+    } as unknown as HerdrClient;
+
+    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20, 70);
+    watcher.start();
+    await sleep(150);
+    watcher.stop();
+
+    assert.equal(replies.length, 0, "the wait restarted, so nothing should have expired yet");
+    assert.equal(store.list().length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a pairing from before pane-id addressing is diagnosed as stale, not as a closed terminal", async () => {
   // Observed in production right after deploying the check above: three such
   // pairings existed and logged "pane undefined is gone". They do need clearing
@@ -169,6 +261,21 @@ function writeTranscript(dir: string, name: string, texts: string[]): void {
   const lines = texts.map((t) =>
     JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: t }] } }),
   );
+  writeFileSync(join(dir, name), lines.join("\n") + "\n");
+}
+
+/** A transcript holding one complete turn: a real user message, the assistant's
+ *  reply, and the `turn_duration` record the CLI closes a turn with. */
+function writeCompletedTurn(dir: string, name: string, text: string): void {
+  mkdirSync(dir, { recursive: true });
+  const lines = [
+    { type: "user", message: { role: "user", content: "やって" } },
+    {
+      type: "assistant",
+      message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+    },
+    { type: "system", subtype: "turn_duration", durationMs: 1234 },
+  ].map((r) => JSON.stringify(r));
   writeFileSync(join(dir, name), lines.join("\n") + "\n");
 }
 
@@ -274,6 +381,44 @@ test("a transcript that appears after watching began is read whole, not skipped"
       replies.some((r) => r.includes("ターミナル側の最初の応答")),
       `the first turn should have been reported, got ${JSON.stringify(replies)}`,
     );
+  });
+});
+
+test("a pane herdr reports as working forever still gets its terminal-side response posted", async () => {
+  // The production failure: a lingering background shell makes herdr report
+  // `working` permanently (background_shell_working outranks every idle rule),
+  // so `nowSettled` never became true and text this loop had already collected
+  // was never posted. The transcript's own turn boundary is what settles it —
+  // note that setStatus is never called here, unlike every test above.
+  await withRotationFixture(async ({ tDir, replies, start }) => {
+    start();
+    await sleep(80);
+
+    writeCompletedTurn(tDir, "session-a.jsonl", "ターミナル側で書いた結果");
+    await sleep(220); // notice the transcript, then tail and settle it
+
+    const hits = replies.filter((r) => r.includes("ターミナル側で書いた結果"));
+    assert.equal(hits.length, 1, `posted exactly once while stuck at working, got ${JSON.stringify(replies)}`);
+
+    // And not again on later ticks: the corrected status is what gets stored,
+    // so `wasActive` goes false instead of latching on herdr's stale `working`.
+    await sleep(160);
+    assert.equal(replies.filter((r) => r.includes("ターミナル側で書いた結果")).length, 1, "must not re-report");
+  });
+});
+
+test("a working pane with no turn boundary in its transcript is left running", async () => {
+  // The other direction, and the one that must not regress: assistant text with
+  // no completion record is a turn still in progress. Reporting it would release
+  // the pane mid-turn and drop the rest of the output.
+  await withRotationFixture(async ({ tDir, replies, start }) => {
+    start();
+    await sleep(80);
+
+    writeTranscript(tDir, "session-a.jsonl", ["まだ途中の出力"]);
+    await sleep(260);
+
+    assert.deepEqual(replies, [], "silence from herdr plus no boundary means keep waiting");
   });
 });
 

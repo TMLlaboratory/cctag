@@ -16,6 +16,7 @@ import {
 import type { HerdrClient } from "./herdr/client.js";
 import type { AgentInfo } from "./herdr/types.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
+import { SettleTracker } from "./settle.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
 import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
@@ -107,6 +108,12 @@ interface TurnState {
    * it and posted the same prompt again, once per timeout window, forever.
    */
   deadlineAt: number;
+  /**
+   * Decides completion from the agent's own transcript, because herdr's
+   * `working` cannot be trusted to clear — see settle.ts. Owned per turn: it
+   * carries the turn's open/closed state, so it must not outlive it.
+   */
+  settle: SettleTracker;
   /**
    * Consecutive failures per herdr operation, each reset only by that same
    * operation succeeding.
@@ -400,6 +407,7 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
+        settle: new SettleTracker(),
         failures: { agentGet: 0, paneRead: 0 },
         lease,
         currentPromptId: 0,
@@ -566,6 +574,12 @@ export class TurnEngine {
         "🖥️ ターミナル側で入力待ちを検出しました…",
       );
 
+      // The prompt on screen means this turn is already under way, so the
+      // tracker starts `running` rather than waiting for a start record that
+      // was written before the handoff's offset — see markTurnRunning.
+      const adoptedSettle = new SettleTracker();
+      adoptedSettle.markTurnRunning();
+
       const state: TurnState = {
         phase: "running",
         pairing,
@@ -584,6 +598,7 @@ export class TurnEngine {
         lastStatusUpdateAt: 0,
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
+        settle: adoptedSettle,
         failures: { agentGet: 0, paneRead: 0 },
         lease,
         currentPromptId: 0,
@@ -900,6 +915,7 @@ export class TurnEngine {
 
       if (state.transcriptPath) {
         const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
+        const grew = newOffset > state.offset;
         state.offset = newOffset;
         const output = state.driver.extractTurnOutput(records);
         state.collected.push(...output.texts);
@@ -907,6 +923,14 @@ export class TurnEngine {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
         }
         state.writes.ingest(output);
+        state.settle.observe(output.lifecycle ?? []);
+        // Progress in the transcript is proof the agent is alive and working, so
+        // the deadline measures silence rather than total elapsed time. Without
+        // this a genuinely long turn was cut at turnTimeoutMs no matter how much
+        // it was producing — the timeout's own doc comment says it should only
+        // measure how long the agent has gone without progress, and a blocked
+        // pane was the only thing that used to satisfy it.
+        if (grew) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
       }
 
       if (state.phase === "running") {
@@ -924,7 +948,12 @@ export class TurnEngine {
       // has to come *before* the check below rather than after: while a prompt
       // is up the loop sleeps on a 5s floor, so a deadline refreshed only after
       // the check would already have lapsed by the time the next poll reads it.
-      const blocked = agent.agentStatus === "blocked";
+      // herdr's status, corrected where the transcript contradicts a `working`
+      // that will never clear (settle.ts). `blocked` is never rewritten, so
+      // everything below this line behaves exactly as it did for a real prompt.
+      const status = state.settle.effectiveStatus(agent.agentStatus);
+
+      const blocked = status === "blocked";
       if (blocked) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
 
       if (Date.now() > state.deadlineAt) {
@@ -1000,7 +1029,7 @@ export class TurnEngine {
         this.markPromptResolved(state);
       }
 
-      if (agent.agentStatus === "idle" || agent.agentStatus === "done") {
+      if (status === "idle" || status === "done") {
         await this.finalize(state);
         return;
       }

@@ -1,7 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SendFileRequest, ToolOutcome } from "../driver.js";
+import type { SendFileRequest, ToolOutcome, TurnLifecycleEvent } from "../driver.js";
 
 // Claude Code encodes the project cwd into the transcript directory name by
 // replacing every non-alphanumeric character with "-". Verified empirically
@@ -68,9 +68,11 @@ interface ContentBlock {
 
 export interface TranscriptRecord {
   type?: string;
+  subtype?: string;
   uuid?: string;
   timestamp?: string;
-  message?: { role?: string; content?: unknown };
+  isSidechain?: boolean;
+  message?: { role?: string; content?: unknown; stop_reason?: string | null };
 }
 
 function contentBlocks(record: TranscriptRecord): ContentBlock[] {
@@ -143,6 +145,66 @@ export function extractToolOutcomes(records: TranscriptRecord[]): ToolOutcome[] 
     }
   }
   return outcomes;
+}
+
+/** Response-level stop reasons that mean the model's turn ended rather than
+ *  pausing for a tool. `tool_use` and `null` (an interrupted response) are the
+ *  ones that must NOT count. */
+const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens", "refusal"]);
+
+/**
+ * Turn boundaries in a Claude Code transcript.
+ *
+ * The authoritative end-of-turn record is `{type: "system", subtype:
+ * "turn_duration"}`, which the CLI writes once per completed turn as that
+ * turn's last record — measured across 286 local transcripts (366 occurrences,
+ * carrying `durationMs`). It is preferred because it reports that *the harness*
+ * finished, not merely that one API response ended.
+ *
+ * `stop_reason` is kept as a fallback for transcripts written before
+ * `turn_duration` existed. It is a sound boundary but not a one-per-turn one: a
+ * single API response is split into one record per content block and every
+ * block carries the response's `stop_reason`, so a reply with a thinking block
+ * and a text block yields two `end_turn` records (measured: 508 `end_turn`
+ * against 366 `turn_duration` in the same sample). That is harmless here —
+ * SettleTracker only needs to know a boundary was crossed, and crossing it
+ * twice reads the same as once. What matters is that it never fires *mid*-turn:
+ * a text block emitted alongside tool calls is stamped `tool_use`, not
+ * `end_turn`, because the stamp belongs to the response rather than the block.
+ *
+ * A start is a genuine user record — content that is a plain string, or blocks
+ * with no `tool_result` among them. Tool results come back as `user` records
+ * too, and treating those as starts would re-arm the tracker on every tool call
+ * in the turn.
+ *
+ * Sidechain records (subagent transcripts) are skipped: their turns are not the
+ * pane's turn, and letting them arm or settle the tracker would report a
+ * subagent's completion as the pane's.
+ */
+export function extractLifecycle(records: TranscriptRecord[]): TurnLifecycleEvent[] {
+  const events: TurnLifecycleEvent[] = [];
+  for (const r of records) {
+    if (r.isSidechain === true) continue;
+    if (r.type === "system" && r.subtype === "turn_duration") {
+      events.push({ kind: "completed" });
+      continue;
+    }
+    if (r.type === "assistant") {
+      const stop = r.message?.stop_reason;
+      if (typeof stop === "string" && TERMINAL_STOP_REASONS.has(stop)) events.push({ kind: "completed" });
+      continue;
+    }
+    if (r.type === "user") {
+      const content = r.message?.content;
+      if (typeof content === "string") {
+        events.push({ kind: "started" });
+      } else if (Array.isArray(content)) {
+        const isToolResult = (content as ContentBlock[]).some((b) => b?.type === "tool_result");
+        if (!isToolResult) events.push({ kind: "started" });
+      }
+    }
+  }
+  return events;
 }
 
 /** Human-readable one-line summaries of tool_use blocks, in order (for the status line). */

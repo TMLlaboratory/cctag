@@ -8,7 +8,12 @@ import {
   parseCodexMenu,
   parseCodexStartupPrompt,
 } from "./prompts.js";
-import { extractCodexTurnOutput, locateCodexTranscript, type CodexRecord } from "./transcript.js";
+import {
+  extractCodexLifecycle,
+  extractCodexTurnOutput,
+  locateCodexTranscript,
+  type CodexRecord,
+} from "./transcript.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,7 +86,8 @@ export const codexDriver: AgentDriver = {
   },
 
   extractTurnOutput(records) {
-    return extractCodexTurnOutput(records as CodexRecord[]);
+    const r = records as CodexRecord[];
+    return { ...extractCodexTurnOutput(r), lifecycle: extractCodexLifecycle(r) };
   },
 
   parseStartupPrompt: parseCodexStartupPrompt,
