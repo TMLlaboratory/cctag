@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAskUserQuestionPane, parsePreviewQuestionPane, previewAnchorIndex } from "./prompts.js";
+import {
+  looksLikeQuestionScreen,
+  parseAskUserQuestionPane,
+  parsePreviewQuestionPane,
+  previewAnchorIndex,
+} from "./prompts.js";
 import { claudeDriver } from "./driver.js";
 
 // Fixtures taken from a real pane. A two-question AskUserQuestion was raised on
@@ -397,4 +402,92 @@ test("the preview renderer's own unnumbered chat row still anchors it", () => {
   assert.equal(prompt.kind, "question");
   if (prompt.kind !== "question") return;
   assert.deepEqual(prompt.info.options.map((o) => o.label), PREVIEW_LABELS);
+});
+
+// --- the context snippet's reach, and answering an unreadable screen --------
+
+test("a plan prompt's snippet stops at the rule, not eight lines up", () => {
+  // Taken from a live paired pane. The reach-back is eight lines from the first
+  // option, which is right for a permission menu — its subject sits just above
+  // the options — but a plan approval has only its question line, so the reach
+  // crossed the full-width rule and pasted the agent's previous output into the
+  // Slack code block. What the user saw began mid-sentence in an unrelated
+  // analysis section and read as a garbled prompt.
+  const pane = [
+    "   F3. $\\tau$ の非同定性は rs-ecoc でも同じ壁",
+    "",
+    "   - ecoc_reliability_en.tex L1180–1182: 雑音分散は \"cannot be uniquely estimated from a trained",
+    "     classifier's outputs on real data\"                    ↓",
+    "  " + "─".repeat(120),
+    "   Claude has written up a plan and is ready to execute. Would you like to proceed?",
+    "",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+    "     3. Tell Claude what to change",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.equal(prompt.isPlanPrompt, true);
+  const snippet = prompt.menu?.snippet ?? "";
+  assert.ok(snippet.startsWith("Claude has written up a plan"), `snippet began with: ${snippet.slice(0, 60)}`);
+  assert.ok(!snippet.includes("非同定性"), "the agent's previous output must not be pasted into the prompt");
+  assert.ok(!snippet.includes("─────"), "nor the rule that bounds the prompt region");
+});
+
+test("a permission menu with no rule above it keeps its context", () => {
+  // The other direction, and the reason the reach exists at all: the command
+  // being asked about is what makes a permission prompt answerable.
+  const pane = [
+    "  Bash command",
+    "",
+    "  rm -rf /tmp/scratch-dir",
+    "  Delete the scratch directory",
+    "",
+    "  Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.ok(prompt.menu?.snippet.includes("rm -rf /tmp/scratch-dir"), "the command must survive");
+});
+
+test("a blank line and a short dash run do not cut the context short", () => {
+  // The pitfall the boundary regex is deliberately stricter than RULE_LINE_RE
+  // for: that one also matches whitespace-only lines, so reusing it here would
+  // have truncated every snippet at the first blank line above the options.
+  const pane = [
+    "  Bash command",
+    "",
+    "  git commit -m 'wip'",
+    "  ---",
+    "",
+    "  Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.ok(prompt.menu?.snippet.includes("git commit"), "a blank line is not a region boundary");
+});
+
+test("a question screen is recognizable even when its options cannot be read", () => {
+  // Production incident: the second question of a three-question dialog — the
+  // multi-select one — failed to parse, fell through to the permission branch,
+  // and was offered ✅/❌ buttons that sent a bare `y` into a checkbox list.
+  // Either marker alone has to be enough, since whatever broke the option
+  // parsing may well have broken the rest of the shape too.
+  assert.equal(looksLikeQuestionScreen(["  3. Type something.", "garbled"].join("\n")), true);
+  assert.equal(looksLikeQuestionScreen("←  ☐ 本稿の方針  ☐ 別論文の主軸  ✔ Submit  →"), true);
+
+  // A permission menu must NOT be mistaken for one — that path still offers
+  // y/n, which an unreadable permission prompt does accept.
+  assert.equal(looksLikeQuestionScreen(["  Do you want to proceed?", "❯ 1. Yes", "  2. No"].join("\n")), false);
+  assert.equal(looksLikeQuestionScreen(""), false);
 });

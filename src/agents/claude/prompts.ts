@@ -18,6 +18,20 @@ import type { AskUserQuestionOption, AskUserQuestionPaneInfo, PermissionChoice, 
 const NUMBERED_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(.+?)\s*$/;
 const CURSOR_LINE_RE = /❯\s*\d+\./;
 
+/**
+ * The full-width rule Claude Code draws above a prompt, separating it from
+ * whatever the agent printed before.
+ *
+ * Deliberately stricter than RULE_LINE_RE below, which also matches a blank
+ * line (its character class is all-optional whitespace) and short dashes: this
+ * one is used to *stop* a backwards scan, so matching a blank line would cut
+ * the context off at the first empty line above the options — exactly the
+ * useful context a permission menu needs. Requiring a long unbroken run of
+ * rule characters also keeps it from matching a table border, which carries
+ * ├ ┼ ┤ └ ┴ ┘ and so fails the anchored test anyway.
+ */
+const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
+
 export function permissionAnchorIndex(paneText: string): number {
   const lines = paneText.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -55,7 +69,21 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
     if (choices[i].num !== String(i + 1)) return null; // must be consecutive 1..n
   }
 
-  const snippetStart = Math.max(0, start - 8);
+  // Reach back for context, but never past the rule that bounds the prompt
+  // region. Eight lines is right for a permission menu, whose subject — the
+  // command being asked about — sits just above the options. A plan approval
+  // has only its one question line, so the same reach crossed the full-width
+  // rule above it and pasted in whatever the agent had last printed.
+  // Observed live in a paired pane: four lines of an unrelated analysis
+  // section, a stray wrap-marker arrow, and the rule itself, all inside the
+  // Slack code block, which read as a garbled prompt.
+  let snippetStart = Math.max(0, start - 8);
+  for (let i = start - 1; i >= snippetStart; i--) {
+    if (PROMPT_REGION_RULE_RE.test(lines[i])) {
+      snippetStart = i + 1;
+      break;
+    }
+  }
   const snippet = lines
     .slice(snippetStart, end + 1)
     .join("\n")
@@ -79,6 +107,28 @@ const NUMBERED_START_RE = /^\s*(?:❯\s*)?\d+\./;
 const QUESTION_TAB_BAR_RE = /[☐☒].*(?:Submit|→)|(?:←|→).*[☐☒]/;
 /** A horizontal rule the TUI uses as a separator, never content. */
 const RULE_LINE_RE = /^[\s─━—-]+$/;
+
+/**
+ * Whether a pane still looks like an AskUserQuestion dialog even though the
+ * question parsers could not read it.
+ *
+ * Exists to stop cctag answering such a screen blind. When
+ * `parseAskUserQuestionPane` finds nothing, `parseBlockedPane` falls through to
+ * the permission branch, and a permission menu it also cannot read used to be
+ * offered as ✅/❌ buttons that send `y`/`n`. Observed in production: the second
+ * question of a three-question dialog — the multi-select one — failed to parse,
+ * and a `y` went into a checkbox screen where it means nothing and could toggle
+ * or submit something nobody chose. Sending an unintended keystroke into
+ * someone's terminal is worse than saying "answer this at the keyboard".
+ *
+ * Both markers are structural rather than a list of known dialogs: the
+ * numbered "Type something." row every question offers, and the tab bar a
+ * multi-question dialog draws. Either one present means a question is on
+ * screen whatever else failed to match.
+ */
+export function looksLikeQuestionScreen(paneText: string): boolean {
+  return paneText.split("\n").some((line) => TYPE_SOMETHING_RE.test(line) || QUESTION_TAB_BAR_RE.test(line));
+}
 
 /**
  * Line index of the row each parser anchors on, or -1.

@@ -35,6 +35,7 @@ import {
   doneStatusText,
   permissionBlocks,
   permissionParseFailureBlocks,
+  unreadableQuestionBlocks,
 } from "./slack/blocks.js";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
@@ -828,16 +829,40 @@ export class TurnEngine {
         ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
         : menu;
 
+    // The screen that defeated the parser, kept somewhere it can still be
+    // found. It used to exist only inside the Slack message posted below — so
+    // deleting that message, or an in-place update replacing it once the prompt
+    // was answered, destroyed the only copy and left an occurrence impossible
+    // to diagnose afterwards. That happened. Logged whole: BLOCKED_PANE_LINES
+    // bounds it, and a parse failure is rare enough that one dump each is
+    // exactly what's wanted.
+    if (!buttonMenu) {
+      console.error(
+        `[turn ${paneId}] could not parse the prompt on screen (question-shaped: ${
+          state.driver.looksLikeQuestionScreen?.(paneText) === true
+        }). Raw pane follows:\n${paneText}`,
+      );
+    }
+
+    // A question that failed to parse must not be offered a yes/no button: it
+    // would send a bare `y` into a numbered — possibly multi-select — list. See
+    // unreadableQuestionBlocks.
+    const unreadableQuestion = !buttonMenu && state.driver.looksLikeQuestionScreen?.(paneText) === true;
+
     const header = isPlanPrompt
       ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
-      : "⚠️ 許可リクエスト";
+      : unreadableQuestion
+        ? "⚠️ 質問を読み取れませんでした（ターミナルで回答してください）"
+        : "⚠️ 許可リクエスト";
     state.promptHandle = await this.notifier.postMessage(
       state.pairing.channel,
       state.pairing.threadTs ?? "",
       header,
       buttonMenu
         ? permissionBlocks(paneId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
-        : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
+        : unreadableQuestion
+          ? unreadableQuestionBlocks(paneText)
+          : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
     );
     state.phase = "awaiting-permission";
   }

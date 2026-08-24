@@ -142,6 +142,18 @@ export interface AgentDriver {
    * like "numbered options waiting on Enter" counts.
    */
   parseStartupPrompt?(paneText: string): string | null;
+  /**
+   * Whether a pane whose menu could not be parsed still looks like a *question*
+   * dialog rather than a permission one.
+   *
+   * Consulted only on the parse-failure path, to decide whether offering a
+   * blind yes/no confirmation is safe. It isn't for a question: the buttons
+   * send a bare `y`, which in a multi-select checkbox screen means nothing and
+   * may toggle or submit an unintended choice. Absent = this agent has no
+   * question dialogs to confuse a permission prompt with, so the fallback
+   * stays as it was.
+   */
+  looksLikeQuestionScreen?(paneText: string): boolean;
   /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
   answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
   /**
