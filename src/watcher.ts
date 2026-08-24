@@ -53,13 +53,31 @@ interface WatchState {
 /** How often to repeat a still-failing pairing in the log, in ticks. */
 const FAILURE_LOG_EVERY = 100;
 
+/**
+ * How long a paired pane may sit with no agent in it before the pairing is
+ * dropped.
+ *
+ * The wait exists so quitting the CLI to restart it in the same pane doesn't
+ * tear the pairing down (see the agentless branch in checkPairing) — but it
+ * has to end. Exiting the agent and leaving the terminal open is the ordinary
+ * way to finish a session, and without an upper bound that left the thread
+ * paired to an empty pane forever: every message to it failed, and the only
+ * signal was one log line at the moment the agent went away.
+ *
+ * Five minutes is far longer than a restart takes (seconds) and short enough
+ * that a thread doesn't stay attached to a pane nobody is working in.
+ */
+const AGENTLESS_GRACE_MS = 5 * 60_000;
+
 export class BackgroundWatcher {
   private watches = new Map<string, WatchState>(); // key: paneId
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
-  /** Panes seen alive but without an agent, so the wait is logged once, not every tick. */
-  private agentlessPanes = new Set<string>();
+  /** Panes seen alive but without an agent -> when that was first seen. Both
+   *  throttles the log to once per spell and bounds how long the wait lasts
+   *  (AGENTLESS_GRACE_MS). */
+  private agentlessPanes = new Map<string, number>();
 
   private running = false;
 
@@ -69,6 +87,8 @@ export class BackgroundWatcher {
     private readonly turnEngine: TurnEngine,
     private readonly notifier: Notifier,
     private readonly intervalMs = 7_000,
+    /** Overridable for tests only — production always wants AGENTLESS_GRACE_MS. */
+    private readonly agentlessGraceMs = AGENTLESS_GRACE_MS,
   ) {}
 
   start(): void {
@@ -164,11 +184,26 @@ export class BackgroundWatcher {
       // Verified on a live pane: agent get failed while pane get still returned
       // it. A throw propagates, since a herdr timeout is not a missing pane.
       if (await this.herdr.paneExists(pairing.paneId)) {
-        if (!this.agentlessPanes.has(pairing.paneId)) {
-          this.agentlessPanes.add(pairing.paneId);
-          console.log(`[watcher] pane ${pairing.paneId} has no agent running — keeping ${pairing.key}`);
-        }
+        // Waited on, but not indefinitely. The grace period is what makes a
+        // restart survivable; letting it run forever is what left threads
+        // paired to panes whose agent was exited hours earlier.
+        const since = this.agentlessPanes.get(pairing.paneId);
         this.watches.delete(pairing.paneId);
+        if (since === undefined) {
+          this.agentlessPanes.set(pairing.paneId, Date.now());
+          console.log(`[watcher] pane ${pairing.paneId} has no agent running — keeping ${pairing.key} for now`);
+          return;
+        }
+        if (Date.now() - since < this.agentlessGraceMs) return;
+
+        // Long enough that this is an exited session, not one being restarted.
+        const minutes = Math.max(1, Math.round(this.agentlessGraceMs / 60_000));
+        await this.unpair(
+          pairing,
+          `pane ${pairing.paneId} had no agent for ${minutes}min — unpaired ${pairing.key}`,
+          `⚠️ ペアリング先のエージェントが${minutes}分以上終了したままです（ターミナルは開いていますが、エージェントが動いていません）。` +
+            "ペアリングを解除しました。`@cctag connect` で再接続してください。",
+        );
         return;
       }
 
@@ -186,18 +221,12 @@ export class BackgroundWatcher {
       // dead pane already does (commands.ts) — and a paneId is only unique
       // within a herdr run, so a kept pairing could later attach this thread to
       // whatever unrelated pane inherits the id.
-      this.pairingStore.remove(pairing.key);
-      this.watches.delete(pairing.paneId);
-      this.busyLastTick.delete(pairing.paneId);
-      console.log(`[watcher] pane ${pairing.paneId} is gone — unpaired ${pairing.key}`);
-      await this.notifier
-        .postReply(
-          pairing.channel,
-          pairing.threadTs ?? "",
-          "⚠️ 接続先のインスタンスが見つかりません（ターミナルが閉じられた可能性があります）。" +
-            "ペアリングを解除しました。`@cctag connect` で再接続してください。",
-        )
-        .catch((err) => console.error(`[watcher] could not report ${pairing.paneId} gone:`, err));
+      await this.unpair(
+        pairing,
+        `pane ${pairing.paneId} is gone — unpaired ${pairing.key}`,
+        "⚠️ 接続先のインスタンスが見つかりません（ターミナルが閉じられた可能性があります）。" +
+          "ペアリングを解除しました。`@cctag connect` で再接続してください。",
+      );
       return;
     }
     this.agentlessPanes.delete(pairing.paneId);
@@ -333,5 +362,27 @@ export class BackgroundWatcher {
     }
 
     state.lastStatus = agent.agentStatus;
+  }
+
+  /**
+   * Drops a pairing and tells the thread why, clearing every per-pane bit of
+   * state with it.
+   *
+   * Shared by the two ways a pairing stops being usable — the pane closed, or
+   * the pane outlived its agent by AGENTLESS_GRACE_MS — because forgetting one
+   * of these maps is what leaves a watch running against a pane that no longer
+   * has a pairing. The Slack post is best-effort: the local state must end up
+   * consistent whether or not the thread can be reached.
+   */
+  private async unpair(pairing: Pairing, logLine: string, message: string): Promise<void> {
+    this.pairingStore.remove(pairing.key);
+    this.watches.delete(pairing.paneId);
+    this.busyLastTick.delete(pairing.paneId);
+    this.agentlessPanes.delete(pairing.paneId);
+    this.failureStreak.delete(pairing.paneId);
+    console.log(`[watcher] ${logLine}`);
+    await this.notifier
+      .postReply(pairing.channel, pairing.threadTs ?? "", message)
+      .catch((err) => console.error(`[watcher] could not report ${pairing.paneId} unpaired:`, err));
   }
 }
