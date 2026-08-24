@@ -491,3 +491,73 @@ test("a question screen is recognizable even when its options cannot be read", (
   assert.equal(looksLikeQuestionScreen(["  Do you want to proceed?", "❯ 1. Yes", "  2. No"].join("\n")), false);
   assert.equal(looksLikeQuestionScreen(""), false);
 });
+
+// --- multi-select, captured from a live pane -------------------------------
+
+/**
+ * A real multi-select AskUserQuestion as Claude Code 2.1.241 draws it, captured
+ * from a paired pane. The single-select fixtures above were taken the same way;
+ * this shape never was, and was written from assumption instead — which is how
+ * it went wrong.
+ *
+ * The load-bearing difference is row 5: a multi-select dialog puts a checkbox on
+ * EVERY row, the free-text one included, so it reads `5. [ ] Type something`
+ * rather than `4. Type something.`. That row is the anchor both this parser and
+ * classicAnchorIndex find the dialog by.
+ */
+const LIVE_MULTI_SELECT = [
+  "←  ☐ 次の一手  ✔ Submit  →",
+  "",
+  "│ 複数選択の描画を実物で確認できたとして、この件はどこまで進めますか。該当するものを選んでください（複数可）。",
+  "",
+  "❯ 1. [ ] パーサを実物に合わせて直す",
+  "  撮れた実画面をフィクスチャとしてテストに固定し、複数選択の解析を現行の描画に合わせて修正します。根本原因が実物で確認できた場合のみ意味があります。",
+  "  2. [ ] PR #10をマージしてデプロイ",
+  "  「読めない質問には答えない」「画面をログに残す」「snippetを罫線で止める」の3件を本番に反映します。Spokeの再起動を伴います。",
+  "  3. [ ] CIをpush（workflowスコープ）",
+  "  gh auth refresh -s workflow を実行いただければ、検証済みのCIコミットをpushしてPRを立てます。",
+  "  4. [ ] 飯田さんに共有",
+  "  複数選択の描画が未検証だった件と今回の原因を、PR #10のコメントかIssueとして共同開発者に共有します。",
+  "  5. [ ] Type something",
+  "     Submit",
+  "─".repeat(213),
+  "  6. Chat about this",
+].join("\n");
+
+test("a real multi-select dialog is read as a question, not as an unparseable menu", () => {
+  // Production incident: this exact shape anchored on nothing, so the question
+  // parser returned null, the driver fell through to the permission branch,
+  // that could not read it either, and Slack got "menu could not be parsed" —
+  // then a bare `y` was sent into the checkbox list. Single-select was
+  // unaffected, which is why question 1 of the same dialog worked and
+  // question 2 did not.
+  const prompt = claudeDriver.parseBlockedPane(LIVE_MULTI_SELECT);
+  assert.equal(prompt.kind, "question", "a checkbox on the free-text row must not hide the dialog");
+});
+
+test("the captured dialog's options, question and multiSelect flag all come through", () => {
+  const info = parseAskUserQuestionPane(LIVE_MULTI_SELECT);
+  assert.ok(info);
+  assert.equal(info.multiSelect, true);
+  assert.deepEqual(
+    info.options.map((o) => o.label),
+    ["パーサを実物に合わせて直す", "PR #10をマージしてデプロイ", "CIをpush（workflowスコープ）", "飯田さんに共有"],
+    "the free-text and Chat rows are not options",
+  );
+  assert.ok(info.options.every((o) => (o.description ?? "").length > 0), "each option keeps its description");
+});
+
+test("the gutter bar the TUI draws beside a question is not part of the question", () => {
+  // `│ 複数選択の描画を…` — chrome, but on the same line as the text, so trimming
+  // alone left it in the Slack message.
+  const info = parseAskUserQuestionPane(LIVE_MULTI_SELECT);
+  assert.ok(info?.question.startsWith("複数選択の描画を"), `question was: ${info?.question}`);
+  assert.ok(!info?.question.includes("│"));
+});
+
+test("a single-select free-text row still anchors, checkbox or not", () => {
+  // The optional checkbox must not make the period-less form mandatory: the
+  // classic single-select rendering has neither checkbox nor bar.
+  const classic = ["☐ 実装方針", "", "どの方式で？", "", "❯ 1. A方式", "  2. B方式", "  3. Type something."].join("\n");
+  assert.equal(parseAskUserQuestionPane(classic)?.options.length, 2);
+});

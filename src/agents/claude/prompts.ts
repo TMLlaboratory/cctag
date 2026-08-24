@@ -93,7 +93,28 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
   return { choices, snippet };
 }
 
-const TYPE_SOMETHING_RE = /^\s*(?:❯\s*)?(\d+)\.\s*Type something\.?\s*$/;
+/**
+ * The free-text row every question dialog offers, and the anchor both the
+ * classic parser and classicAnchorIndex find the dialog by.
+ *
+ * The checkbox is optional because a multi-select dialog puts one on *every*
+ * row, this one included — captured from a live pane on Claude Code 2.1.241:
+ *
+ *     ❯ 1. [ ] パーサを実物に合わせて直す
+ *       ...
+ *       5. [ ] Type something
+ *
+ * Without it the anchor missed, parseAskUserQuestionPane returned null, and the
+ * driver fell through to the permission branch, which could not read the dialog
+ * either — so a multi-select question was posted to Slack as "menu could not be
+ * parsed". Single-select was unaffected (`4. Type something.`, no checkbox),
+ * which is exactly the asymmetry seen in production: question 1 of a dialog
+ * parsed and answered normally, question 2 — the multi-select one — did not.
+ *
+ * Note the trailing period is also absent in that rendering; it was already
+ * optional here.
+ */
+const TYPE_SOMETHING_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(?:\[[ x✔]\]\s*)?Type something\.?\s*$/;
 const OPTION_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(?:\[([ x✔])\]\s*)?(.+?)\s*$/;
 const HEADER_LINE_RE = /^\s*[☐☒]\s*(.+?)\s*$/;
 const NUMBERED_START_RE = /^\s*(?:❯\s*)?\d+\./;
@@ -107,6 +128,19 @@ const NUMBERED_START_RE = /^\s*(?:❯\s*)?\d+\./;
 const QUESTION_TAB_BAR_RE = /[☐☒].*(?:Submit|→)|(?:←|→).*[☐☒]/;
 /** A horizontal rule the TUI uses as a separator, never content. */
 const RULE_LINE_RE = /^[\s─━—-]+$/;
+
+/**
+ * Strips the vertical gutter bar the TUI draws down the left of a question.
+ *
+ * Captured from a live multi-select dialog on 2.1.241, the question line reads
+ * `│ 複数選択の描画を…` — the bar is chrome, but it sits on the same line as the
+ * text, so trimming alone left it in the Slack message. Only a leading one is
+ * removed: a bar anywhere else is content (a table, a code sample) and must
+ * survive.
+ */
+function stripGutter(line: string): string {
+  return line.trim().replace(/^[│┃|]\s*/, "");
+}
 
 /**
  * Whether a pane still looks like an AskUserQuestion dialog even though the
@@ -217,7 +251,7 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
   let question = "";
   for (let i = firstOptionIdx - 1; i >= 0; i--) {
     if (isProse(lines[i])) {
-      question = lines[i].trim();
+      question = stripGutter(lines[i]);
       break;
     }
   }
