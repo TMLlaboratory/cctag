@@ -1,0 +1,94 @@
+name: CI
+
+# Runs the checks that don't need a live Slack workspace or a running herdr:
+# the type checker, the test suite, and the build. Every test stubs
+# HerdrClient (nothing constructs a real one), so no herdr install is needed
+# here — the parts that do need one are covered by hand, as README says.
+#
+# On pull requests so a change is verified before it's merged, and on pushes to
+# main so main itself stays verified — including for commits that land directly
+# there, which is the normal route for docs-only changes.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than tracking a floating "lts/*": a version that moves on
+      # its own turns an unrelated CI failure into a mystery. This is the
+      # develop-on version, deliberately above engines.node — see runtime-floor
+      # below for who checks the floor, and why the suite can't.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # `npm ci` (not `npm install`): installs exactly what package-lock.json
+      # pins, and fails if the lockfile and package.json have drifted.
+      - run: npm ci
+
+      # Cheapest first, so an obvious type error doesn't wait behind the suite.
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # Emit as well as check: `tsc --noEmit` above can pass while a real build
+      # fails, and dist/ is what actually gets deployed to a Hub or Spoke.
+      - run: npm run build
+
+  # Verifies the version package.json actually promises Spoke users
+  # (engines.node >= 20), which the job above does not: `npm test` passes a
+  # glob to `node --test`, and that is only expanded on Node 21+, so running
+  # the suite here would fail on the tooling rather than on the code. The
+  # floor is a *runtime* claim anyway, so what it needs is proof the built
+  # output loads and runs there — not proof the dev-time test runner does.
+  runtime-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # Loads the library graph — everything except the three entry points,
+      # which call main() at import and would start connecting to Slack. An
+      # import is enough to catch what this job exists for: syntax or built-in
+      # APIs the emitted JS uses but Node 20 doesn't have.
+      - name: Load the built output on the declared floor
+        run: |
+          node --input-type=module -e "
+            import { pathToFileURL } from 'node:url';
+            const modules = [
+              'dist/settle.js',
+              'dist/turn.js',
+              'dist/watcher.js',
+              'dist/commands.js',
+              'dist/pairing.js',
+              'dist/leases.js',
+              'dist/attachments.js',
+              'dist/herdr/client.js',
+              'dist/agents/driver.js',
+              'dist/slack/notifier.js',
+            ];
+            for (const m of modules) await import(pathToFileURL(m).href);
+            console.log('loaded ' + modules.length + ' modules on ' + process.version);
+          "
