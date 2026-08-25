@@ -34,7 +34,15 @@ export function acquireSingleInstanceLock(hubUrl: string): void {
     // Clearing it is safe precisely because no live process holds it; the
     // retry can still lose to another starting Spoke, in which case we fail
     // with the message above rather than steal the lock.
-    unlinkSync(path);
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      // A second Spoke racing to clear the same stale lock may have already
+      // removed it between our read above and this call — ENOENT here means
+      // the outcome we wanted (no lock file) already happened, not a real
+      // failure. Anything else (permissions, ...) is still surfaced.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
     if (!tryCreate(path)) {
       throw new Error(
         `another cctag-spoke just claimed the lock for ${hubUrl} (${path}). ` +
@@ -56,10 +64,20 @@ export function acquireSingleInstanceLock(hubUrl: string): void {
   });
   // Default signal termination kills the process without emitting "exit", so
   // the handler above would never run and every Ctrl-C would leave a stale
-  // lock behind. Re-enter through process.exit() to get it. Nothing else is
-  // added here on purpose: this must not change how the Spoke shuts down.
+  // lock behind. Re-enter through process.exit() to get it.
+  //
+  // process.exit() with no argument uses process.exitCode, defaulting to 0
+  // if unset — so without setting it first, this would silently turn a
+  // signal-killed process into a "clean exit" as far as any supervisor
+  // (launchd/systemd/a wrapper script) watching the exit code is concerned.
+  // Setting it to the conventional 128+signal (130 for SIGINT, 143 for
+  // SIGTERM) keeps that behavior unchanged; only the lock cleanup is added.
+  const SIGNAL_NUMBERS: Record<"SIGINT" | "SIGTERM", number> = { SIGINT: 2, SIGTERM: 15 };
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => process.exit());
+    process.on(signal, () => {
+      process.exitCode = 128 + SIGNAL_NUMBERS[signal];
+      process.exit();
+    });
   }
 }
 
