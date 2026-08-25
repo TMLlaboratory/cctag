@@ -78,7 +78,11 @@ tool trying to do both, is the point, not a gap to close.
 
 ## Status
 
-**v0.1.** Text-in / text-out turns work end-to-end for both **Claude Code**
+**v0.2.0** — see [CHANGELOG.md](CHANGELOG.md) for what each release changed.
+Pre-1.0 is a deliberate claim rather than a placeholder: the interface still
+moves, so pin an exact version if that matters to you.
+
+Text-in / text-out turns work end-to-end for both **Claude Code**
 and **Codex CLI**. Multiple-choice prompts are also supported: when the
 paired agent shows a tool-permission (or Codex command-approval) menu, cctag
 renders it as Slack buttons and answers are sent back into the terminal for
