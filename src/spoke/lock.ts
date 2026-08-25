@@ -1,7 +1,7 @@
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { hubSlug } from "../config.js";
+import { hubSlug } from "../hub-url.js";
 
 /**
  * A second Spoke for the same owner is never harmless: the Hub keeps only the

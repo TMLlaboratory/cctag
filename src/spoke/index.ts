@@ -2,8 +2,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 import type { AttachmentLimits, IncomingFile } from "../attachments.js";
-import { hubSlug, type SpokeConfig } from "../config.js";
+import type { SpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
+import { hubSlug, wsUrlFor } from "../hub-url.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
@@ -12,10 +13,6 @@ import { VERSION } from "../version.js";
 import { WsRpc } from "../ws/rpc.js";
 import { acquireSingleInstanceLock } from "./lock.js";
 import { narrowedMaxFileBytes, WsNotifier } from "./notifier.js";
-
-function wsUrlFor(hubUrl: string): string {
-  return hubUrl.replace(/\/+$/, "") + "/spoke";
-}
 
 /**
  * One machine can run multiple Spokes (one per Slack workspace/Hub, via

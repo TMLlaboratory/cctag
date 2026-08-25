@@ -8,24 +8,6 @@ import type { AttachmentLimits } from "./attachments.js";
 // from a .env file, since it decides which .env file to load).
 loadDotenv(process.env.CCTAG_ENV_FILE ? { path: process.env.CCTAG_ENV_FILE } : undefined);
 
-/**
- * Turns a Hub URL into a filename-safe token, so per-Hub state living in
- * `~/.cctag/` (pairing store, single-instance lock, ...) can be namespaced
- * without extra config. Shared by every such file on purpose: the names are
- * effectively a persisted format, so the sanitizing rule must stay in one
- * place rather than being re-derived (and drifting) at each call site.
- *
- * Strips a trailing slash before slugging, matching how `wsUrlFor()` in
- * spoke/index.ts normalizes the URL for the actual connection. Without this,
- * `https://hub` and `https://hub/` — the same Hub — would slug to different
- * tokens ("https-hub" vs "https-hub-") and get separate lock files and
- * pairing stores, reproducing the exact two-Spokes-fighting-each-other
- * failure this namespacing exists to prevent.
- */
-export function hubSlug(hubUrl: string): string {
-  return hubUrl.replace(/\/+$/, "").replace(/[^a-zA-Z0-9]/g, "-");
-}
-
 function required(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required environment variable: ${name}`);
