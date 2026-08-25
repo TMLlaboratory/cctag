@@ -40,6 +40,16 @@ test("the two READMEs stay structurally parallel", () => {
   );
 });
 
+test("the two how-it-works translations stay structurally parallel", () => {
+  // Same reason as the READMEs, and the same failure already happened here:
+  // this pair described `@cctag connect` as connecting to "a Claude Code
+  // instance" months after Codex support landed, and the correction had to be
+  // made in two places at once. 21 headings each today.
+  const ja = headingShape(read("docs/how-it-works.md"));
+  const en = headingShape(read("docs/how-it-works.en.md"));
+  assert.deepEqual(en, ja, "a section exists in one how-it-works translation but not the other");
+});
+
 test("every internal documentation link resolves", () => {
   // A moved or renamed file leaves the link behind, and the only thing that
   // notices is a reader who follows it. Relative to each document's own

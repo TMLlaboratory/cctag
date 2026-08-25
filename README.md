@@ -235,7 +235,10 @@ already runs — see [For Spoke users](#for-spoke-users) instead.)*
 
 Find your own Slack user ID (three-dot menu on your profile → *Copy member
 ID*) — this is `CCTAG_OWNER_USER_ID`. Only this user can run
-`connect`/`disconnect`.
+`connect`/`disconnect`: those choose which of *this machine's* panes a thread
+is attached to, and this machine is yours. Talking to a thread once it's
+paired is not restricted — see [What this actually looks like in
+use](#what-this-actually-looks-like-in-use).
 
 ```bash
 cp .env.example .env

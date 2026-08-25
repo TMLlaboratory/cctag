@@ -8,17 +8,23 @@ This document explains how cctag works internally (for setup steps, see the [REA
 
 ## 1. What this tool does
 
-**cctag bridges a Slack thread to a Claude Code terminal session running on
+**cctag bridges a Slack thread to a coding-agent terminal session running on
 your own machine.**
 
 Anthropic's official "Claude Tag" (`@Claude` in Slack) runs Claude Code in a
 sandbox Anthropic hosts in the cloud. It can't reach your local files or
 network (internal servers, GPUs, local model endpoints, etc.) directly.
 
-cctag does the opposite: it remote-controls **a Claude Code instance you
-are actually running on your own PC right now**. Start `claude` in your
-terminal, and you can talk to that exact session from Slack — send it
+cctag does the opposite: it remote-controls **a coding-agent session you
+are actually running on your own PC right now**. Start `claude` (or `codex`)
+in your terminal, and you can talk to that exact session from Slack — send it
 instructions and get its replies back.
+
+This walkthrough uses Claude Code throughout, because the details that are
+worth explaining — transcript layout, how a pending question is detected,
+Plan Mode — are its own. Codex CLI is supported the same way, via a
+per-pane driver chosen from what herdr reports is running; see the agent
+support table in the [README](../README.md) for what differs.
 
 ```
 Slack thread (@cctag)
@@ -100,7 +106,16 @@ how cctag chooses to use it.
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
-   whatever `herdr agent list` finds
+   whatever `herdr agent list` finds — Claude Code and Codex CLI instances
+   alike
+
+   "Owner only" is not simply a narrowed permission. **The Spoke runs on the
+   owner's own machine, so `connect` is choosing which of your own panes to
+   expose to this thread.** Nobody else can run it because nobody else's panes
+   are there — it is less an access rule than the shape of the thing. Once
+   paired, anyone in the thread can talk to it (see "What this actually looks
+   like in use" in the [README](../README.md)) — so what is restricted is
+   *deciding what to attach*, not *using it*.
 2. Pick one → that thread (channel + thread_ts) and the chosen pane_id
    are recorded as a "pairing" (one thread per pane at a time)
 3. In a paired thread, sending **`@cctag <message>`**:
