@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePositiveNumber } from "./config.js";
+import {
+  CONFIG_TEMPLATE,
+  REQUIRED_ENV_KEYS,
+  assertExplicitEnvFileExists,
+  parsePositiveNumber,
+  resolveEnvFile,
+} from "./config.js";
 
 function withEnv(value: string | undefined, run: () => void): void {
   const key = "CCTAG_TEST_LIMIT";
@@ -96,4 +102,67 @@ test("values inside the domain still pass, and an unset var still falls back", (
   );
   withEnv("10", () => assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 10, { max: 1024 }), 10));
   withEnv(undefined, () => assert.equal(parsePositiveNumber("CCTAG_TEST_LIMIT", 8765, { min: 1, max: 65_535 }), 8765));
+});
+
+test("resolveEnvFile reads the first match: path 1 beats path 2 beats path 3", () => {
+  const existsEverywhere = () => true;
+  const existsNowhere = () => false;
+
+  // All three exist — path 1 (CCTAG_ENV_FILE) wins.
+  assert.equal(resolveEnvFile(["/a", "/b", "/c"], existsEverywhere), "/a");
+  // Path 1 unset (undefined, same as CCTAG_ENV_FILE not being set) — path 2 wins.
+  assert.equal(resolveEnvFile([undefined, "/b", "/c"], existsEverywhere), "/b");
+  // Only path 3 exists.
+  assert.equal(
+    resolveEnvFile(["/a", "/b", "/c"], (p) => p === "/c"),
+    "/c",
+  );
+  // Path 1 is set but the file doesn't exist — falls through to path 2, not
+  // an error. True of this generic, candidate-agnostic resolver in
+  // isolation; the real CCTAG_ENV_FILE call site no longer relies on this
+  // for path 1 specifically — see assertExplicitEnvFileExists below, which
+  // is checked before this function ever runs.
+  assert.equal(
+    resolveEnvFile(["/a", "/b", "/c"], (p) => p !== "/a"),
+    "/b",
+  );
+  // Nothing exists anywhere — not an error, just no match.
+  assert.equal(resolveEnvFile(["/a", "/b", "/c"], existsNowhere), undefined);
+  assert.equal(resolveEnvFile([undefined, undefined, undefined], existsEverywhere), undefined);
+});
+
+test("assertExplicitEnvFileExists is a no-op when CCTAG_ENV_FILE is unset or points at a real file", () => {
+  assert.doesNotThrow(() => assertExplicitEnvFileExists(undefined, () => false));
+  assert.doesNotThrow(() => assertExplicitEnvFileExists("/real", () => true));
+});
+
+test("assertExplicitEnvFileExists treats an empty string the same as unset", () => {
+  // CCTAG_ENV_FILE= is the shell idiom for clearing a variable back to its
+  // default for one invocation; it must fall back to the XDG/cwd defaults
+  // like an unset CCTAG_ENV_FILE, not throw.
+  assert.doesNotThrow(() => assertExplicitEnvFileExists("", () => false));
+});
+
+test("assertExplicitEnvFileExists throws instead of silently falling back when the explicit path is missing", () => {
+  // The failure this guards against: CCTAG_ENV_FILE is typo'd or the file
+  // moved, and the process quietly reads ~/.config/cctag/config.env or
+  // ./.env instead. On a machine running one Spoke per Slack workspace
+  // (each pointed at a different CCTAG_ENV_FILE), that can start an
+  // instance against the wrong workspace's credentials instead of failing
+  // loudly.
+  assert.throws(() => assertExplicitEnvFileExists("/missing", () => false), /CCTAG_ENV_FILE/);
+});
+
+test("the embedded config template stays in sync with every key required() demands", () => {
+  // The template and .env.example will drift apart over time unless
+  // something enforces it — this is that something. A template missing a
+  // required key would crash with "Missing required environment variable"
+  // right after telling the user they were done.
+  for (const key of REQUIRED_ENV_KEYS) {
+    assert.match(
+      CONFIG_TEMPLATE,
+      new RegExp(`^${key}=`, "m"),
+      `CONFIG_TEMPLATE is missing required key ${key}`,
+    );
+  }
 });
