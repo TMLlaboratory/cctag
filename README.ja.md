@@ -15,8 +15,10 @@ Slackのスレッドを、**自分のPCでローカルに動いているコー�
 Slackスレッド (@cctag)
    ⇅ Socket Mode (@slack/bolt) — 公開サーバー不要
 cctagデーモン (Node/TS, 自分のマシン上で動作)
-   ├─ 入力:  herdr pane send-text <pane_id> <text> + Enter
+   ├─ 入力:  herdr agent prompt   <pane_id> <text>   (テキスト＋Enterを1回で)
    ├─ 検知:  herdr agent get      <pane_id>  (idle / working / blocked / done)
+   │         ＋ トランスクリプト自身のターン境界。ターンの終わりを実際に
+   │           決めているのはこちら — 理由は src/settle.ts 参照
    ├─ 読取:  ペアリング中のエージェント自身のセッショントランスクリプト
    │           Claude Code: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
    │           Codex CLI:   ~/.codex/sessions/YYYY/MM/DD/rollout-*-<session-id>.jsonl
@@ -395,7 +397,7 @@ herdr 0.7.5（2026-07-21）から、`terminal_id` はエージェントコマン
 （`agent send-keys` はキー*名*しか受け付けず、自由なテキストは渡せない）。この変更前の
 cctag は `terminal_id` でエージェントを指定し `agent send` で入力を送っていたため、
 herdr ≥ 0.7.5 ではサーバーを再起動しても全コマンドが失敗する。pane を `pane_id` で
-指定し、入力を `pane send-text` で送る現行 cctag に更新すること:
+指定し、入力を `agent prompt` で送る現行 cctag に更新すること:
 
 ```bash
 git fetch origin && git reset --hard origin/main   # `git pull` は不可 — mainの履歴は一度書き換えられている

@@ -15,8 +15,10 @@ Slack to a cloud session — except cctag drives *your own terminal*.
 Slack thread (@cctag)
    ⇅ Socket Mode (@slack/bolt) — no public server required
 cctag daemon (Node/TS, runs on your machine)
-   ├─ inject:  herdr pane send-text <pane_id> <text> + Enter
+   ├─ inject:  herdr agent prompt   <pane_id> <text>   (text + Enter, one call)
    ├─ detect:  herdr agent get      <pane_id>  (idle / working / blocked / done)
+   │           + the transcript's own turn boundary, which is what actually
+   │             decides a turn is over — see src/settle.ts for why
    ├─ read:    the paired agent's own session transcript
    │             Claude Code: ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
    │             Codex CLI:   ~/.codex/sessions/YYYY/MM/DD/rollout-*-<session-id>.jsonl
@@ -453,7 +455,7 @@ target — only a pane id resolves now — and removed `herdr agent send`
 before this addressed agents by `terminal_id` and injected text with
 `agent send`, so on herdr ≥ 0.7.5 every command fails even after a clean server
 restart. Update to the current cctag, which addresses panes by `pane_id` and
-injects text via `pane send-text`:
+submits text with `agent prompt`:
 
 ```bash
 git fetch origin && git reset --hard origin/main   # NOT `git pull` — main history was rewritten once

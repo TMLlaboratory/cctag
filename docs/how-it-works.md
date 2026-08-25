@@ -71,8 +71,13 @@ Claude Codeが動いて自己申告してきたペインだけです。残り（
 ### cctagが安全なのは、この2つを組み合わせて「使わない」選択をしているから
 
 herdr自体はtmuxと同じくらい何でもできるツールですが、**cctagのコードは
-「herdr agent list/agent get で見つかったterminalIdしか扱わない」**という制約を自分で
-課しています。Slackに「pane_idを直接指定して送信」のようなコマンドは実装していません。
+「herdr agent list/agent get で見つかったpane_idしか扱わない」**という制約を自分で
+課しています。Slackに「任意のpane_idを指定して送信」のようなコマンドは実装していません。
+
+（herdr 0.7.5より前は、この指定にterminal_idを使っていました。0.7.5でterminal_idが
+エージェントコマンドのターゲットとして受け付けられなくなったため、pane_idに移行して
+います。ペアリングがpane_idで記録されるのは、CLIを同じペインで再起動しても
+生き延びさせるためでもあります。）
 
 つまり整理すると：
 
@@ -87,15 +92,23 @@ herdr自体はtmuxと同じくらい何でもできるツールですが、**cct
 
 1. **`@cctag connect`**（オーナーのみ実行可）→ `herdr agent list` で見つかった
    Claude Codeインスタンス一覧がSlackのボタン付きメニューとして出てくる
-2. 一覧から1つ選ぶ → そのスレッド（channel + thread_ts）と選んだterminalIdが
-   「ペアリング」として記録される（1terminalにつき同時に1スレッドまで）
+2. 一覧から1つ選ぶ → そのスレッド（channel + thread_ts）と選んだpane_idが
+   「ペアリング」として記録される（1ペインにつき同時に1スレッドまで）
 3. ペアリング済みスレッドで **`@cctag <メッセージ>`** を送ると:
-   - herdrの `agent send` でテキストを、`pane send-keys Enter` でEnterキーを
-     そのターミナルに注入
+   - herdrの `agent prompt` でテキストとEnterを**1回の呼び出しで**注入する。
+     以前はテキスト送信とEnterを別々に送っていたが、Claude Codeがテキストを
+     貼り付けとして扱う処理と競合し、Enterが改行として吸収されてメッセージが
+     未送信のまま残ることがあった。`agent prompt` はこの2つをサーバー側で
+     順序付けるので、その競合が起きない
    - 1.5秒おきに `agent get` でステータス（working/blocked/idle/done）を確認
    - 同時に、Claude Codeのセッションのトランスクリプト（`~/.claude/projects/.../*.jsonl`）を
      増分で読み、アシスタントの返答テキストを集めていく
-   - 完了（idle/done）したら、集めたテキストをまとめてSlackに投稿
+   - **ターンが終わったかどうかは、トランスクリプト自身のターン境界で判定する**
+     （Claude Codeなら`turn_duration`レコード、Codexなら`task_complete`イベント）。
+     herdrの`idle`/`done`だけを見ていたのでは足りない — 残ったバックグラウンドshellの
+     せいで、エージェントがアイドルなのに`working`と報告され続けることがあり、
+     そうなると完了を永久に待ってしまう。詳細は`src/settle.ts`
+   - 完了したら、集めたテキストをまとめてSlackに投稿
 
 ## 5. 選択肢のある質問（AskUserQuestion・許可プロンプト）の仕組み
 

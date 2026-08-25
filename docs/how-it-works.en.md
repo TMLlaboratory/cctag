@@ -77,9 +77,13 @@ shells, etc.) show up in `herdr pane list` but never in `herdr agent list`.
 ### What actually makes cctag safe is choosing not to use that raw power
 
 herdr is just as capable as tmux underneath, but **cctag's code imposes its
-own rule: only ever operate on a `terminalId` that came from `herdr agent
-list`/`agent get`.** There's no Slack command that lets you target a raw
-`pane_id` directly.
+own rule: only ever operate on a `pane_id` that came from `herdr agent
+list`/`agent get`.** There's no Slack command that lets you target an
+arbitrary pane.
+
+(Before herdr 0.7.5 this was a `terminal_id`. 0.7.5 stopped accepting one as
+an agent-command target, hence the move to `pane_id` — which also means a
+pairing survives quitting the CLI and restarting it in the same pane.)
 
 Put together:
 
@@ -97,17 +101,25 @@ how cctag chooses to use it.
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
    whatever `herdr agent list` finds
-2. Pick one → that thread (channel + thread_ts) and the chosen terminalId
-   are recorded as a "pairing" (one thread per terminal at a time)
+2. Pick one → that thread (channel + thread_ts) and the chosen pane_id
+   are recorded as a "pairing" (one thread per pane at a time)
 3. In a paired thread, sending **`@cctag <message>`**:
-   - Injects the text via herdr's `agent send`, then an Enter via
-     `pane send-keys`
+   - Submits the text via herdr's `agent prompt`, which sends the text *and*
+     the Enter in **one call**. Sending them separately raced Claude Code's
+     paste handling: an Enter arriving before the injected text settled got
+     absorbed as a newline, leaving the message unsent. `agent prompt`
+     sequences both server-side, so there is no such race
    - Polls `agent get` every 1.5s for status (working/blocked/idle/done)
    - Meanwhile reads the Claude Code session's transcript
      (`~/.claude/projects/.../*.jsonl`) incrementally, collecting the
      assistant's reply text
-   - Once the turn finishes (idle/done), posts the collected text back to
-     Slack as one message
+   - **Whether the turn is over is decided from the transcript's own turn
+     boundary** (`turn_duration` for Claude Code, the `task_complete` event
+     for Codex). herdr's `idle`/`done` alone is not enough: a lingering
+     background shell can make it report `working` indefinitely while the
+     agent sits idle, and waiting on that never ends. See `src/settle.ts`
+   - Once the turn finishes, posts the collected text back to Slack as one
+     message
 
 ## 5. How multiple-choice prompts (AskUserQuestion, permission menus) work
 
