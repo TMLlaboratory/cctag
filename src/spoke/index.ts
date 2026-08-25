@@ -4,17 +4,15 @@ import WebSocket from "ws";
 import type { AttachmentLimits, IncomingFile } from "../attachments.js";
 import type { SpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
+import { hubSlug, wsUrlFor } from "../hub-url.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
 import { VERSION } from "../version.js";
 import { WsRpc } from "../ws/rpc.js";
+import { acquireSingleInstanceLock } from "./lock.js";
 import { narrowedMaxFileBytes, WsNotifier } from "./notifier.js";
-
-function wsUrlFor(hubUrl: string): string {
-  return hubUrl.replace(/\/+$/, "") + "/spoke";
-}
 
 /**
  * One machine can run multiple Spokes (one per Slack workspace/Hub, via
@@ -24,9 +22,19 @@ function wsUrlFor(hubUrl: string): string {
  * so no extra config is needed for this to just work.
  */
 function pairingStorePathFor(hubUrl: string): string {
-  const safe = hubUrl.replace(/[^a-zA-Z0-9]/g, "-");
-  return join(homedir(), ".cctag", `pairings-${safe}.json`);
+  return join(homedir(), ".cctag", `pairings-${hubSlug(hubUrl)}.json`);
 }
+
+// Liveness detection timings, hand-rolled with plain setTimeout rather than
+// `ws` constructor options (handshakeTimeout etc.): this project ships a
+// Bun-compiled native binary (scripts/build-native.sh), and Bun silently
+// ignores `ws` options it hasn't implemented — measured directly, an
+// unreachable-host connect with handshakeTimeout errors out under Node in 3s
+// but sits there doing nothing under Bun after 8s+. An option that quietly
+// no-ops on the actual ship target isn't a fix.
+const CONNECT_TIMEOUT_MS = 15_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 90_000;
 
 function connectOnce(config: SpokeConfig): Promise<void> {
   const herdr = new HerdrClient(config.herdrBin);
@@ -39,7 +47,78 @@ function connectOnce(config: SpokeConfig): Promise<void> {
       headers: { authorization: `Bearer ${config.spokeToken}` },
     });
 
+    // 1. Connect-hang timeout: if the TCP handshake itself is black-holed,
+    // neither "open" nor "error" nor "close" ever fires and this promise
+    // would hang forever. Under Node, terminate() on a still-CONNECTING
+    // socket forces a synchronous "close" that the handler below resolves
+    // the promise on — but under Bun (the actual ship target), terminate()
+    // on a CONNECTING socket is a silent no-op: no "close", no "error",
+    // nothing (measured directly against an unreachable host). So this
+    // timeout settles the promise itself rather than relying on "close",
+    // and a `timedOut` flag guards against a late "open" starting a second
+    // engine/watcher pair against a connection this function has already
+    // given up on.
+    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const connectTimeout = setTimeout(() => {
+      console.log(`[spoke] connect timed out after ${CONNECT_TIMEOUT_MS / 1000}s, terminating`);
+      timedOut = true;
+      ws.terminate();
+      reject(new Error("connect timed out"));
+    }, CONNECT_TIMEOUT_MS);
+
     ws.on("open", async () => {
+      clearTimeout(connectTimeout);
+      if (timedOut) {
+        // The promise already settled (rejected) above. Getting here means
+        // Bun completed the handshake anyway after terminate() was told to
+        // abort it — close it and stop, same as the registration-failure
+        // path below: two engines polling the same panes from one attempt
+        // that already reported itself failed is exactly what abortAll()
+        // exists to prevent.
+        try {
+          ws.close();
+        } catch {
+          /* already closing */
+        }
+        return;
+      }
+
+      // 2. Heartbeat: the reconnect loop in main() is entirely close-driven
+      // (it only runs once connectOnce's promise settles), and until now
+      // nothing ever made "close" fire on a half-open connection — one where
+      // the TCP path silently stops delivering packets without either side
+      // sending FIN/RST (common behind NAT/proxies/VPN split-tunnels). With
+      // no heartbeat, that connection just sits there forever, believed
+      // alive, delivering nothing. Ping every 30s; if no pong has landed in
+      // the configured window, treat the connection as dead and terminate()
+      // it so the existing reconnect loop actually gets a chance to run.
+      // (Unlike the connect-hang case above, terminate() on an already-OPEN
+      // socket does reliably emit "close" under both Node and Bun — measured
+      // — so this half relies on the close handler below, same as before.)
+      //
+      // A single rescheduled setTimeout, not setInterval: the same reasoning
+      // as the connect timeout above applies to every timer in this
+      // function — hand-rolled, not a `ws`/WebSocket constructor option —
+      // and setInterval doesn't buy anything setTimeout doesn't here, so
+      // there is no reason to reach for the fixed-cadence primitive.
+      let lastPongAt = Date.now();
+      ws.on("pong", () => {
+        lastPongAt = Date.now();
+      });
+      const scheduleHeartbeatCheck = () => {
+        heartbeatTimer = setTimeout(() => {
+          if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+            console.log(`[spoke] no pong in ${PONG_TIMEOUT_MS / 1000}s, terminating`);
+            ws.terminate();
+            return;
+          }
+          ws.ping();
+          scheduleHeartbeatCheck();
+        }, HEARTBEAT_INTERVAL_MS);
+      };
+      scheduleHeartbeatCheck();
+
       const rpc = new WsRpc(ws);
       const notifier = new WsNotifier(rpc);
       // One object, shared by reference with the TurnEngine: registration below
@@ -185,6 +264,7 @@ function connectOnce(config: SpokeConfig): Promise<void> {
         // same panes, which is exactly what abortAll() exists to prevent.
         watcher.stop();
         turnEngine.abortAll();
+        if (heartbeatTimer) clearTimeout(heartbeatTimer);
         try {
           ws.close();
         } catch {
@@ -196,6 +276,11 @@ function connectOnce(config: SpokeConfig): Promise<void> {
     });
 
     ws.on("close", (code, reason) => {
+      // Both liveness timers are scoped to this connection attempt — clear
+      // them here so nothing leaks across reconnects (a stale heartbeat
+      // interval would ping a socket that's already gone).
+      clearTimeout(connectTimeout);
+      if (heartbeatTimer) clearTimeout(heartbeatTimer);
       console.log(`[spoke] disconnected from hub (code ${code}${reason ? `: ${reason}` : ""})`);
       resolve();
     });
@@ -228,6 +313,7 @@ async function main() {
 
   const { loadSpokeConfig } = await import("../config.js");
   const config = loadSpokeConfig();
+  acquireSingleInstanceLock(config.hubUrl);
   console.log(`[spoke] connecting to ${config.hubUrl} as owner ${config.ownerUserId}...`);
 
   let backoffMs = 1_000;
