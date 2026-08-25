@@ -190,22 +190,27 @@ test("an agent coming back inside the grace period resets the wait", async () =>
   try {
     const store = storeWithPairing(dir);
     const { notifier, replies } = fakeNotifier();
+    // One agentless tick, a long stretch with the agent present, then agentless
+    // again at the end. The timings are chosen so the two outcomes are far
+    // apart rather than adjacent: measured from the FIRST spell the pane has
+    // been agentless ~350ms when the watcher stops, well past the 200ms grace;
+    // measured from the second it has been ~50ms, well inside it. An earlier
+    // version of this test put those two answers ~10ms apart and failed
+    // whenever a tick landed on the wrong side of the boundary.
     let calls = 0;
     const herdr = {
       async agentGet() {
         calls += 1;
-        // Agentless, then back, then agentless again: neither spell alone is
-        // long enough to expire, and the wait must not carry over between them.
-        return calls === 2 ? fakeAgent() : null;
+        return calls === 1 || calls >= 7 ? null : fakeAgent();
       },
       async paneExists() {
         return true;
       },
     } as unknown as HerdrClient;
 
-    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 20, 70);
+    const watcher = new BackgroundWatcher(herdr, store, idleEngine, notifier, 50, 200);
     watcher.start();
-    await sleep(150);
+    await sleep(430);
     watcher.stop();
 
     assert.equal(replies.length, 0, "the wait restarted, so nothing should have expired yet");
