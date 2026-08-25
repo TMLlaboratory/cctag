@@ -4,9 +4,9 @@ import { join } from "node:path";
 import Bolt from "@slack/bolt";
 import { WebSocketServer } from "ws";
 import type { IncomingFile } from "../attachments.js";
-import { loadHubConfig } from "../config.js";
 import { TokenStore } from "./tokenStore.js";
 import { WsRpc } from "../ws/rpc.js";
+import { VERSION } from "../version.js";
 import {
   downloadSlackFile,
   formatThreadHistorySinceLastBotPost,
@@ -50,6 +50,13 @@ function tokenStorePath(): string | undefined {
 }
 
 async function runServer(): Promise<void> {
+  // Imported lazily, not at module top level: config.ts searches for and
+  // reads an env file as a side effect the moment it's imported, and a
+  // static import at the top of this file would run that search (and log a
+  // line about it) even for `--version` or the `token` subcommand, neither
+  // of which needs it. See main()'s `--version` check below for the other
+  // half of why this stays dynamic.
+  const { loadHubConfig } = await import("../config.js");
   const config = loadHubConfig();
   const tokenStore = new TokenStore(tokenStorePath());
 
@@ -434,6 +441,14 @@ function runTokenCli(argv: string[]): void {
 }
 
 async function main() {
+  // Checked before anything else, including the `token` subcommand and
+  // config loading (see runServer()'s dynamic import for why that stays
+  // lazy) — printing the version must never run any startup logic.
+  if (process.argv.includes("--version") || process.argv.includes("-v")) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
   const [, , cmd, ...rest] = process.argv;
   if (cmd === "token") {
     runTokenCli(rest);

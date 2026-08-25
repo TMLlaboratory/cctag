@@ -128,6 +128,11 @@ cctagはClaude Tagがやっていることを意図的に取り込もうとし�
   — 自分でSlack appを作る場合（スタンドアロン、またはHub運用者）にのみ必要。Spoke利用者はSlack app
   の認証情報には一切触れない。
 
+各エントリポイント（`cctag`、`cctag-hub`、`cctag-spoke`）は `--version`/`-v` でバージョンを表示して
+終了する。タグ付きリリース（`v*`）では `.github/workflows/release.yml` により macOS/Linux
+（arm64/x64）向けのスタンドアロンバイナリが `bun build --compile` でビルド・公開される —
+そのバイナリを実行するだけならNode.jsのインストールは不要（ソースからビルドする場合は下記参照）。
+
 ### herdrのインストール（macOS向け注意点）
 
 herdrのインストールは**どちらか一方の方法だけ**にすること — Homebrewか[公式インストーラ](https://herdr.dev)

@@ -149,6 +149,12 @@ skip straight there, none of the Slack app setup applies to you.
   app yourself (standalone or Hub operator). Spoke users never touch Slack
   app credentials.
 
+Every entry point (`cctag`, `cctag-hub`, `cctag-spoke`) prints its version
+and exits with `--version`/`-v`. Tagged releases (`v*`) publish standalone
+binaries for macOS and Linux (arm64/x64) via `.github/workflows/release.yml`,
+built with `bun build --compile` — no Node.js install required to run one
+of those binaries, only to build from source as described below.
+
 ### Installing herdr (macOS notes)
 
 Install herdr with **one** method — Homebrew or the [official

@@ -2,12 +2,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 import type { AttachmentLimits, IncomingFile } from "../attachments.js";
-import { loadSpokeConfig } from "../config.js";
+import type { SpokeConfig } from "../config.js";
 import { HerdrClient } from "../herdr/client.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { CommandHandler, stripComposerAttribution, stripMention } from "../commands.js";
 import { BackgroundWatcher } from "../watcher.js";
+import { VERSION } from "../version.js";
 import { WsRpc } from "../ws/rpc.js";
 import { narrowedMaxFileBytes, WsNotifier } from "./notifier.js";
 
@@ -27,7 +28,7 @@ function pairingStorePathFor(hubUrl: string): string {
   return join(homedir(), ".cctag", `pairings-${safe}.json`);
 }
 
-function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> {
+function connectOnce(config: SpokeConfig): Promise<void> {
   const herdr = new HerdrClient(config.herdrBin);
   const pairingStore = new PairingStore(pairingStorePathFor(config.hubUrl));
 
@@ -149,6 +150,12 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
         const result = await rpc.call<{ ok: boolean; maxFileBytes?: number }>("register", {
           ownerUserId: config.ownerUserId,
           pairings: pairingStore.list().map((p) => ({ channel: p.channel, threadTs: p.threadTs })),
+          // Hub-side handling already tolerates unknown fields, so this is
+          // safe against an older Hub. Purely diagnostic: a recent incident
+          // investigation had no way to tell which Spoke build was talking
+          // to the Hub and had to reconstruct the timeline from unified log
+          // DNS resolution instead of a version string in a log line.
+          version: VERSION,
         });
         if (!result.ok) {
           throw new Error(
@@ -206,6 +213,20 @@ function connectOnce(config: ReturnType<typeof loadSpokeConfig>): Promise<void> 
 const STABLE_CONNECTION_MS = 10_000;
 
 async function main() {
+  // Checked before anything else — including the config import below, which
+  // is dynamic specifically so this path never triggers it. config.ts
+  // searches for and reads an env file as a module-level side effect the
+  // moment it's imported, so a static import of it anywhere in this file
+  // would run that search (and log a line about it) on every `--version`
+  // invocation too. Importing it lazily, only once we know we're not just
+  // printing the version, keeps `--version` from touching config loading,
+  // the Hub connection, or anything else in this file.
+  if (process.argv.includes("--version") || process.argv.includes("-v")) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
+  const { loadSpokeConfig } = await import("../config.js");
   const config = loadSpokeConfig();
   console.log(`[spoke] connecting to ${config.hubUrl} as owner ${config.ownerUserId}...`);
 
