@@ -116,12 +116,10 @@ read`, not from the transcript. See `src/agents/claude/prompts.ts` and
 Where a feature isn't supported, cctag replies saying so rather than failing
 silently — e.g. `@cctag mode plan` on a Codex-paired thread.
 
-For a fuller walkthrough of the mechanism (aimed at lab students, written
-before Codex support landed but still accurate for Claude Code's internals)
-— Hub/Spoke roles, how herdr's agent registry differs from raw pane access,
-the AskUserQuestion detection quirk, multi-workspace caveats — see
-[docs/how-it-works.md](docs/how-it-works.md) (日本語) /
-[docs/how-it-works.en.md](docs/how-it-works.en.md) (English).
+For a fuller walkthrough of the mechanism — Hub/Spoke roles, how herdr's
+agent registry differs from raw pane access, why a turn ending is decided
+from the transcript, the AskUserQuestion detection quirk, how attachments are
+authorized — see [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Two ways to run cctag
 
@@ -139,9 +137,9 @@ the AskUserQuestion detection quirk, multi-workspace caveats — see
   instances (Claude Code, Codex CLI, or both), exactly like standalone mode
   does.
 
-**If someone else already runs a Hub for your lab/team** (e.g. your
-supervisor), you only need [For Spoke users](#for-spoke-users) below —
-skip straight there, none of the Slack app setup applies to you.
+**If someone else already runs a Hub you can join**, you only need [For Spoke
+users](#for-spoke-users) below — skip straight there, none of the Slack app
+setup applies to you.
 
 ## Requirements
 

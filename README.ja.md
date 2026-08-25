@@ -101,11 +101,9 @@ cctagはClaude Tagがやっていることを意図的に取り込もうとし�
 対応していない機能については、黙って失敗するのではなく、cctagがその旨を返信する
 （例: Codexとペアリングされたスレッドでの`@cctag mode plan`）。
 
-仕組みについてのより詳しい解説（研究室の学生向け、Codex対応前に書かれたものだが Claude Code の
-内部仕組みについては引き続き正確）— Hub/Spokeの役割分担、herdrのエージェント登録が
-生のペインアクセスとどう違うか、AskUserQuestion検知の癖、マルチワークスペース時の注意点など — は
-[docs/how-it-works.md](docs/how-it-works.md)（日本語）/
-[docs/how-it-works.en.md](docs/how-it-works.en.md)（English）参照。
+仕組みについてのより詳しい解説 — Hub/Spokeの役割分担、herdrのエージェント登録が生のペイン
+アクセスとどう違うか、ターンの終わりをなぜトランスクリプトで判定するのか、AskUserQuestion検知の癖、
+添付ファイルの認可の流れなど — は [docs/how-it-works.md](docs/how-it-works.md) 参照（英語）。
 
 ## cctagの2つの動かし方
 
@@ -120,7 +118,7 @@ cctagはClaude Tagがやっていることを意図的に取り込もうとし�
   スタンドアロンモードと全く同じように、その人自身のローカルなherdr管理下のインスタンス
   （Claude Code、Codex CLI、あるいはその両方）を操作する。
 
-**すでに誰か（指導教員など）が研究室・チーム用のHubを運用している場合**は、下記の
+**すでに誰かが運用しているHubに参加できる場合**は、下記の
 [Spoke利用者向け](#spoke利用者向け)だけで十分 — そこまで読み飛ばして構わない。Slack app関連の
 セットアップは一切不要。
 

@@ -8,7 +8,7 @@ import { dirname, join, normalize } from "node:path";
 // else runs under. Documentation drifts silently — nothing fails when it does,
 // which is exactly why it needs a test rather than a convention.
 
-const DOCS = ["README.md", "README.ja.md", "docs/how-it-works.md", "docs/how-it-works.en.md", "CHANGELOG.md"];
+const DOCS = ["README.md", "README.ja.md", "docs/how-it-works.md", "CHANGELOG.md"];
 
 function read(path: string): string {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -40,14 +40,18 @@ test("the two READMEs stay structurally parallel", () => {
   );
 });
 
-test("the two how-it-works translations stay structurally parallel", () => {
-  // Same reason as the READMEs, and the same failure already happened here:
-  // this pair described `@cctag connect` as connecting to "a Claude Code
-  // instance" months after Codex support landed, and the correction had to be
-  // made in two places at once. 21 headings each today.
-  const ja = headingShape(read("docs/how-it-works.md"));
-  const en = headingShape(read("docs/how-it-works.en.md"));
-  assert.deepEqual(en, ja, "a section exists in one how-it-works translation but not the other");
+test("only the README is bilingual", () => {
+  // The language rule this repo settled on: the README is the landing page and
+  // gets both, everything else is English. A second `.ja.md`/`.en.md` under
+  // docs/ is how the READMEs' ~90-line drift started, and doubling the
+  // documents doubles the surface that has to be corrected in lockstep — as
+  // how-it-works proved, having described `connect` as Claude-Code-only in two
+  // files at once for months.
+  //
+  // Japanese material aimed at the lab lives in the private handbook repos
+  // instead, where it can name the actual Hub and the token-request process.
+  const stray = DOCS.filter((doc) => doc.startsWith("docs/") && /\.(ja|en)\.md$/.test(doc));
+  assert.deepEqual(stray, [], "docs/ is English-only — a translation belongs in the lab handbook, not here");
 });
 
 test("every internal documentation link resolves", () => {
