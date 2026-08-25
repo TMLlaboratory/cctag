@@ -32,6 +32,24 @@ export function resolveEnvFile(candidates: Array<string | undefined>, exists: (p
   return undefined;
 }
 
+/**
+ * CCTAG_ENV_FILE is the one candidate someone sets on purpose, expecting
+ * exactly that file to be read — unlike the XDG default / cwd fallback,
+ * which are ambient (raised in review on PR #6). Falling back past a typo'd
+ * or moved CCTAG_ENV_FILE would be worse than erroring: on a machine
+ * running one Spoke per Slack workspace via CCTAG_ENV_FILE (see the
+ * search-order comment below), that fallback can silently start an instance
+ * against the wrong workspace's credentials instead of failing loudly.
+ */
+export function assertExplicitEnvFileExists(path: string | undefined, exists: (path: string) => boolean): void {
+  if (path !== undefined && !exists(path)) {
+    throw new Error(
+      `CCTAG_ENV_FILE is set to "${path}", but that file does not exist. ` +
+        "Fix the path, or unset CCTAG_ENV_FILE to fall back to the XDG config / cwd defaults.",
+    );
+  }
+}
+
 // Fixed, cwd-independent search order — read the FIRST match only. This
 // exists so a single-binary install finds its config without either failing
 // outright or silently reading an unrelated `.env` from whatever directory
@@ -40,7 +58,9 @@ export function resolveEnvFile(candidates: Array<string | undefined>, exists: (p
 // 1. CCTAG_ENV_FILE, if set — unchanged meaning: the explicit override that
 //    lets one machine run multiple instances from a single checkout (see
 //    the namespacing this enables at src/hub/index.ts's tokenStorePath and
-//    src/spoke/index.ts's pairingStorePathFor).
+//    src/spoke/index.ts's pairingStorePathFor). Unlike paths 2 and 3, a set
+//    CCTAG_ENV_FILE that doesn't exist is an error, not a fallthrough — see
+//    assertExplicitEnvFileExists above.
 // 2. ~/.config/cctag/config.env (XDG_CONFIG_HOME-aware) — the new
 //    single-instance default for a binary-distributed install.
 // 3. ./.env (relative to cwd) — today's default, unchanged: this is what
@@ -54,6 +74,7 @@ const cctagEnvFile = process.env.CCTAG_ENV_FILE;
 const xdgConfigPath = DEFAULT_CONFIG_PATH;
 const cwdEnvPath = join(process.cwd(), ".env");
 
+assertExplicitEnvFileExists(cctagEnvFile, existsSync);
 const loadedEnvPath = resolveEnvFile([cctagEnvFile, xdgConfigPath, cwdEnvPath], existsSync);
 if (loadedEnvPath) {
   loadDotenv({ path: loadedEnvPath });
