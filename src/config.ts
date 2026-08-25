@@ -40,9 +40,16 @@ export function resolveEnvFile(candidates: Array<string | undefined>, exists: (p
  * running one Spoke per Slack workspace via CCTAG_ENV_FILE (see the
  * search-order comment below), that fallback can silently start an instance
  * against the wrong workspace's credentials instead of failing loudly.
+ *
+ * Treats an empty string the same as unset (`path &&`, not `path !==
+ * undefined`): `CCTAG_ENV_FILE=` is the shell idiom for clearing a variable
+ * back to its default for one invocation, and every other candidate in this
+ * file (see resolveEnvFile above) already treats an empty value as absent.
+ * Without this, that idiom would throw instead of falling back, the one
+ * case this function exists to NOT do.
  */
 export function assertExplicitEnvFileExists(path: string | undefined, exists: (path: string) => boolean): void {
-  if (path !== undefined && !exists(path)) {
+  if (path && !exists(path)) {
     throw new Error(
       `CCTAG_ENV_FILE is set to "${path}", but that file does not exist. ` +
         "Fix the path, or unset CCTAG_ENV_FILE to fall back to the XDG config / cwd defaults.",

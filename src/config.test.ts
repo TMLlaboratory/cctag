@@ -136,6 +136,13 @@ test("assertExplicitEnvFileExists is a no-op when CCTAG_ENV_FILE is unset or poi
   assert.doesNotThrow(() => assertExplicitEnvFileExists("/real", () => true));
 });
 
+test("assertExplicitEnvFileExists treats an empty string the same as unset", () => {
+  // CCTAG_ENV_FILE= is the shell idiom for clearing a variable back to its
+  // default for one invocation; it must fall back to the XDG/cwd defaults
+  // like an unset CCTAG_ENV_FILE, not throw.
+  assert.doesNotThrow(() => assertExplicitEnvFileExists("", () => false));
+});
+
 test("assertExplicitEnvFileExists throws instead of silently falling back when the explicit path is missing", () => {
   // The failure this guards against: CCTAG_ENV_FILE is typo'd or the file
   // moved, and the process quietly reads ~/.config/cctag/config.env or
