@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePositiveNumber } from "./config.js";
+import { hubSlug, parsePositiveNumber } from "./config.js";
+
+test("hubSlug ignores a trailing slash, matching wsUrlFor's own normalization", () => {
+  // https://hub and https://hub/ are the same Hub; they must share one
+  // lock file and one pairing store, or two Spokes pointed at the "same"
+  // Hub (one with a trailing slash, one without) would fail to see each
+  // other and reproduce the fight-forever bug this namespacing prevents.
+  assert.equal(hubSlug("https://hub"), hubSlug("https://hub/"));
+  assert.equal(hubSlug("https://hub///"), hubSlug("https://hub"));
+});
 
 function withEnv(value: string | undefined, run: () => void): void {
   const key = "CCTAG_TEST_LIMIT";
