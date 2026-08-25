@@ -203,6 +203,32 @@ export function permissionBlocks(paneId: string, promptId: number, menu: Permiss
   return blocks;
 }
 
+/**
+ * A question dialog cctag could not read, shown without any answer buttons.
+ *
+ * The parse-failure fallback below offers ✅/❌ because an unreadable
+ * *permission* menu still accepts y/n. A question does not: its options are a
+ * numbered — often multi-select — list, where `y` means nothing and can toggle
+ * or submit a choice nobody made. So this path shows the screen and asks for a
+ * keyboard answer instead of guessing. cctag notices the answer either way —
+ * the pane leaves `blocked`, and the poll loop updates this message to say it
+ * was answered at the terminal.
+ */
+export function unreadableQuestionBlocks(rawSnippet: string) {
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          "⚠️ 質問が表示されていますが、選択肢を読み取れませんでした。" +
+          "誤ったキーを送らないよう、ボタンは出していません — *ターミナルで直接回答してください*。",
+      },
+    },
+    { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(0, 2900) + "\n```" } },
+  ];
+}
+
 export function permissionParseFailureBlocks(paneId: string, promptId: number, rawSnippet: string) {
   return [
     { type: "section", text: { type: "mrkdwn", text: "⚠️ 許可リクエスト（メニューを解析できませんでした）" } },

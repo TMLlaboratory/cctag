@@ -5,6 +5,7 @@ import {
   findPlanFeedbackOption,
   MODE_ALIASES,
   MODE_RING,
+  looksLikeQuestionScreen,
   parseAskUserQuestionPane,
   parseClaudeStartupPrompt,
   parseCurrentMode,
@@ -114,6 +115,7 @@ export const claudeDriver: AgentDriver = {
   },
 
   parseStartupPrompt: parseClaudeStartupPrompt,
+  looksLikeQuestionScreen,
 
   parseBlockedPane(paneText): BlockedPrompt {
     // Whichever dialog sits lowest on the screen is the live one — a read wide

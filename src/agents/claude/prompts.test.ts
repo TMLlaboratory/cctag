@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAskUserQuestionPane, parsePreviewQuestionPane, previewAnchorIndex } from "./prompts.js";
+import {
+  looksLikeQuestionScreen,
+  parseAskUserQuestionPane,
+  parsePreviewQuestionPane,
+  previewAnchorIndex,
+} from "./prompts.js";
 import { claudeDriver } from "./driver.js";
 
 // Fixtures taken from a real pane. A two-question AskUserQuestion was raised on
@@ -397,4 +402,162 @@ test("the preview renderer's own unnumbered chat row still anchors it", () => {
   assert.equal(prompt.kind, "question");
   if (prompt.kind !== "question") return;
   assert.deepEqual(prompt.info.options.map((o) => o.label), PREVIEW_LABELS);
+});
+
+// --- the context snippet's reach, and answering an unreadable screen --------
+
+test("a plan prompt's snippet stops at the rule, not eight lines up", () => {
+  // Taken from a live paired pane. The reach-back is eight lines from the first
+  // option, which is right for a permission menu — its subject sits just above
+  // the options — but a plan approval has only its question line, so the reach
+  // crossed the full-width rule and pasted the agent's previous output into the
+  // Slack code block. What the user saw began mid-sentence in an unrelated
+  // analysis section and read as a garbled prompt.
+  const pane = [
+    "   F3. $\\tau$ の非同定性は rs-ecoc でも同じ壁",
+    "",
+    "   - ecoc_reliability_en.tex L1180–1182: 雑音分散は \"cannot be uniquely estimated from a trained",
+    "     classifier's outputs on real data\"                    ↓",
+    "  " + "─".repeat(120),
+    "   Claude has written up a plan and is ready to execute. Would you like to proceed?",
+    "",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+    "     3. Tell Claude what to change",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.equal(prompt.isPlanPrompt, true);
+  const snippet = prompt.menu?.snippet ?? "";
+  assert.ok(snippet.startsWith("Claude has written up a plan"), `snippet began with: ${snippet.slice(0, 60)}`);
+  assert.ok(!snippet.includes("非同定性"), "the agent's previous output must not be pasted into the prompt");
+  assert.ok(!snippet.includes("─────"), "nor the rule that bounds the prompt region");
+});
+
+test("a permission menu with no rule above it keeps its context", () => {
+  // The other direction, and the reason the reach exists at all: the command
+  // being asked about is what makes a permission prompt answerable.
+  const pane = [
+    "  Bash command",
+    "",
+    "  rm -rf /tmp/scratch-dir",
+    "  Delete the scratch directory",
+    "",
+    "  Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.ok(prompt.menu?.snippet.includes("rm -rf /tmp/scratch-dir"), "the command must survive");
+});
+
+test("a blank line and a short dash run do not cut the context short", () => {
+  // The pitfall the boundary regex is deliberately stricter than RULE_LINE_RE
+  // for: that one also matches whitespace-only lines, so reusing it here would
+  // have truncated every snippet at the first blank line above the options.
+  const pane = [
+    "  Bash command",
+    "",
+    "  git commit -m 'wip'",
+    "  ---",
+    "",
+    "  Do you want to proceed?",
+    "❯ 1. Yes",
+    "  2. No",
+  ].join("\n");
+
+  const prompt = claudeDriver.parseBlockedPane(pane);
+  assert.equal(prompt.kind, "permission");
+  if (prompt.kind !== "permission") return;
+  assert.ok(prompt.menu?.snippet.includes("git commit"), "a blank line is not a region boundary");
+});
+
+test("a question screen is recognizable even when its options cannot be read", () => {
+  // Production incident: the second question of a three-question dialog — the
+  // multi-select one — failed to parse, fell through to the permission branch,
+  // and was offered ✅/❌ buttons that sent a bare `y` into a checkbox list.
+  // Either marker alone has to be enough, since whatever broke the option
+  // parsing may well have broken the rest of the shape too.
+  assert.equal(looksLikeQuestionScreen(["  3. Type something.", "garbled"].join("\n")), true);
+  assert.equal(looksLikeQuestionScreen("←  ☐ 本稿の方針  ☐ 別論文の主軸  ✔ Submit  →"), true);
+
+  // A permission menu must NOT be mistaken for one — that path still offers
+  // y/n, which an unreadable permission prompt does accept.
+  assert.equal(looksLikeQuestionScreen(["  Do you want to proceed?", "❯ 1. Yes", "  2. No"].join("\n")), false);
+  assert.equal(looksLikeQuestionScreen(""), false);
+});
+
+// --- multi-select, captured from a live pane -------------------------------
+
+/**
+ * A real multi-select AskUserQuestion as Claude Code 2.1.241 draws it, captured
+ * from a paired pane. The single-select fixtures above were taken the same way;
+ * this shape never was, and was written from assumption instead — which is how
+ * it went wrong.
+ *
+ * The load-bearing difference is row 5: a multi-select dialog puts a checkbox on
+ * EVERY row, the free-text one included, so it reads `5. [ ] Type something`
+ * rather than `4. Type something.`. That row is the anchor both this parser and
+ * classicAnchorIndex find the dialog by.
+ */
+const LIVE_MULTI_SELECT = [
+  "←  ☐ 次の一手  ✔ Submit  →",
+  "",
+  "│ 複数選択の描画を実物で確認できたとして、この件はどこまで進めますか。該当するものを選んでください（複数可）。",
+  "",
+  "❯ 1. [ ] パーサを実物に合わせて直す",
+  "  撮れた実画面をフィクスチャとしてテストに固定し、複数選択の解析を現行の描画に合わせて修正します。根本原因が実物で確認できた場合のみ意味があります。",
+  "  2. [ ] PR #10をマージしてデプロイ",
+  "  「読めない質問には答えない」「画面をログに残す」「snippetを罫線で止める」の3件を本番に反映します。Spokeの再起動を伴います。",
+  "  3. [ ] CIをpush（workflowスコープ）",
+  "  gh auth refresh -s workflow を実行いただければ、検証済みのCIコミットをpushしてPRを立てます。",
+  "  4. [ ] 飯田さんに共有",
+  "  複数選択の描画が未検証だった件と今回の原因を、PR #10のコメントかIssueとして共同開発者に共有します。",
+  "  5. [ ] Type something",
+  "     Submit",
+  "─".repeat(213),
+  "  6. Chat about this",
+].join("\n");
+
+test("a real multi-select dialog is read as a question, not as an unparseable menu", () => {
+  // Production incident: this exact shape anchored on nothing, so the question
+  // parser returned null, the driver fell through to the permission branch,
+  // that could not read it either, and Slack got "menu could not be parsed" —
+  // then a bare `y` was sent into the checkbox list. Single-select was
+  // unaffected, which is why question 1 of the same dialog worked and
+  // question 2 did not.
+  const prompt = claudeDriver.parseBlockedPane(LIVE_MULTI_SELECT);
+  assert.equal(prompt.kind, "question", "a checkbox on the free-text row must not hide the dialog");
+});
+
+test("the captured dialog's options, question and multiSelect flag all come through", () => {
+  const info = parseAskUserQuestionPane(LIVE_MULTI_SELECT);
+  assert.ok(info);
+  assert.equal(info.multiSelect, true);
+  assert.deepEqual(
+    info.options.map((o) => o.label),
+    ["パーサを実物に合わせて直す", "PR #10をマージしてデプロイ", "CIをpush（workflowスコープ）", "飯田さんに共有"],
+    "the free-text and Chat rows are not options",
+  );
+  assert.ok(info.options.every((o) => (o.description ?? "").length > 0), "each option keeps its description");
+});
+
+test("the gutter bar the TUI draws beside a question is not part of the question", () => {
+  // `│ 複数選択の描画を…` — chrome, but on the same line as the text, so trimming
+  // alone left it in the Slack message.
+  const info = parseAskUserQuestionPane(LIVE_MULTI_SELECT);
+  assert.ok(info?.question.startsWith("複数選択の描画を"), `question was: ${info?.question}`);
+  assert.ok(!info?.question.includes("│"));
+});
+
+test("a single-select free-text row still anchors, checkbox or not", () => {
+  // The optional checkbox must not make the period-less form mandatory: the
+  // classic single-select rendering has neither checkbox nor bar.
+  const classic = ["☐ 実装方針", "", "どの方式で？", "", "❯ 1. A方式", "  2. B方式", "  3. Type something."].join("\n");
+  assert.equal(parseAskUserQuestionPane(classic)?.options.length, 2);
 });
