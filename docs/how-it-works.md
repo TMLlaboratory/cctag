@@ -1,358 +1,440 @@
-🌐 **日本語** | [English](how-it-works.en.md)
+This document explains how cctag works internally (for setup steps, see the [README](../README.md)).
 
----
+# How cctag works
 
-このドキュメントは cctag の内部の仕組みを説明するものです（セットアップ手順は [README](../README.md) 参照）。
+## 1. What this tool does
 
-# cctagの仕組み
+**cctag bridges a Slack thread to a coding-agent terminal session running on
+your own machine.**
 
-## 1. これは何をするツールか
+It remote-controls **a coding-agent session you are actually running on your
+own PC right now**. Start `claude` (or `codex`) in your terminal, and you can
+talk to that exact session from Slack — send it instructions and get its
+replies back. Nothing is copied to a sandbox, so your local files and network
+(internal servers, GPUs, local model endpoints) are reachable as they are.
 
-**cctag は、Slackのスレッドから、自分のPCで動いている Claude Code のターミナルセッションを
-操作するためのブリッジです。**
+How that compares to tools that start a fresh session instead — and where
+those are the better choice — is [comparison.md](comparison.md). This document
+only explains the mechanism.
 
-Anthropic公式の「Claude Tag」（Slack上の `@Claude`）は、Anthropicがクラウド上に用意した
-サンドボックス環境でClaude Codeを動かします。ローカルのファイルやネットワーク（社内・学内サーバー、
-GPU、ローカルのモデルエンドポイントなど）には直接アクセスできません。
-
-cctagはその逆で、**あなたが自分のPCで今まさに動かしているClaude Codeインスタンス**を
-Slackから遠隔操作します。手元のターミナルで `claude` を起動しておけば、Slackから
-話しかけるだけでそのセッションに指示を送り、返信を受け取れます。
+This walkthrough uses Claude Code throughout, because the details that are
+worth explaining — transcript layout, how a pending question is detected,
+Plan Mode — are its own. Codex CLI is supported the same way, via a
+per-pane driver chosen from what herdr reports is running; see the agent
+support table in the [README](../README.md) for what differs.
 
 ```
-Slackスレッド (@cctag)
+Slack thread (@cctag)
         ↕
-   cctag（Hub / Spoke）
+   cctag (Hub / Spoke)
         ↕
       herdr
         ↕
-   Claude Code（あなたのPC上）
+   Claude Code (on your PC)
 ```
 
-## 2. 全体構成：Hub と Spoke
+## 2. Overall shape: Hub and Spoke
 
-複数人が1つの `@cctag` を共有できるように、cctagは2つの役割に分かれています。
+So that multiple people can share a single `@cctag`, cctag splits into two
+roles.
 
-| | 役割 | 動く場所 | できること |
+| | Role | Runs on | Can do |
 |---|---|---|---|
-| **Hub** | Slackとの唯一の窓口 | 常時起動できる小さなサーバー（例: クラウドの小型VM） | Slackのメッセージを受け取り、正しい人のSpokeに転送するだけ。**Claude Codeやherdrには一切触れない** |
-| **Spoke** | 実際にClaude Codeを操作する本体 | **あなた自身のPC** | herdr経由で自分のPCのClaude Codeにキー入力を送り、出力を読み取ってHub経由でSlackに返す |
-
-重要なのは、**Hubはあなたのターミナルに手が届かない**という点です。Hubのサーバーが
-乗っ取られても、そこにあなたのPCのClaude Codeを操作する力はありません。実際に操作する力を
-持っているのはあなたのPC上で動いているSpokeだけです。だから、自分のPCのClaude Codeを
-Slackから触りたい人は、**全員が自分のPCでSpokeを起動しておく必要があります**。
-
-## 3. herdr との関係：なぜ「起動しているエージェントしか」見えないのか
-
-cctagは直接ターミナルを操作しているのではなく、[herdr](https://herdr.dev) というツール経由で
-操作しています。ここには2つの層があります。
-
-### herdr自体は「どのペインにでも」書き込める
-
-herdrは元々tmuxのようなターミナル多重化ツールで、`pane read`（画面の内容を読む）や
-`pane send-keys`（キー入力を送る）といったコマンドは、**herdrが管理しているペインなら
-何であっても**実行できます。中でClaude Codeが動いていようと、ただのシェルだろうと関係ありません。
-tmuxを直接使っていた頃の内製ブリッジ（cc-slack-bridge v4）はまさにこの生の力を使っていて、
-「決め打ちしたペイン番号に何でも送り込める」という、良くも悪くも自由な作りでした。
-
-### 「エージェント一覧」に載るのは自己申告制
-
-一方で `herdr agent list`（cctagが `@cctag connect` の候補一覧に使っているコマンド）に
-出てくるのは、**Claude Code自身が「私はここで動いています」とherdrに報告したペインだけ**です。
-Claude Codeには起動時に動く「SessionStart フック」が仕込まれていて、これがherdrのソケットに
-「このペインでセッションIDxxxが動いています」と伝えます。この報告が来て初めて、そのペインは
-「エージェント」としてherdrの名簿に載ります。
-
-たとえばherdrが多数のペインを管理していても、`herdr agent list` に出てくるのはその中で
-Claude Codeが動いて自己申告してきたペインだけです。残り（素のシェルなど）は
-`herdr pane list` には出てきますが `herdr agent list` には出てきません。
-
-### cctagが安全なのは、この2つを組み合わせて「使わない」選択をしているから
-
-herdr自体はtmuxと同じくらい何でもできるツールですが、**cctagのコードは
-「herdr agent list/agent get で見つかったterminalIdしか扱わない」**という制約を自分で
-課しています。Slackに「pane_idを直接指定して送信」のようなコマンドは実装していません。
-
-つまり整理すると：
-
-- **herdrの自己申告レジストリ** → 何が「候補」として挙がるかを絞る（Claude Codeが動いているペインだけ）
-- **cctagの実装方針** → 実際に何を操作できるかを絞る（agent list経由で見つけたものだけ）
-
-この2つが揃って初めて、「起動しているClaude Codeエージェントしか触れない・任意のターミナルに
-勝手にTUI操作できない」という安全な挙動になっています。herdrという道具そのものが
-禁止しているわけではなく、道具の使い方（cctagの設計判断）で絞り込んでいる、という理解が正確です。
-
-## 4. `@cctag connect` から実際の会話までの流れ
-
-1. **`@cctag connect`**（オーナーのみ実行可）→ `herdr agent list` で見つかった
-   Claude Codeインスタンス一覧がSlackのボタン付きメニューとして出てくる
-2. 一覧から1つ選ぶ → そのスレッド（channel + thread_ts）と選んだterminalIdが
-   「ペアリング」として記録される（1terminalにつき同時に1スレッドまで）
-3. ペアリング済みスレッドで **`@cctag <メッセージ>`** を送ると:
-   - herdrの `agent send` でテキストを、`pane send-keys Enter` でEnterキーを
-     そのターミナルに注入
-   - 1.5秒おきに `agent get` でステータス（working/blocked/idle/done）を確認
-   - 同時に、Claude Codeのセッションのトランスクリプト（`~/.claude/projects/.../*.jsonl`）を
-     増分で読み、アシスタントの返答テキストを集めていく
-   - 完了（idle/done）したら、集めたテキストをまとめてSlackに投稿
-
-## 5. 選択肢のある質問（AskUserQuestion・許可プロンプト）の仕組み
-
-ここには開発中に判明した重要な落とし穴があります。
-
-**Claude Codeは `AskUserQuestion`（選択式の質問）を、ユーザーが回答するまで
-トランスクリプトに一切書き込みません。** 質問と回答は「回答された瞬間」に
-セットでまとめて記録されます。つまり、質問が表示されている間はトランスクリプトを見ても
-何も分かりません。
-
-なので、質問中や許可待ち（`ツールを実行していいですか？`のようなプロンプト）を検知するには、
-**トランスクリプトではなく `herdr pane read` で画面そのものを読んで**、正規表現でメニューを
-解析するという、より泥臭い方法を使っています。「`N. Type something.`」という行があれば
-AskUserQuestion、なければ許可プロンプト、と区別しています。
-
-回答方法も2種類あります：
-
-- **ボタンをクリック** → 該当する数字キーをそのままherdr経由で送信（実機で確認済み：
-  番号キー1つで選択と確定が同時に行われる。Enterは不要）
-- **スレッドに自由記述で返信** → 画面上の「Type something」の行までカーソルを
-  ↓キーで移動し、テキストを打ち込んでEnter
-
-## 5.5 Slackを介さずに始めた作業の扱い
-
-ここまでの説明は「4. `@cctag connect` から実際の会話までの流れ」で始まる**ターン**の中の話です。
-cctagがトランスクリプトを読んだりステータスを見張ったりするのは、このターンが動いている間だけです。
-
-では、Slackを一切介さず、ターミナル（Claude Codeアプリ）で直接会話を始めた場合はどうなるでしょうか？
-——**何もSlackに投稿されません。** ターンという監視の仕組みそのものが存在しないからです。
-
-これは「ターミナルで長いタスクを始めて、途中でcctagをペアリングする」という使い方では
-不便なので、`src/watcher.ts` の**バックグラウンド監視**が別途これをカバーしています。
-アクティブなターンが無いペアリング済みインスタンスを約7秒おきに巡回し、
-`working` → `idle`/`done` の変化を検出したら、新しく出力されたテキストを
-「🖥️ ターミナル側で応答を検出しました」としてスレッドに投稿します。
-
-過去の会話を再送しないよう、ペアリングを初めて見つけた瞬間（ペアリング直後・
-アクティブターン終了直後・セッションローテーション後）は必ず「現在のトランスクリプト末尾」を
-基準点として記録するだけで、そこから先の新規分だけを追跡します。
-
-では、その「ターミナルで直接始めた作業」がAskUserQuestionや許可プロンプトに
-ぶつかった場合はどうなるでしょうか？　単に`idle`/`done`への変化を待つだけでは、
-誰も答えないプロンプトは永遠に`blocked`のまま——つまり巡回監視は何も気づけません
-（実際、この制約は開発中に発覚し、後述の対応で埋めています）。
-
-そこで監視ループは、`blocked`を検出した時点で単に待つのではなく、
-`TurnEngine.adoptBlockedTerminal()` にそのターミナルを引き継ぎます。これは
-Slack起点のターンが使うのと**全く同じ`pollLoop()`**にこのターミナルを乗せる
-だけの処理で、新規入力は何も送りません（画面にはすでにプロンプトが表示されて
-いるため）。結果として、AskUserQuestion/許可プロンプトのパース・Slackボタン
-投稿・ボタンクリックでの回答・自由記述回答・「ターミナル側で回答済み」検出——
-これらはすべて既存のコードをそのまま再利用でき、Slack起点かターミナル起点かで
-挙動が変わりません。引き継ぎ後は`watcher.ts`側の追跡を止め（`this.watches`から
-削除）、完了時は`TurnEngine`が該当ターンを`turns`から削除するので、次の巡回では
-また新規ペアリングとして正しく再ベースラインされます。
-
-## 5.6 モデルの切り替え
-
-`@cctag model <name>`（例: `model opus`）は、通常の会話ターンとは
-別の専用パスで処理されます。これはClaude Code自身のスラッシュコマンド
-（`/model <name>`）をそのまま送り込むだけのコマンドで、`TurnEngine`の
-ターンとしては扱いません（トランスクリプトに確実に出力が残るとは限らないため）。
-
-代わりに `commands.ts` の `runTuiCommand()` が：
-
-1. スラッシュコマンドをherdr経由で送信・Enterで確定
-2. ステータスをポーリングし、`blocked`（モデル切り替え時の「Switch model? Yes/No」
-   のような確認メニュー）が出たら、既存の許可メニューパーサ（`parsePermissionMenu`）で
-   1番目の選択肢を自動確定（ユーザーが `model` コマンドを打った時点で意図は
-   表明済みのため）
-3. 落ち着いたら（`idle`/`done`）、画面を読んでコマンドの出力をそのままSlackに返信
-
-3のペイン読み取りには注意点があります。TUIの画面末尾には常に固定フッター
-（区切り線・空のプロンプト・区切り線・モデル/コンテキスト/cwd/モード状態行）が
-あり、末尾から数行だけ読むとこのフッターの中に収まってしまい、実際のコマンド
-出力（フッターより上）を取り逃します。そのため大きめにペインを読み、
-モデル/コンテキスト状態行（`ctx ... /rc` という特徴的なパターン）を目印に
-そこから末尾までを切り捨てる、という処理をしています（`stripFooterChrome()`）。
-
-`TurnEngine` には `isBusy()` とは別に `externallyBusy` という集合があり、これらの
-TUIコマンド実行中もターン実行中と同様に「busy」扱いにします。これにより、
-バックグラウンド監視（5.5節）がTUIコマンド実行中の同じインスタンスを
-横取りして監視してしまうことを防いでいます。
-
-## 5.6.1 モードの切り替え（Shift+Tab の4モード）
-
-`@cctag mode <name>`（`manual` / `accept-edits` / `plan` / `auto`）は
-モデル切り替えとは仕組みが異なります。これら4モードには**スラッシュコマンドが存在せず**、
-Claude Code上ではShift+Tabで巡回するしか変更手段がありません。しかも、herdrの
-`pane send-keys shift+tab` は受理されるものの**Claude Codeには何も届きません**。
-実機調査の結果、`pane send-text` で**生のCSI-Zシーケンス（`\x1b[Z`, backtab）**を
-送ると効くことが分かり、`HerdrClient.paneSendText()` として実装しています。
-
-`runModeCommand()` は次の閉ループでモードを合わせます：フッターの状態行
-（`⏸ manual mode on` / `⏵⏵ accept edits on` / `⏸ plan mode on` / `⏵⏵ auto mode on`）から
-現在モードを読み、目標と違えばCSI-Zを1回送って再度読む、を目標一致まで繰り返します。
-「押す回数を事前計算する」のではなく1回ずつ確認する方式なので、リングの順序や
-フッター文言がバージョンで変わっても頑健です。安全策として、(1) 現在モードが読めない
-ときは巡回せず中断（どこに変わるか分からないため）、(2) 最大でもリング1周分しか押さない
-（目標が存在しないビルドでも、1周して開始モードに戻るだけで、別のモードに残らない）
-としています。`@cctag plan` は `mode plan` のショートカットです。
-
-## 5.6.2 Plan Mode の承認・修正フロー
-
-Plan Modeでターンが終わると、Claude Codeは「Here is Claude's plan / ready to
-execute?」という承認プロンプト（permissionメニューの一種）を出します。これを検出すると
-cctagは：
-
-- **プラン全文を`.md`ファイルとして添付**します。プランは `~/.claude/plans/<slug>.md` に
-  書かれており、フッターにパスも表示されますが、ペインが狭いとパスが折り返して切れるため、
-  パースできたパスは「ヒント」に留め、実在しなければ **plansディレクトリの最新更新ファイル**
-  （Claude Codeがプロンプト直前に書く）にフォールバックします（`resolvePlanFile()`）。
-- **承認ボタン**（実行 / auto modeで実行）を出します。
-- **スレッドへの返信で修正を依頼**できます。承認メニューには「Tell Claude what to change」
-  という自由記述オプションがあり、フリーテキスト返信をそこに流し込む（該当番号でカーソル移動→
-  テキスト入力→Enter）と、Plan Modeを維持したままプランが再生成されます。コード実行前に
-  Slack上でプランを詰められる、という流れです（`answerPlanFeedback()`）。
-
-プラン承認プロンプトかどうかの判定は、**アクティブなプロンプト領域（最下部のカーソル行以降）**を
-「Tell Claude what to change」行で走査して行います。こうすることで、(1) 狭いペインで前の選択肢の
-ラベルが折り返して `parsePermissionMenu` の連番スキャンが途中で止まってもオプションを取りこぼさず、
-(2) 過去の解決済みプランがスクロールバックに残していた同じ行（=カーソルより上）を誤検出しない、
-の両方を満たします。なお「Tell Claude what to change」自体はボタンにしません（番号を押しても
-カーソルが動くだけで確定しないため。修正はフリーテキスト返信で受け付けます）。
-
-## 5.7 `@cctag`宛てでないメッセージへの対応
-
-cctagは基本的に、`@cctag`宛てのメッセージの文字列そのものしか見ません。
-同じスレッドで別のSlackボット（`@Claude`など）やチームメイトが投稿した
-コメントは、誰かが手でコピペしない限りcctagには見えません。
-
-`@cctag log [指示]` はこのギャップを埋めるコマンドです。「ログを読んで」
-のような曖昧な自然文判定はせず、Slackの`conversations.replies` APIで
-そのスレッドの実際の履歴を取得し、**cctag自身が最後に投稿したメッセージ**を
-機械的に特定して、それ以降のメッセージだけを対象にします。各メッセージは
-`発言者名: 本文`という形式に整形（人間ならSlack表示名を`users.info`で解決、
-ボットなら`bot_profile.name`/`username`を使用）してから、指示（省略時は
-「上記を踏まえて対応してください」）と合わせて1つのターンとしてClaude Codeに
-渡します。実装は通常のターン（`startTurn()`）をそのまま使うため、途中で
-permissionプロンプトやAskUserQuestionが出ても既存の仕組みがそのまま働きます。
-
-`Notifier`には`getThreadHistorySinceLastBotPost?`が追加されており、
-`getPermalink?`と同じ設計（standalone用は`SlackNotifier`が直接実装、
-Hub–Spoke用は`get_thread_history` RPCでHubが実行してSpokeに返す）です。
-実際の整形処理（`formatThreadHistorySinceLastBotPost`）は`slack/notifier.ts`に
-1箇所だけ実装し、standalone・Hubの両方から再利用しています。
-
-## 5.8 ファイル添付の仕組み（Slack ⇄ エージェント）
-
-### 受信側：なぜ「パスを渡す」だけで画像が伝わるのか
-
-Slackに画像を貼り付けると、それはメッセージの`text`ではなく`files[]`として届きます。
-cctagはこれを`~/.cctag/inbox/<file_id>-<名前>`にダウンロードし、**プロンプト本文の後ろに
-1行1パスで並べる**だけです（`buildPromptWithAttachments()`）。
-
-これで成立するのは、Claude Codeが**プロンプト中の画像パスを自動的に本物の画像添付に
-変換する**からです。実測で確認した挙動は次のとおり：
-
-- テキストからパス文字列が消え、`[Image #N]`プレースホルダに置換される（位置は先頭に移動）
-- 実データは別の`image`ブロック（base64）としてtranscriptに入る
-- 追加で`[Image: source: <path>]`という出所メモのレコードが1件残る
-- `Read`ツールは呼ばれない（追加のツール往復なし）
-- cwd外のパスでも権限プロンプトは出ない（`Read`を経由しないため）
-- 空白や日本語を含むパス（`スクリーンショット 2026-07-27 14.02.33.png`）でもクォートなしで通る
-
-base64をテキストとして流す設計にしなかったのはトークンのためです。2.8MBのPNGで実測すると、
-この方式なら約3,600トークン（Claude Codeが自動でJPEGに再エンコードし縮小する）、
-テキストとして流すと約17万トークン。約50倍の差があり、しかも後者はモデルから画像として
-見えません。
-
-画像以外（PDF・CSVなど）はパスのまま渡り、エージェントが自分の`Read`ツールで開きます。
-
-### 受信側の落とし穴：画像パスを含むプロンプトはEnterが吸収される
-
-`herdr agent prompt`はテキスト注入とEnterをサーバー側で連結しますが、**画像パスを含む
-プロンプトでは送信されずに入力ボックスに残ります**。原因はパス→画像添付の変換が非同期な
-ことで、その最中にEnterが飲まれます。画像以外のパスだけなら即座に送信されるため、これは
-画像固有の問題です（実測: 2.8MBのPNGで変換完了まで500ms〜1000ms）。
-
-既存の「送信されなかったらEnterを再送する」セーフティネット（`0d4c830` / `624389c`）は
-待ち1回・リトライ1回だったため、これを`SUBMIT_RETRIES_WITH_IMAGES`回のループに拡張して
-います。空の入力ボックスへのEnterは無害なno-opなので、多めにリトライする側に倒すのが安全です。
-
-### 送信側：2つの経路
-
-`Notifier.uploadFile?`（base64でバイト列を渡す）を追加し、Plan Modeのプラン添付で使っている
-`uploadTextFile?`と同じ設計（standaloneは`SlackNotifier`が直接、Hub–Spokeは`upload_file`
-RPCでHubが実行）にしています。何を送るかは2経路で決まります：
-
-- **`<cwd>/.cctag/outbox/`** — ターン開始時にディレクトリのスナップショット（名前→`mtime:size`）を
-  取り、終了時に新規・変更されたファイルをアップロードします。**グローバルではなくcwd配下**なのは、
-  複数スレッドが別々のペインにペアリングされていると、共有outboxでは別のスレッドに
-  混ざってしまうからです。アップロード後もファイルは削除しません（ユーザーも書き込める
-  ディレクトリを消費するのは元に戻しにくい驚きになるため）。mtime/size比較があるので
-  同じファイルが再送されることはありません。
-
-  ただしcwd単位でも**同じcwdに2つのペインがある場合は曖昧さが残ります**。そこでoutboxに
-  追加があったときだけ`herdr agent list`でライブcwdを引き、他のペアリングが同じcwdを
-  指していないかを確認します。1つでも該当すれば（または一覧を取得できなければ）outboxの
-  添付を見送り、理由をスレッドに伝えてファイルは残します。transcript検出のほうは
-  そのターン自身のtranscript由来なので曖昧になりません。
-- **transcriptからの検出** — `SendUserFile`の`input.files`。エージェントが「これをユーザーに
-  渡す」と明示的に宣言したものだけなので、種類による絞り込みはしません。`caption`はそのまま
-  添付コメントになります。パスは`input.files`から取り、ペインのcwdを基準に解決します
-  （`tool_result`は絶対パスを含みますが未文書の人間可読形式なので、成否判定にのみ使います）。
-
-  以前は`Write`ツールの`file_path`を画像・SVG・PDFに絞って検出していました。これは
-  「ファイルが変わった」から「これを送れ」を推測する方式で、頼まれていない成果物を投稿し、
-  正当な`.csv`や`.md`を落とす拡張子allowlistを必要とし、しかもBash経由で生成されるファイル
-  （matplotlibのPNGなど）はtranscriptから復元できないため肝心のケースを取りこぼしていました。
-  Codex CLIには対応するツールが無いので、そちらはoutboxが唯一の経路として残っています。
-
-  重要なのは、**`tool_use`だけを見てはいけない**という点です。要求と結果は別レコードで、
-  しかも別のポーリングバッチに分かれて届きます。そして拒否された呼び出しは何も起こしません —
-  要求だけを信じると、人間が拒否したファイルをcctag自身が読み出して送信してしまいます
-  （実測: 拒否は`tool_result`の`is_error: true`として記録されます）。そのため
-  `WrittenFileTracker`が`tool_use_id`で要求と結果を突き合わせ、**成功した呼び出しだけ**を
-  候補にします。
-
-### Hub–Spoke でのファイルの流れと認可
-
-Spokeはbot tokenを持たないため、ダウンロードは必ずHubが行います。Hubはイベントで見た
-ファイルのメタデータを転送しつつ、**どのファイルIDをどのオーナーに渡したか**を記録し
-（`fileOwner`、上限500件）、`fetch_file` RPCはその記録に一致するIDしか処理しません。
-これがないと、任意のファイルIDを指定してbotに見えるすべてのファイルを吸い出せてしまいます。
-ダウンロードURL自体はSpokeに渡さず、HubがSlackから再解決します。
-
-ファイル転送は1つのJSONメッセージで数MBのbase64を運びSlack API往復も含むため、RPCの
-既定タイムアウト（20秒、`chat.postMessage`想定）では足りず、専用に120秒を使います。
-上限（`CCTAG_MAX_FILE_MB` / `CCTAG_MAX_FILE_COUNT`）はSpoke側とHub側の両方で検査します。
-
-なお**HubとSpokeは独立してリリースされる**ため、`upload_file`を知らない古いHubは
-`no handler for ...`を返します。これは転送の失敗とは区別して「Hubの更新が必要」と
-スレッドに1度だけ報告します（`isUnsupportedByRemote()`）。
-
-## 6. 1台のPCで複数のSlackワークスペースに繋ぐ場合
-
-HubはSlackアプリのトークン単位で1ワークスペースに固定されます。別のワークスペースにも
-繋ぎたい場合は、Hubをもう1つ動かし（同じサーバーに同居可能）、自分のPC側でもSpokeを
-もう1つ起動します。
-
-このとき、**2つのSpokeは同じherdrデーモンを見ている**ので、片方のワークスペースで
-ペアリングしたterminalが、もう片方のワークスペースの `connect` 一覧にもそのまま出てきます。
-同じterminalを両方から同時にペアリングすると、キー入力が競合するので避けてください。
-
-## 7. セキュリティ上の注意
-
-- ペアリングされたスレッドに書き込める人は誰でも、フル権限のローカルエージェントに
-  テキストを送信できます。信頼できるメンバーしかいないチャンネルでのみペアリングしてください
-- 許可プロンプト（危険なコマンドの実行確認など）は今もSlackボタンで人間の承認を要求します —
-  勝手に何でも実行されるわけではありません
-- Hub用のトークン（`token issue <name> <ownerUserId>`）は発行時に指定した
-  SlackユーザーIDにしか登録できないよう紐付けられています。とはいえ
-  トークンを持つ人はそのオーナーのペアリング済みスレッドを操作できるため、
-  信頼できる人にしか発行しないこと
-
-## 参考
-
-- ソースコード: https://github.com/TMLlaboratory/cctag
+| **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or herdr itself** |
+| **Spoke** | The thing that actually drives Claude Code | **Your own PC** | Sends keystrokes into your local Claude Code via herdr, reads its output, and relays it back to Slack through the Hub |
+
+The important part: **the Hub has no way to reach your terminal.** Even if
+the Hub's server were compromised, it has no ability to control the Claude
+Code running on your machine — only the Spoke running on your own PC can
+actually do that. So anyone who wants to control their own PC's Claude Code
+from Slack needs to have **their own Spoke running on their own PC**.
+
+## 3. How this relates to herdr: why only "running agents" show up
+
+cctag doesn't drive the terminal directly — it goes through
+[herdr](https://herdr.dev). There are two layers to how that scopes things
+down.
+
+### herdr itself can write to any pane
+
+herdr is fundamentally a tmux-like terminal multiplexer. Commands like
+`pane read` (read the screen) and `pane send-keys` (send keystrokes) work
+on **any pane herdr manages**, whether Claude Code is running in it or it's
+just a plain shell. The in-house bridge that used raw tmux before herdr
+(cc-slack-bridge v4) used exactly this raw power — it could send anything
+to a hardcoded pane number, for better or worse.
+
+### Only self-reported panes show up in the "agent list"
+
+On the other hand, what shows up in `herdr agent list` (the command cctag
+uses to build the `@cctag connect` picker) is **only panes where Claude
+Code itself has told herdr "I'm running here."** Claude Code has a
+`SessionStart` hook that fires on startup and reports to herdr's socket:
+"session ID xxx is running in this pane." Only once that report arrives
+does the pane get listed as an "agent."
+
+So even when herdr is managing many panes, `herdr agent list` shows only
+the ones where Claude Code is running and self-reporting. The rest (plain
+shells, etc.) show up in `herdr pane list` but never in `herdr agent list`.
+
+### What actually makes cctag safe is choosing not to use that raw power
+
+herdr is just as capable as tmux underneath, but **cctag's code imposes its
+own rule: only ever operate on a `pane_id` that came from `herdr agent
+list`/`agent get`.** There's no Slack command that lets you target an
+arbitrary pane.
+
+(Before herdr 0.7.5 this was a `terminal_id`. 0.7.5 stopped accepting one as
+an agent-command target, hence the move to `pane_id` — which also means a
+pairing survives quitting the CLI and restarting it in the same pane.)
+
+Put together:
+
+- **herdr's self-reported registry** narrows down what's even a *candidate*
+  (only panes running Claude Code)
+- **cctag's implementation choice** narrows down what it will actually
+  *operate on* (only things discovered via the agent list)
+
+Both together are what produce the safe behavior of "only touches running
+Claude Code agents, can't freely drive an arbitrary terminal." herdr the
+tool doesn't forbid this on its own — it's a restriction that comes from
+how cctag chooses to use it.
+
+## 4. From `@cctag connect` to an actual conversation
+
+1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
+   whatever `herdr agent list` finds — Claude Code and Codex CLI instances
+   alike
+
+   "Owner only" is not simply a narrowed permission. **The Spoke runs on the
+   owner's own machine, so `connect` is choosing which of your own panes to
+   expose to this thread.** Nobody else can run it because nobody else's panes
+   are there — it is less an access rule than the shape of the thing. Once
+   paired, anyone in the thread can talk to it (see "What this actually looks
+   like in use" in the [README](../README.md)) — so what is restricted is
+   *deciding what to attach*, not *using it*.
+2. Pick one → that thread (channel + thread_ts) and the chosen pane_id
+   are recorded as a "pairing" (one thread per pane at a time)
+3. In a paired thread, sending **`@cctag <message>`**:
+   - Submits the text via herdr's `agent prompt`, which sends the text *and*
+     the Enter in **one call**. Sending them separately raced Claude Code's
+     paste handling: an Enter arriving before the injected text settled got
+     absorbed as a newline, leaving the message unsent. `agent prompt`
+     sequences both server-side, so there is no such race
+   - Polls `agent get` every 1.5s for status (working/blocked/idle/done)
+   - Meanwhile reads the Claude Code session's transcript
+     (`~/.claude/projects/.../*.jsonl`) incrementally, collecting the
+     assistant's reply text
+   - **Whether the turn is over is decided from the transcript's own turn
+     boundary** (`turn_duration` for Claude Code, the `task_complete` event
+     for Codex). herdr's `idle`/`done` alone is not enough: a lingering
+     background shell can make it report `working` indefinitely while the
+     agent sits idle, and waiting on that never ends. See `src/settle.ts`
+   - Once the turn finishes, posts the collected text back to Slack as one
+     message
+
+## 5. How multiple-choice prompts (AskUserQuestion, permission menus) work
+
+This is where a real gotcha turned up during development.
+
+**Claude Code does not write an `AskUserQuestion` (multiple-choice
+question) to its transcript until after it's answered.** The question and
+its answer land together, as a single record, the moment it's answered.
+While the question is still on screen, the transcript shows nothing about
+it at all.
+
+So detecting a pending question or a pending permission prompt (e.g. "Do
+you want to run this tool?") can't use the transcript — it has to **read
+the screen itself via `herdr pane read`** and parse the menu with a regex.
+A line that reads `N. Type something.` means it's an AskUserQuestion menu;
+its absence means it's a permission menu.
+
+There are two ways to answer:
+
+- **Click a button** → sends the matching digit key straight through herdr
+  (confirmed on real hardware: a single digit both selects *and* confirms
+  — no Enter needed)
+- **Reply in the thread with free text** → moves the on-screen cursor down
+  to the "Type something" row with the Down arrow key, types the text, and
+  presses Enter
+
+## 5.5 Work started without going through Slack
+
+Everything in section 4 ("From `@cctag connect` to an actual conversation")
+happens inside a **turn** — cctag only reads the transcript or watches
+status while that turn is running.
+
+So what happens if you start a conversation directly at the terminal
+(Claude Code app), never touching Slack at all? **Nothing gets posted.**
+There's no turn, so there's nothing watching.
+
+That's awkward for a common workflow — start a long task at the terminal,
+pair cctag partway through — so `src/watcher.ts`'s **background watcher**
+covers this separately. It polls every paired instance with no active turn
+roughly every 7 seconds; when one transitions from working to idle/done, it
+posts the newly-produced text to the paired thread, prefixed with 🖥️.
+
+To avoid replaying old history, the very first time it sees a pairing
+(right after pairing, right after an active turn just finished, or after a
+session rotation) it just records the transcript's current end as a
+baseline — it only ever reports what happens after that point.
+
+What if that terminal-driven work instead hits an AskUserQuestion or a
+permission prompt? Just waiting for `idle`/`done` isn't enough — if no one
+answers it, the terminal stays `blocked` forever, and the watcher would
+never notice anything (this exact gap surfaced during development and is
+what the following fix closes).
+
+So instead of waiting, the moment the watcher sees `blocked` it hands that
+terminal off to `TurnEngine.adoptBlockedTerminal()` — putting it on the
+**exact same `pollLoop()`** a Slack-initiated turn uses, sending no new
+input (the prompt is already on screen). That means the AskUserQuestion/
+permission parsing, Slack button posting, button-click and free-text
+answering, and "answered directly at the terminal" detection are all the
+same existing code, whether the turn started from Slack or was discovered
+mid-flight at the terminal. Once handed off, `watcher.ts` stops tracking it
+(removed from `this.watches`); when it finishes, `TurnEngine` removes it
+from `turns`, and the next poll cycle re-baselines it as a fresh pairing.
+
+## 5.6 Switching model
+
+`@cctag model <name>` (e.g. `model opus`) is handled by a separate path
+from a normal conversational turn. It just forwards Claude Code's own slash
+command (`/model <name>`) as-is, and isn't treated as a `TurnEngine` turn
+(its output doesn't reliably land in the session transcript the way an LLM
+reply does).
+
+Instead, `commands.ts`'s `runTuiCommand()`:
+
+1. Sends the slash command via herdr, then confirms it with Enter
+2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
+   confirmation that appears when switching models mid-conversation), the
+   existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
+   first option — asking for the switch already expressed that intent
+3. Once it settles (`idle`/`done`), reads the screen and relays the
+   command's own output back to Slack as-is
+
+Step 3's pane read has a gotcha: the TUI's screen always ends with a fixed
+footer (a separator, an empty prompt, another separator, then
+model/context/cwd/mode status lines). Reading only the last few lines lands
+entirely inside that footer, missing the actual command output above it. So
+cctag reads a larger chunk and cuts everything from the model/context
+status line downward (a distinctive `ctx ... /rc` pattern), then trims the
+separator/padding right above that (`stripFooterChrome()`).
+
+`TurnEngine` has a separate `externallyBusy` set alongside its normal turn
+tracking, so these TUI commands are treated as "busy" the same way an
+active turn is — this keeps the background watcher (section 5.5) from
+trying to watch the same instance a TUI command is currently driving.
+
+## 5.6.1 Switching mode (the four Shift+Tab modes)
+
+`@cctag mode <name>` (`manual` / `accept-edits` / `plan` / `auto`) works
+differently from switching model. These four modes have **no slash
+command** — the only way to change them in Claude Code is cycling with
+Shift+Tab. And herdr's `pane send-keys shift+tab`, though accepted,
+**delivers nothing Claude Code reacts to**. Empirically, sending the raw
+CSI Z sequence (`\x1b[Z`, backtab) via `pane send-text` does work — exposed
+as `HerdrClient.paneSendText()`.
+
+`runModeCommand()` matches the mode with a closed loop: read the current
+mode off the footer status line (`⏸ manual mode on` / `⏵⏵ accept edits on` /
+`⏸ plan mode on` / `⏵⏵ auto mode on`), and while it differs from the target,
+send one CSI Z and re-read — repeating until it matches. Because it checks
+after each press rather than computing a press count up front, it's robust
+to the ring order or footer wording changing across versions. Two
+safeguards: (1) if the current mode can't be read, it refuses to cycle
+(there'd be no way to know where it landed), and (2) it presses at most one
+full ring, so an unavailable target leaves the mode back where it started
+rather than somewhere unpredictable. `@cctag plan` is shorthand for `mode
+plan`.
+
+## 5.6.2 Plan Mode over Slack
+
+When a plan-mode turn finishes, Claude Code shows a "Here is Claude's plan /
+ready to execute?" approval prompt (a kind of permission menu). On detecting
+it, cctag:
+
+- **attaches the full plan as a `.md` file**. The plan is written to
+  `~/.claude/plans/<slug>.md`, and its path shows in the footer — but a
+  narrow pane wraps and truncates that path, so the parsed path is only a
+  hint: if it doesn't resolve to an existing file, cctag falls back to the
+  **most-recently-modified file** in the plans directory (which Claude Code
+  writes right before the prompt) — see `resolvePlanFile()`;
+- posts **approval buttons** (proceed / proceed with auto mode);
+- lets you **reply with changes in the thread**. The approval menu has a
+  "Tell Claude what to change" free-text option; a plain thread reply is fed
+  into it (move the cursor to that option's number, type the feedback,
+  Enter), which regenerates the plan and stays in plan mode — so you can
+  refine the plan from Slack before any code runs (`answerPlanFeedback()`).
+
+Whether a prompt is a plan-approval prompt is decided by scanning only the
+**active prompt region** — from the bottom-most cursor line down — for the
+"Tell Claude what to change" marker. That way it (1) doesn't miss the option
+when a narrow pane wraps an earlier option's label and cuts
+`parsePermissionMenu`'s consecutive-number scan short, and (2) doesn't
+misfire on the same line left in scrollback by an earlier, already-resolved
+plan prompt (which sits above the current cursor). The "Tell Claude what to
+change" option itself isn't rendered as a button — pressing its number only
+moves the cursor without confirming, so changes are taken via free-text
+reply instead.
+
+## 5.7 Catching up on messages cctag wasn't mentioned in
+
+cctag normally only ever sees the literal text of a message that mentions
+it. A review posted by another Slack bot (like `@Claude`) or a teammate
+elsewhere in the same thread is otherwise invisible to it unless someone
+manually copies it into an `@cctag` message.
+
+`@cctag log [instruction]` closes that gap. Rather than guessing intent
+from wording, it looks up the thread's actual history via Slack's
+`conversations.replies` API, mechanically finds **cctag's own last
+message** in that thread, and takes everything posted after it. Each
+message is formatted as `sender: text` (human display names resolved via
+`users.info`, bot names via `bot_profile.name`/`username`), then fed into
+the paired session as one turn — reusing `startTurn()` unchanged, so any
+permission prompt or AskUserQuestion that comes up mid-turn is handled by
+the same existing machinery. With no instruction, it defaults to "act on
+whatever the log contains"; with one, that instruction is appended
+instead. If nothing's been posted since cctag's last message, it says so
+rather than starting a no-op turn.
+
+`Notifier` gains an optional `getThreadHistorySinceLastBotPost?`, mirroring
+`getPermalink?`'s design: `SlackNotifier` implements it directly for
+standalone mode, while Hub–Spoke mode proxies it through a `get_thread_history`
+RPC call the Hub executes (since the Hub is the side holding the real Slack
+client there). The actual formatting logic
+(`formatThreadHistorySinceLastBotPost`) lives once in `slack/notifier.ts`
+and is shared by both paths.
+
+## 5.8 How file attachments work (Slack ⇄ agent)
+
+### Inbound: why handing over a path is enough
+
+An image pasted into Slack arrives in the message's `files[]`, never in its
+`text`. cctag downloads it to `~/.cctag/inbox/<file_id>-<name>` and simply
+appends the paths to the prompt, one per line
+(`buildPromptWithAttachments()`).
+
+That works because **Claude Code converts an image path in a prompt into a real
+image attachment.** Measured behavior:
+
+- the path text is removed and replaced by an `[Image #N]` placeholder (which
+  moves to the front of the text)
+- the bytes land in the transcript as a separate base64 `image` block
+- one extra record is appended noting `[Image: source: <path>]`
+- the `Read` tool is never called — no extra tool round trip
+- a path outside the cwd triggers no permission prompt, precisely because
+  `Read` isn't involved
+- paths containing spaces and non-ASCII (`スクリーンショット 2026-07-27
+  14.02.33.png`) work unquoted
+
+Base64-in-the-prompt was rejected on token grounds. Measured on a 2.8MB PNG:
+~3.6k tokens this way (Claude Code re-encodes it to JPEG and downscales first)
+versus ~170k as text — ~50x — and the text version isn't an image to the model
+at all.
+
+Non-image files (PDF, CSV, ...) stay plain paths for the agent to open with its
+own `Read` tool.
+
+### The inbound catch: an image path swallows the Enter
+
+`herdr agent prompt` sequences the text injection and the Enter server-side, but
+**a prompt carrying an image path doesn't submit — it sits in the input box.**
+The path→attachment conversion is asynchronous and the Enter is absorbed while
+it runs. A prompt with only non-image paths submits immediately, so this is
+specific to images (measured: 500ms–1000ms to convert a 2.8MB PNG).
+
+The existing "resend Enter if nothing was submitted" safety net (`0d4c830` /
+`624389c`) waited once and retried once, so it's now a bounded loop of
+`SUBMIT_RETRIES_WITH_IMAGES` attempts. An Enter into an empty box is a harmless
+no-op, which is why erring toward over-retrying is the safe direction.
+
+### Outbound: two routes
+
+`Notifier.uploadFile?` (bytes as base64) sits alongside the `uploadTextFile?`
+used for plan attachments, with the same shape: standalone goes straight through
+`SlackNotifier`, Hub–Spoke goes through an `upload_file` RPC the Hub executes.
+What gets sent is decided by two routes:
+
+- **`<cwd>/.cctag/outbox/`** — the directory is snapshotted at turn start
+  (name → `mtime:size`) and anything new or changed at turn end is uploaded.
+  Per-cwd rather than global because several threads can be paired to different
+  panes at once, and a shared outbox would post one pane's files into another
+  pane's thread. Uploaded files are left in place — consuming a directory the
+  user also writes to is hard to undo — and the mtime/size comparison keeps an
+  untouched file from being re-sent.
+
+  Per-cwd still leaves an ambiguity when **two panes share one cwd**. So
+  whenever the outbox has additions, cctag asks `herdr agent list` for every
+  pane's live cwd and checks whether another pairing points at the same one. If
+  one does — or if the listing can't be fetched — it skips the outbox, says why
+  in the thread, and leaves the files alone. Transcript detection is unaffected:
+  those paths come from this turn's own transcript.
+- **Transcript detection** — `SendUserFile`'s `input.files`. The agent stating
+  outright that it wants a file delivered, so nothing is filtered by type, and
+  its `caption` becomes the upload comment. Paths come from `input.files`,
+  resolved against the pane's cwd (`tool_result` carries absolute paths but in
+  an undocumented human-readable format, so it is used only for its success bit).
+
+  This replaced detecting `Write` `file_path`s narrowed to images/SVG/PDF, which
+  inferred "send this" from "a file changed": it posted artifacts nobody asked
+  for, needed an extension allowlist that dropped legitimate `.csv` and `.md`
+  files, and still missed the common case, since files produced by Bash (a
+  matplotlib PNG) leave no recoverable path in the transcript. Codex CLI has no
+  equivalent tool, so the outbox stays its only route.
+
+  Crucially, **the `tool_use` alone must not be trusted.** A request and its
+  result are separate records that routinely arrive in different poll batches,
+  and a denied call changes nothing — acting on the request alone would have
+  cctag read and upload a file the human just refused to release (measured: a
+  denial records `is_error: true` on the `tool_result`). `WrittenFileTracker`
+  therefore correlates request and result by `tool_use_id` and only surfaces
+  **confirmed** calls.
+
+### Hub–Spoke file flow and authorization
+
+A Spoke holds no bot token, so the Hub always performs the download. The Hub
+forwards the file metadata it saw on the event *and* records **which file id it
+offered to which owner** (`fileOwner`, capped at 500), and the `fetch_file` RPC
+serves only ids in that record for that owner. Without it, a Spoke could name
+any file id and pull down anything the bot can see. The download URL itself is
+never handed to the Spoke; the Hub re-resolves it from Slack.
+
+A transfer moves megabytes of base64 in one JSON message and includes a Slack
+API round trip, which the RPC's 20s default (sized for `chat.postMessage`)
+doesn't cover — file calls use 120s instead. The caps
+(`CCTAG_MAX_FILE_MB` / `CCTAG_MAX_FILE_COUNT`) are enforced on both the Spoke
+and the Hub.
+
+Because **Hub and Spoke ship independently**, a Hub that predates `upload_file`
+answers `no handler for ...`. That's reported to the thread once as "the Hub
+needs updating" rather than as a transfer failure (`isUnsupportedByRemote()`).
+
+## 6. Connecting one PC to more than one Slack workspace
+
+A Hub is tied to exactly one workspace (by its Slack app token). To reach a
+second workspace, you run a second Hub (it can live on the same server)
+and a second Spoke on your own PC.
+
+In that case, **both Spokes are looking at the same herdr daemon**, so a
+terminal paired in one workspace also shows up in the other workspace's
+`connect` picker. Avoid pairing the same terminal from both at once — the
+keystrokes would collide.
+
+## 7. Security notes
+
+- Anyone who can post in a paired thread can send text into a
+  full-permission local agent. Only pair threads in channels with people
+  you trust
+- Permission prompts (e.g. confirming a dangerous command) still require a
+  human's approval via Slack buttons — nothing runs unattended
+- A Hub token (`token issue <name> <ownerUserId>`) is bound to the Slack
+  user ID it was issued for and can't register as anyone else — but it can
+  still act on that owner's own paired threads, so only hand tokens to
+  people you trust
+
+## See also
+
+- Source: https://github.com/TMLlaboratory/cctag
 - herdr: https://herdr.dev
