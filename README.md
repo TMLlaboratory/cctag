@@ -60,23 +60,19 @@ secondhand — the split isn't static. Over repeated use they typically pick
 up enough fluency to drive routine work themselves, and the engineer's
 role narrows toward the critical moments that still need it.
 
-### Claude Tag for discussion, cctag for the work itself
+### Attaching to a session you already started
 
-If you also use [Claude Tag](https://www.anthropic.com/news/introducing-claude-tag)
-(Anthropic's own Slack bot), the two pair naturally rather than overlap.
-Claude Tag starts with zero memory every time, but a shared GitHub repo
-gives it continuity anyway: point it at a repo's existing docs to pick up
-prior context, and have it push a summary of a discussion's conclusions
-back before the thread ends. cctag then picks up from there for anything
-that's long-running, resource-heavy, or needs your own machine's tools and
-files rather than a sandbox.
+cctag pairs a thread to an agent session that is **already running** — one you
+started in your terminal and have been working in. Everything already loaded
+stays loaded: the files, the working tree, the context built up over hours.
+Comparable tools start a new session per mention instead, which is a different
+and often better-behaved thing to do.
 
-cctag doesn't try to absorb what Claude Tag does, deliberately — they sit
-at different points in the same workflow. A casual, exploratory discussion
-(a "seminar") and a long real execution run (a "production job") are
-different modes and probably shouldn't share an environment; keeping them
-as two tools connected through an ordinary GitHub repo, rather than one
-tool trying to do both, is the point, not a gap to close.
+Whether that distinction matters to you, and how cctag compares to
+[Claude Tag](https://www.anthropic.com/news/introducing-claude-tag), Slack Code
+and [Buzz](https://github.com/block/buzz) — including where those are the
+better choice — is set out in
+[docs/comparison.md](docs/comparison.md).
 
 ## Status
 

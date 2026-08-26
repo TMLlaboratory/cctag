@@ -7,14 +7,15 @@ This document explains how cctag works internally (for setup steps, see the [REA
 **cctag bridges a Slack thread to a coding-agent terminal session running on
 your own machine.**
 
-Anthropic's official "Claude Tag" (`@Claude` in Slack) runs Claude Code in a
-sandbox Anthropic hosts in the cloud. It can't reach your local files or
-network (internal servers, GPUs, local model endpoints, etc.) directly.
+It remote-controls **a coding-agent session you are actually running on your
+own PC right now**. Start `claude` (or `codex`) in your terminal, and you can
+talk to that exact session from Slack — send it instructions and get its
+replies back. Nothing is copied to a sandbox, so your local files and network
+(internal servers, GPUs, local model endpoints) are reachable as they are.
 
-cctag does the opposite: it remote-controls **a coding-agent session you
-are actually running on your own PC right now**. Start `claude` (or `codex`)
-in your terminal, and you can talk to that exact session from Slack — send it
-instructions and get its replies back.
+How that compares to tools that start a fresh session instead — and where
+those are the better choice — is [comparison.md](comparison.md). This document
+only explains the mechanism.
 
 This walkthrough uses Claude Code throughout, because the details that are
 worth explaining — transcript layout, how a pending question is detected,
