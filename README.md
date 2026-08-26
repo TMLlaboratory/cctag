@@ -656,6 +656,12 @@ owner can disconnect at any time, and tool permission prompts still require
 a human's approval via Slack buttons — nothing runs unattended. Only pair
 threads in channels with people you trust.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — how to run the checks, what a review
+looks for, the parts that can only be verified against a live pane, and the
+release process.
+
 ## License
 
 MIT — see `LICENSE`.

@@ -8,7 +8,14 @@ import { dirname, join, normalize } from "node:path";
 // else runs under. Documentation drifts silently — nothing fails when it does,
 // which is exactly why it needs a test rather than a convention.
 
-const DOCS = ["README.md", "README.ja.md", "docs/how-it-works.md", "CHANGELOG.md"];
+const DOCS = [
+  "README.md",
+  "README.ja.md",
+  "docs/how-it-works.md",
+  "docs/comparison.md",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+];
 
 function read(path: string): string {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
