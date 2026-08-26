@@ -13,6 +13,9 @@ const DOCS = [
   "README.ja.md",
   "docs/how-it-works.md",
   "docs/comparison.md",
+  "docs/usage.md",
+  "docs/spoke-setup.md",
+  "docs/running-a-hub.md",
   "CHANGELOG.md",
   "CONTRIBUTING.md",
 ];
