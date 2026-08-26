@@ -11,6 +11,33 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+Documentation only so far — no release cut for it, since nothing a user runs
+has changed. It ships with whatever change comes next.
+
+### Changed
+
+- The README is split by who is reading it (667 lines to 236): joining a Hub,
+  hosting one, and using a paired thread are now `docs/spoke-setup.md`,
+  `docs/running-a-hub.md` and `docs/usage.md`. Detailed setup instructions are
+  English only; the README stays bilingual.
+- The mechanism walkthrough (`docs/how-it-works.md`) describes what cctag
+  actually does now — pairings are addressed by `pane_id`, text is submitted in
+  one call with `agent prompt`, and a turn ending is decided from the
+  transcript. It also no longer calls `connect` a Claude-Code-only, permission-
+  gated operation: it reaches Codex too, and being owner-only follows from the
+  Spoke running on the owner's own machine rather than from an access rule.
+
+### Added
+
+- `docs/comparison.md` — where cctag sits relative to Claude Tag, Slack Code and
+  Buzz, including where those are the better choice. Leads with the part that
+  makes the rest credible: the artifact is not novel.
+- `CONTRIBUTING.md` — how to run the checks, what a review looks for, the parts
+  that can only be verified against a live pane, and the release process.
+- Tests for the documentation invariants that nothing else noticed: the two
+  READMEs keep the same heading structure, every internal link resolves, and the
+  version the READMEs claim matches `package.json`.
+
 ## [0.2.0] - 2026-08-25
 
 The first tagged release. Everything below was developed between 2026-07-09 and
