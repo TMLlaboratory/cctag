@@ -7,6 +7,9 @@ import type { Pairing } from "./pairing.js";
 import type { AgentInfo } from "./herdr/types.js";
 import { claudeDriver } from "./agents/claude/driver.js";
 import { WrittenFileTracker } from "./attachments.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const PANE = "wT:p1";
 
@@ -851,5 +854,95 @@ test("the owner's own answer is left unmarked", async () => {
     assert.deepEqual(updates, ["→ 1 を送信しました"], "unmarked means the owner, as it always has");
   } finally {
     engine.abortAll();
+  }
+});
+
+// --- uploadAttachments: logs, since it says nothing else on success -----------
+// Production incident (2026-08-28): a student's session sent dozens of files
+// via SendUserFile in a loop the agent drove itself (Claude Code's own
+// ScheduleWakeup, not a Slack-triggered turn). The text progress reports
+// reached Slack every time; not one file did, and nothing distinguished that
+// from success — uploadAttachments has never logged on its own. These pin the
+// three points that now do.
+
+/** Captures console.log/console.error for one call, then restores them. */
+async function captureConsole(run: () => Promise<void>): Promise<{ logs: string[]; errors: string[] }> {
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const origLog = console.log;
+  const origError = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.map(String).join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+  try {
+    await run();
+  } finally {
+    console.log = origLog;
+    console.error = origError;
+  }
+  return { logs, errors };
+}
+
+const NO_ATTACHMENTS_CWD = "/tmp/nonexistent-cctag-test"; // no .cctag/outbox here — snapshotOutbox tolerates that
+
+test("a confirmed SendUserFile with no uploadFile support logs, since it has nowhere to go", async () => {
+  const { notifier } = fakeNotifier(); // no uploadFile on this stub
+  const engine = engineFor(fakeHerdr(() => "idle"), notifier, 600_000);
+
+  const { errors } = await captureConsole(() =>
+    engine.uploadOutboxAdditions(fakePairing(), NO_ATTACHMENTS_CWD, {}, [{ path: "report.pdf" }]).then(() => {}),
+  );
+
+  assert.ok(
+    errors.some((e) => e.includes("1 confirmed SendUserFile") && e.includes("no uploadFile")),
+    `expected a no-uploadFile error, got: ${JSON.stringify(errors)}`,
+  );
+});
+
+test("nothing to attach logs nothing", async () => {
+  // The common case, every settle event without exception on most panes — must
+  // stay silent, or the log this incident needs becomes noise nobody reads.
+  const { notifier } = fakeNotifier();
+  const withUpload: Notifier = { ...notifier, async uploadFile() {} };
+  const engine = engineFor(fakeHerdr(() => "idle"), withUpload, 600_000);
+
+  const { logs, errors } = await captureConsole(() =>
+    engine.uploadOutboxAdditions(fakePairing(), NO_ATTACHMENTS_CWD, {}, []).then(() => {}),
+  );
+
+  assert.deepEqual(logs, []);
+  assert.deepEqual(errors, []);
+});
+
+test("a confirmed SendUserFile that does upload logs the candidate count and the outcome", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-upload-"));
+  try {
+    const filePath = join(dir, "report.pdf");
+    writeFileSync(filePath, "not actually a pdf, just needs to be a real file");
+
+    const uploads: string[] = [];
+    const { notifier } = fakeNotifier();
+    const withUpload: Notifier = {
+      ...notifier,
+      async uploadFile(_c, _t, args) {
+        uploads.push(args.filename);
+      },
+    };
+    const engine = engineFor(fakeHerdr(() => "idle"), withUpload, 600_000);
+
+    const { logs } = await captureConsole(() =>
+      engine.uploadOutboxAdditions(fakePairing(), dir, {}, [{ path: filePath }]).then(() => {}),
+    );
+
+    assert.deepEqual(uploads, ["report.pdf"], "the upload itself must still happen");
+    assert.ok(
+      logs.some((l) => l.includes("1 candidate") && l.includes("1 to upload")),
+      `expected the candidate-count line, got: ${JSON.stringify(logs)}`,
+    );
+    assert.ok(
+      logs.some((l) => l.includes("1/1 uploaded")),
+      `expected the outcome line, got: ${JSON.stringify(logs)}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

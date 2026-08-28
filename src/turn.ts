@@ -1184,8 +1184,21 @@ export class TurnEngine {
     cwd: string,
     sources: { outboxBaseline: DirSnapshot; confirmed: OutboundCandidate[] },
   ): Promise<void> {
+    const paneId = pairing.paneId;
     const upload = this.notifier.uploadFile?.bind(this.notifier);
-    if (!upload) return;
+    if (!upload) {
+      // Silent otherwise: this notifier simply doesn't do uploads (a standalone
+      // notifier with no uploadFile, say), which is the common, uninteresting
+      // case. Only worth a line when a SendUserFile call was actually confirmed
+      // and has nowhere to go — that's the shape of a real incident: the agent
+      // reports success, and nothing reaches Slack, with no visible cause.
+      if (sources.confirmed.length > 0) {
+        console.error(
+          `[turn ${paneId}] ${sources.confirmed.length} confirmed SendUserFile request(s) cannot be delivered: this notifier has no uploadFile`,
+        );
+      }
+      return;
+    }
 
     const threadTs = pairing.threadTs ?? "";
     // No extension filtering on either route: both are explicit "deliver this"
@@ -1202,6 +1215,7 @@ export class TurnEngine {
         // same file also sitting in the outbox.
         candidates = [...fromTranscript, ...fromOutbox];
       } else {
+        console.error(`[turn ${paneId}] outbox auto-attach skipped: ${ownership.reason}`);
         await this.notifier
           .postReply(
             pairing.channel,
@@ -1214,7 +1228,21 @@ export class TurnEngine {
     }
     if (candidates.length === 0) return;
 
+    // Logged unconditionally past this point, once there's anything to account
+    // for: this function otherwise says nothing on success, which is exactly
+    // what makes a silent failure here indistinguishable from a silent success.
+    // A batch of SendUserFile calls that never reached Slack — reported by the
+    // agent as sent, with nothing in the thread and nothing to grep for — is
+    // what this line exists to make diagnosable next time.
     const { files, skipped } = readOutboundAttachments(candidates, this.opts.limits, cwd);
+    console.log(
+      `[turn ${paneId}] attachments: ${candidates.length} candidate(s) ` +
+        `(${fromTranscript.length} from SendUserFile, ${fromOutbox.length} from outbox) ` +
+        `-> ${files.length} to upload, ${skipped.length} skipped` +
+        (skipped.length > 0 ? `: ${skipped.join("; ")}` : ""),
+    );
+
+    let uploaded = 0;
     for (const f of files) {
       try {
         await upload(pairing.channel, threadTs, {
@@ -1224,17 +1252,21 @@ export class TurnEngine {
           // here, which the filename alone doesn't.
           comment: f.caption ? `📎 ${f.caption}` : `📎 ${f.name}`,
         });
+        uploaded += 1;
       } catch (err) {
         // Hub and Spoke ship independently: a Hub without upload_file support
         // answers "no handler", which is worth saying out loud once rather than
         // failing silently every turn.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[turn ${paneId}] upload failed for ${f.name} (${uploaded}/${files.length} done): ${message}`);
         const reason = isUnsupportedByRemote(err)
           ? "⚠️ Hubがファイル添付に未対応です（Hub側の更新が必要です）。"
-          : `⚠️ ${f.name} の添付に失敗しました: ${err instanceof Error ? err.message : String(err)}`;
+          : `⚠️ ${f.name} の添付に失敗しました: ${message}`;
         await this.notifier.postReply(pairing.channel, threadTs, reason).catch(() => {});
         return; // every remaining file would fail the same way
       }
     }
+    console.log(`[turn ${paneId}] attachments: ${uploaded}/${files.length} uploaded`);
     if (skipped.length > 0) {
       await this.notifier
         .postReply(pairing.channel, threadTs, `⚠️ 添付を省略しました:\n${skipped.map((s) => `• ${s}`).join("\n")}`)
