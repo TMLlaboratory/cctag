@@ -33,52 +33,104 @@ const OWNERSHIP_NOTE =
 const NOT_CONNECTED_MESSAGE =
   "接続されていません。cctagを動かしている本人がこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。";
 
-const CLAUDE_HELP_TEXT = [
-  "*cctag の使い方*",
+/**
+ * Lines every variant carries verbatim.
+ *
+ * Shared rather than repeated because there are now three texts, and the last
+ * round of wording fixes changed `connect` and `disconnect` in two copies while
+ * leaving the same defect in the lines below them. Drift between the variants is
+ * the actual failure mode here, so the parts that must not differ are written
+ * once.
+ */
+const COMMON_HEAD_LINES = [
   "• `@cctag connect` — このスレッドを稼働中のコーディングエージェント（Claude Code / Codex CLI）に接続（cctagを動かしている本人のみ）",
   "• `@cctag disconnect` — 接続を解除（cctagを動かしている本人のみ）",
   "• `@cctag status` — 接続状態を表示",
   "• `@cctag list` — 稼働中のインスタンス一覧",
+];
+
+const COMMON_TAIL_LINES = [
+  "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
+  "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
+];
+
+const OUTBOX_LINE = "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます";
+
+/**
+ * The blank line before OWNERSHIP_NOTE is load-bearing.
+ *
+ * The note is the only line with no `•`, and it sits under a bullet long enough
+ * to wrap — so on a normal-width Slack column it read as one more wrapped
+ * fragment of the line above it. Reported from a screenshot of the real message.
+ * The note exists precisely to correct a misreading, so it has to be legible on
+ * its own.
+ */
+function withOwnershipNote(lines: string[]): string[] {
+  return [...lines, "", OWNERSHIP_NOTE];
+}
+
+/**
+ * Help for a thread whose agent is not known — no pairing, or a pane herdr
+ * cannot currently reach.
+ *
+ * Its own variant rather than the Claude one doing double duty. That sharing is
+ * what produced the reported defect twice over: the text a first-time reader
+ * sees told them to connect "a Claude Code instance", and then, after that line
+ * was made agent-agnostic, still described `model` as switching *Claude Code's*
+ * model and listed `mode` / `plan` — Claude-only features — without saying so.
+ * Making one text serve both cases means every agent-specific line is either
+ * wrong for the unpaired reader or missing for the paired one.
+ *
+ * The agent-specific commands stay listed here, qualified, rather than dropped:
+ * unpaired is the first thing anyone does, and "this exists, conditionally" is
+ * more use than silence.
+ */
+const GENERIC_HELP_TEXT = withOwnershipNote([
+  "*cctag の使い方*",
+  ...COMMON_HEAD_LINES,
+  "• `@cctag model <name>` — モデルを切り替え（指定方法は接続先のエージェントによります）",
+  "• `@cctag mode <name>` / `@cctag plan` — モードを切り替え（Claude Code のみ）",
+  ...COMMON_TAIL_LINES,
+  "• 画像やファイルを添付して `@cctag` すると、そのままインスタンスに渡されます",
+  OUTBOX_LINE,
+]).join("\n");
+
+const CLAUDE_HELP_TEXT = withOwnershipNote([
+  "*cctag の使い方（Claude Code）*",
+  ...COMMON_HEAD_LINES,
   "• `@cctag model <name>` — Claude Code のモデルを切り替え（例: `model opus`）",
   "• `@cctag mode <name>` — モードを切り替え（`manual` / `accept-edits` / `plan` / `auto`）",
   "• `@cctag plan` — Plan Mode を有効化（`mode plan` と同じ）",
-  "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
-  "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
+  ...COMMON_TAIL_LINES,
   "• 画像やファイルを添付して `@cctag` すると、そのままインスタンスに渡されます（画像は画像として認識されます）",
-  "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
-  OWNERSHIP_NOTE,
-].join("\n");
+  OUTBOX_LINE,
+]).join("\n");
 
 const CODEX_HELP_TEXT = [
-  "*cctag の使い方（Codex CLI）*",
-  "• `@cctag connect` — このスレッドを稼働中のコーディングエージェント（Claude Code / Codex CLI）に接続（cctagを動かしている本人のみ）",
-  "• `@cctag disconnect` — 接続を解除（cctagを動かしている本人のみ）",
-  "• `@cctag status` — 接続状態を表示",
-  "• `@cctag list` — 稼働中のインスタンス一覧",
-  "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
-  "• `@cctag log [指示]` — cctagの最終発言以降のスレッド履歴を読み込んで対応（例: `log`, `log 上記を直してpushして`）",
-  "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
-  "• 添付ファイルはパスとして渡されます（Codex CLI は画像も読み取れます）",
-  "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
-  OWNERSHIP_NOTE,
+  ...withOwnershipNote([
+    "*cctag の使い方（Codex CLI）*",
+    ...COMMON_HEAD_LINES,
+    "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
+    ...COMMON_TAIL_LINES,
+    "• 添付ファイルはパスとして渡されます（Codex CLI は画像も読み取れます）",
+    OUTBOX_LINE,
+  ]),
   "（`mode` / `plan` は Codex CLI では利用できません）",
 ].join("\n");
 
 /**
- * The help for a thread, by whichever agent it is paired to.
+ * The help for a thread, by whichever agent it is paired to — and a third text
+ * for when that is not known yet.
  *
- * A thread with no pairing — and one whose pane herdr cannot currently reach —
- * resolves to `null` and falls back to the Claude variant. That fallback is why
- * the `connect` line names both agents instead of Claude Code alone: unpaired is
- * exactly the state where the agent is not yet known, and `connect` offers every
- * running pane regardless of it. Reported from real use, where someone asking
- * for help before pairing was told to connect "a Claude Code instance".
- *
- * Other agents get a variant without the capabilities they don't support.
+ * `null` covers both a thread with no pairing and one whose pane herdr cannot
+ * currently reach. Neither can be told what agent they are talking to, so
+ * neither should be shown an agent's specifics as though they applied. See
+ * GENERIC_HELP_TEXT for what the Claude variant serving that role kept getting
+ * wrong.
  */
 export function helpTextFor(driver: AgentDriver | null): string {
-  if (driver && driver.kind !== "claude") return CODEX_HELP_TEXT;
-  return CLAUDE_HELP_TEXT;
+  if (!driver) return GENERIC_HELP_TEXT;
+  return driver.kind === "claude" ? CLAUDE_HELP_TEXT : CODEX_HELP_TEXT;
 }
 
 /**

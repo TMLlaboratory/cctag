@@ -29,6 +29,18 @@ would have to keep. Pin an exact version if that matters to you.
   rather than leaving the choice of victim to the OOM killer — on a box where the
   other victim could be the other workspace's Hub, or sshd.
 
+- A thread whose agent is not known gets its own help text. The Claude variant
+  had been doing double duty as the fallback, which is why the same defect was
+  reported twice: first the `connect` line told an unpaired reader to connect "a
+  Claude Code instance", and after that line was made agent-agnostic, `model`
+  still described switching *Claude Code's* model and `mode` / `plan` were listed
+  without saying they are Claude-only. One text cannot serve both cases — every
+  agent-specific line is either wrong for the unpaired reader or missing for the
+  paired one. The lines the three variants share are now written once.
+- The ownership note is separated from the bullet above it by a blank line. It is
+  the only line without a `•`, under a bullet long enough to wrap, so it read as
+  another wrapped fragment of that bullet — and a note that exists to correct a
+  misreading has to be legible on its own.
 - The help no longer names one agent as the thing to connect. An unpaired thread
   has no driver, so `helpTextFor` falls back to the Claude variant — and that
   variant said to connect "a Claude Code instance", in exactly the state where

@@ -220,41 +220,95 @@ test("the frame states who, and nothing about how to treat them", async () => {
 });
 
 // --- help text ---------------------------------------------------------------
+//
+// The first version of these tests checked the `connect` line and nothing else,
+// so it passed while `model`, `mode` and `plan` still described Claude Code to a
+// reader who had not connected anything. These assert over *every* line instead:
+// the defect was never specific to one command.
 
-test("the help an unpaired thread gets does not name one agent as the thing to connect", async () => {
-  // Reported from real use. An unpaired thread has no driver, so helpTextFor
-  // falls back to the Claude variant — and that variant told the reader to
-  // connect "a Claude Code instance", in exactly the state where nobody knows
-  // yet which agent they will pick. `connect` offers every running pane.
+async function helpVariants(): Promise<{ unpaired: string; claude: string; codex: string }> {
   const { helpTextFor } = await import("./commands.js");
-  const unpaired = helpTextFor(null);
-  const connectLine = unpaired.split("\n").find((l) => l.includes("`@cctag connect`"));
-  assert.ok(connectLine, "the help must document connect");
-  assert.ok(connectLine.includes("Claude Code"), connectLine);
-  assert.ok(connectLine.includes("Codex CLI"), connectLine);
+  const { claudeDriver } = await import("./agents/claude/driver.js");
+  const { codexDriver } = await import("./agents/codex/driver.js");
+  return {
+    unpaired: helpTextFor(null),
+    claude: helpTextFor(claudeDriver),
+    codex: helpTextFor(codexDriver),
+  };
+}
+
+/** Command lines only — the header and the trailing notes are meant to differ. */
+function commandLines(text: string): string[] {
+  return text.split("\n").filter((l) => l.startsWith("• `@cctag"));
+}
+
+test("the help for an unpaired thread describes no agent as the one it is talking to", async () => {
+  // An unpaired thread, and one whose pane herdr cannot reach, both resolve to
+  // null. Neither knows the agent, so neither may be shown one agent's
+  // specifics as though they applied. Reported twice: first the connect line
+  // said "a Claude Code instance", then `model` still said Claude Code's model.
+  const { unpaired } = await helpVariants();
+  for (const line of commandLines(unpaired)) {
+    const namesOneAgent =
+      (line.includes("Claude Code") && !line.includes("Codex CLI")) ||
+      (line.includes("Codex CLI") && !line.includes("Claude Code"));
+    // "（Claude Code のみ）" is a qualification, not a claim about this thread —
+    // it is what makes the line honest, so it is the one allowed form.
+    const isQualified = line.includes("のみ）");
+    assert.ok(!namesOneAgent || isQualified, `unqualified agent-specific line in the unpaired help:\n  ${line}`);
+  }
 });
 
-test("no help text tells the reader that only 'the owner' can connect", async () => {
+test("every variant offers the same commands, so the three cannot drift apart", async () => {
+  // What actually went wrong: a wording fix updated two copies of connect and
+  // disconnect and left the lines below them behind.
+  const { unpaired, claude, codex } = await helpVariants();
+  // Every command on the line, not the first: the unpaired variant states
+  // `mode` and `plan` together on one line, where the Claude variant gives them
+  // a line each. What must match is the set of commands, not the layout.
+  const commands = (text: string): string[] => {
+    const found = new Set<string>();
+    for (const line of commandLines(text)) {
+      for (const m of line.matchAll(/`@cctag ([a-z]+|<)/g)) found.add(m[1]);
+    }
+    return [...found].sort();
+  };
+  assert.deepEqual(commands(unpaired), commands(claude), "unpaired vs Claude");
+  assert.deepEqual(
+    commands(codex),
+    commands(claude).filter((c) => c !== "mode" && c !== "plan"),
+    "Codex drops only mode/plan",
+  );
+});
+
+test("no variant tells the reader that only 'the owner' can connect", async () => {
   // "（オーナーのみ）" is accurate as access control and was read as *the
   // channel's* owner. The authority is not a narrowed Slack permission: the
   // Spoke runs on that person's own machine, so connect is them choosing among
   // their own panes — which docs/how-it-works.md already said while these
   // strings still did not.
-  const { helpTextFor } = await import("./commands.js");
-  const { codexDriver } = await import("./agents/codex/driver.js");
-  for (const text of [helpTextFor(null), helpTextFor(codexDriver)]) {
+  for (const text of Object.values(await helpVariants())) {
     assert.ok(!text.includes("オーナー"), `help must not lean on the word オーナー:\n${text}`);
-    assert.ok(
-      text.includes("チャンネルの管理者ではなく"),
-      `help should say what owner-only actually means:\n${text}`,
-    );
+    assert.ok(text.includes("チャンネルの管理者ではなく"), `help should say what owner-only means:\n${text}`);
   }
 });
 
-test("a Codex-paired thread still gets the Codex variant", async () => {
-  const { helpTextFor } = await import("./commands.js");
-  const { codexDriver } = await import("./agents/codex/driver.js");
-  const codex = helpTextFor(codexDriver);
-  assert.ok(codex.includes("Codex CLI では利用できません"), "the Codex variant drops mode/plan");
-  assert.ok(!helpTextFor(null).includes("Codex CLI では利用できません"));
+test("the ownership note is separated from the bullet above it", async () => {
+  // It is the only line with no `•`, under a bullet long enough to wrap, so
+  // without the blank line it read as another wrapped fragment of that bullet —
+  // seen in a screenshot of the real message. A note that exists to correct a
+  // misreading has to be legible on its own.
+  for (const text of Object.values(await helpVariants())) {
+    const lines = text.split("\n");
+    const i = lines.findIndex((l) => l.includes("チャンネルの管理者ではなく"));
+    assert.ok(i > 0, "the note must be present");
+    assert.equal(lines[i - 1], "", `expected a blank line before the note, got:\n  ${lines[i - 1]}`);
+  }
+});
+
+test("only the Codex variant says mode and plan are unavailable", async () => {
+  const { unpaired, claude, codex } = await helpVariants();
+  assert.ok(codex.includes("Codex CLI では利用できません"));
+  assert.ok(!claude.includes("Codex CLI では利用できません"));
+  assert.ok(!unpaired.includes("Codex CLI では利用できません"));
 });
