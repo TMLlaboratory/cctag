@@ -13,6 +13,13 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- Terminal-side work no longer re-sends every file it has already sent. The
+  watcher keeps one write tracker per watched pane and uploads on every settle
+  it notices, and nothing cleared the confirmed set — so each settle handed over
+  everything confirmed since the watch began. Measured in a thread where it
+  happened: the oldest file posted 13 times, the next 6, the next 4, oldest most
+  often. The text collected for a settle was emptied and the outbox baseline
+  advanced right beside it; only the writes were not.
 - A multi-select `AskUserQuestion` can now be answered from Slack. It never
   could: the message carried a numbered list and an invitation to reply in free
   text, and no interactive element at all. Reported from a four-question dialog

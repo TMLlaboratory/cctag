@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackgroundWatcher } from "./watcher.js";
@@ -582,5 +582,108 @@ test("a pane that is really gone is still unpaired", async () => {
     assert.equal(replies.filter((r) => r.includes("インスタンスが見つかりません")).length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- a file handed over once, not once per settle ---------------------------
+//
+// Driven entirely by the transcript, with herdr pinned to `working`: settle.ts
+// corrects a `working` the transcript has already closed out, so appending a
+// turn's `user` record reopens the turn and appending its `turn_duration` closes
+// it. Flipping herdr's own status instead does not work — the correction
+// overrides it, which is how an earlier version of this test came to pass
+// without the fix in place.
+
+const TURN_START = { type: "user", message: { role: "user", content: "やって" } };
+
+function turnEnd(text: string): unknown[] {
+  return [
+    { type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } },
+    { type: "system", subtype: "turn_duration", durationMs: 1234 },
+  ];
+}
+
+function sendUserFile(path: string, id: string): unknown[] {
+  return [
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id, name: "SendUserFile", input: { files: [path], caption: "できました" } }],
+      },
+    },
+    { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } },
+  ];
+}
+
+function appendRecords(dir: string, name: string, records: unknown[]): void {
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, name), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+/** Records every set of confirmed files handed to an upload. */
+function uploadRecordingEngine(): { engine: TurnEngine; handovers: string[][] } {
+  const handovers: string[][] = [];
+  const engine = {
+    isBusy: () => false,
+    async adoptBlockedTerminal() {
+      return false;
+    },
+    async uploadOutboxAdditions(
+      _pairing: unknown,
+      _cwd: string,
+      baseline: Record<string, number>,
+      confirmed: Array<{ path: string }>,
+    ) {
+      handovers.push(confirmed.map((c) => c.path));
+      return baseline;
+    },
+  } as unknown as TurnEngine;
+  return { engine, handovers };
+}
+
+test("a file already uploaded is not handed over again on the next settle", async () => {
+  // Reported from a production thread: the same files kept arriving, and the
+  // counts gave the mechanism away — the oldest file posted 13 times, the next
+  // 6, the next 4. Cumulative, not random. BackgroundWatcher keeps one
+  // WrittenFileTracker per watched pane and uploads on every settle, and nothing
+  // cleared the confirmed set, so each settle re-sent everything confirmed since
+  // the watch began. `collected` was emptied and `outboxBaseline` advanced right
+  // beside it; only the writes were not.
+  const dir = mkdtempSync(join(tmpdir(), "cctag-watcher-"));
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-cwd-"));
+  const tDir = transcriptDirFor(cwd);
+  const filePath = join(cwd, "report.pdf");
+  try {
+    const store = new PairingStore(join(dir, "pairings.json"));
+    store.add({ ...fakePairing(), cwd });
+    const { notifier } = fakeNotifier();
+    const { engine, handovers } = uploadRecordingEngine();
+    const watcher = new BackgroundWatcher(rotatingHerdr(cwd, () => "working"), store, engine, notifier, 20);
+
+    // Written only after the watch exists: a transcript that was already there
+    // when watching began is deliberately never replayed.
+    watcher.start();
+    await sleep(100);
+    appendRecords(tDir, "session-a.jsonl", [
+      TURN_START,
+      ...sendUserFile(filePath, "toolu_1"),
+      ...turnEnd("一つ目の結果"),
+    ]);
+    await sleep(100); // settle 1 — the file is handed over here
+
+    appendRecords(tDir, "session-a.jsonl", [TURN_START]); // a second stretch of work begins
+    await sleep(100);
+    appendRecords(tDir, "session-a.jsonl", turnEnd("二つ目の結果")); // ... and settles
+    await sleep(100);
+    watcher.stop();
+
+    const times = handovers.filter((h) => h.includes(filePath)).length;
+    assert.equal(times, 1, `report.pdf should be handed over once, not ${times}: ${JSON.stringify(handovers)}`);
+    assert.ok(handovers.length >= 2, `both settles must have been seen, saw ${handovers.length}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(tDir, { recursive: true, force: true });
   }
 });

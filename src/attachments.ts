@@ -141,6 +141,26 @@ export class WrittenFileTracker {
   paths(): OutboundCandidate[] {
     return [...this.confirmed.values()];
   }
+
+  /**
+   * Drops entries that have now been handed to an upload, so a later hand-off
+   * does not offer them again.
+   *
+   * Needed because this tracker outlives a single hand-off on the terminal-side
+   * path: BackgroundWatcher keeps one per watched pane and uploads on every
+   * settle it sees, whereas a TurnState is built and discarded per turn. Nothing
+   * cleared the confirmed set, so each settle re-sent everything confirmed since
+   * the watch began. Measured in a production thread: one file posted 13 times,
+   * the next 6, the next 4 — the cumulative signature, oldest most often.
+   *
+   * Takes what was handed over rather than clearing everything, so an ingest
+   * that lands while an upload is in flight is not silently dropped with it.
+   * `pending` is untouched: a request still waiting on its tool_result has not
+   * been uploaded and must still be able to confirm.
+   */
+  forget(entries: OutboundCandidate[]): void {
+    for (const e of entries) this.confirmed.delete(e.path);
+  }
 }
 
 function mb(bytes: number): string {
