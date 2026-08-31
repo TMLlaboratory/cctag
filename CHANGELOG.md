@@ -9,7 +9,7 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 the interface still moves. A minor bump may change behavior that a `1.x` project
 would have to keep. Pin an exact version if that matters to you.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-31
 
 ### Fixed
 
@@ -179,5 +179,6 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TMLlaboratory/cctag/releases/tag/v0.2.0
