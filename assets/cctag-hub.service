@@ -12,5 +12,16 @@ Restart=on-failure
 RestartSec=5
 EnvironmentFile=/opt/cctag/.env
 
+# Bound the damage of a memory spike rather than leaving it to the OOM killer's
+# choice of victim. Measured on the Hub this was written for: 954 MB of RAM, no
+# swap, and two Hub processes (one per Slack workspace) sharing it — so an
+# unbounded spike in one could take out the other, or sshd. A Hub's steady state
+# is ~50 MB; the headroom here is for a file upload, which costs the base64
+# frame, the parsed string and the decoded buffer at once.
+#
+# Restart=on-failure covers the kill, so the outcome is one Hub bouncing instead
+# of the box degrading. Raise it alongside CCTAG_MAX_FILE_MB, not on its own.
+MemoryMax=300M
+
 [Install]
 WantedBy=multi-user.target

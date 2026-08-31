@@ -13,6 +13,22 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- The Hub's file cap now bounds what it will read, not just what it will accept.
+  `CCTAG_MAX_FILE_MB` was compared only after a frame had been received and
+  parsed, so an oversized upload was rejected having already cost the memory —
+  and `ws` defaults its own frame ceiling to 100 MiB. Measured on the Hub this
+  was written for: 954 MB of RAM, no swap, two Hub processes, and no systemd
+  memory limit, where one 100 MB frame becomes the frame, the parsed base64
+  string and the decoded buffer at once. `maxPayload` is now derived from the
+  file cap, and `ws` compares it against the length declared in the frame header
+  before reading the payload. A well-behaved Spoke never reaches it — it clamps
+  to the cap reported at registration — so this is the floor under one that is
+  old, or not ours. The inbound direction was already right: `downloadSlackFile`
+  applies the cap while streaming.
+- `assets/cctag-hub.service` sets `MemoryMax`, so a spike kills the Hub at fault
+  rather than leaving the choice of victim to the OOM killer — on a box where the
+  other victim could be the other workspace's Hub, or sshd.
+
 - The help no longer names one agent as the thing to connect. An unpaired thread
   has no driver, so `helpTextFor` falls back to the Claude variant — and that
   variant said to connect "a Claude Code instance", in exactly the state where

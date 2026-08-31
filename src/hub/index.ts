@@ -5,6 +5,7 @@ import Bolt from "@slack/bolt";
 import { WebSocketServer } from "ws";
 import type { IncomingFile } from "../attachments.js";
 import { TokenStore } from "./tokenStore.js";
+import { maxFramePayload } from "./frame.js";
 import { WsRpc } from "../ws/rpc.js";
 import { VERSION } from "../version.js";
 import {
@@ -109,11 +110,13 @@ async function runServer(): Promise<void> {
   // request handler, Node accepts a plain HTTP request (health checks, a
   // browser hitting the bare domain, ...) but never responds — the client
   // just hangs until its own timeout. Answer fast instead.
+  //
+  // (maxFramePayload lives at the bottom of this file, with the reasoning.)
   const httpServer = createServer((_req, res) => {
     res.writeHead(404, { "content-type": "text/plain" }).end("cctag hub: websocket endpoint only\n");
   });
   httpServer.requestTimeout = 15_000;
-  const wss = new WebSocketServer({ server: httpServer, path: "/spoke" });
+  const wss = new WebSocketServer({ server: httpServer, path: "/spoke", maxPayload: maxFramePayload(config.maxFileBytes) });
 
   wss.on("connection", (ws, req) => {
     // Read the bearer token from a header, not the URL query string — query
