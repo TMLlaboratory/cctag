@@ -561,3 +561,80 @@ test("a single-select free-text row still anchors, checkbox or not", () => {
   const classic = ["☐ 実装方針", "", "どの方式で？", "", "❯ 1. A方式", "  2. B方式", "  3. Type something."].join("\n");
   assert.equal(parseAskUserQuestionPane(classic)?.options.length, 2);
 });
+
+// --- multi-select submission, captured from a live pane ---------------------
+//
+// Every assertion below is the keystroke sequence measured against a real
+// multi-select dialog on Claude Code 2.1.251, in the order it was measured:
+//
+//   1. `2` toggles option 2 to [✔]; the cursor stays on row 1, nothing submits.
+//   2. `4` toggles option 4 as well — selections accumulate.
+//   3. Down × (options.length + 1) puts the cursor on the `Submit` row, which
+//      sits one past the `Type something` row.
+//   4. Enter there opens a review screen; `1` on it is what actually submits.
+//      The transcript then recorded exactly `"Bravo, Delta"`.
+//
+// Written from a capture rather than from the single-select path on purpose:
+// the previous multi-select bug came from a fixture written by assumption.
+
+const MULTI_INFO = {
+  header: "テスト",
+  question: "テスト用の質問です",
+  options: [{ label: "Alpha" }, { label: "Bravo" }, { label: "Charlie" }, { label: "Delta" }],
+  multiSelect: true,
+};
+
+const REVIEW_SCREEN = [
+  "←  ☒ テスト  ✔ Submit  →",
+  "",
+  "Review your answers",
+  "",
+  " ● テスト用の質問です",
+  "   → Bravo, Delta",
+  "",
+  "Ready to submit your answers?",
+  "",
+  "❯ 1. Submit answers",
+  "  2. Cancel",
+].join("\n");
+
+test("a multi-select answer toggles each choice, walks to Submit, then confirms the review", async () => {
+  const { herdr, sent } = fakeHerdr(() => REVIEW_SCREEN);
+  await claudeDriver.answerQuestionMultiSelect!(herdr, "w0:p1", [2, 4], MULTI_INFO);
+  assert.deepEqual(sent, [
+    "text:2",
+    "text:4",
+    // options.length + 1 — the free-text row, then Submit.
+    "key:Down",
+    "key:Down",
+    "key:Down",
+    "key:Down",
+    "key:Down",
+    "key:Enter",
+    "text:1",
+  ]);
+});
+
+test("the confirming digit is withheld when the review screen is not the thing on screen", async () => {
+  // Only the dialog's *last* question opens a review screen. For an earlier one
+  // the next question comes up instead, where `1` would toggle its first option
+  // — an answer to a question nobody was asked.
+  const nextQuestion = ["☐ 次の質問", "", "別の質問です", "", "❯ 1. [ ] X", "  2. [ ] Y", "  3. [ ] Type something"].join(
+    "\n",
+  );
+  const { herdr, sent } = fakeHerdr(() => nextQuestion);
+  await claudeDriver.answerQuestionMultiSelect!(herdr, "w0:p1", [1], MULTI_INFO);
+  assert.equal(sent.at(-1), "key:Enter", "stops at the Submit row's Enter");
+  assert.ok(!sent.slice(sent.indexOf("key:Enter")).includes("text:1"));
+});
+
+test("a cancelled pane gets no keystrokes past the point it was cancelled", async () => {
+  // Same reasoning as answerQuestionOption's cancellation test: this runs
+  // outside the poll loop, so the pane may already belong to something else.
+  const controller = new AbortController();
+  controller.abort();
+  const { herdr, sent } = fakeHerdr(() => REVIEW_SCREEN);
+  await claudeDriver.answerQuestionMultiSelect!(herdr, "w0:p1", [2], MULTI_INFO, controller.signal);
+  assert.ok(!sent.includes("key:Enter"), "the submitting Enter must not reach a released pane");
+  assert.ok(!sent.includes("text:1"));
+});

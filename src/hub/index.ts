@@ -15,6 +15,7 @@ import {
   uploadBinaryFile,
 } from "../slack/notifier.js";
 import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "../slack/files.js";
+import { AQ_MULTI_CHECKBOX_ACTION_ID, withSelectedIndices } from "../slack/blocks.js";
 
 const { App } = Bolt;
 
@@ -395,11 +396,17 @@ async function runServer(): Promise<void> {
       const actorUserId = actionBody.user?.id;
       const actorName = actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined;
       await spoke
-        .call(kind, { channel, threadTs, value: raw, actorUserId, actorName })
+        .call(kind, { channel, threadTs, value: withSelectedIndices(raw, body), actorUserId, actorName })
         .catch((err) => console.error(`[hub] ${kind} dispatch failed:`, err));
     };
   app.action(/^aq_answer_/, actionRoute("aq_answer"));
   app.action(/^perm_choice_/, actionRoute("perm_choice"));
+  // Ticking a box is not an answer, but Slack still expects an ack within three
+  // seconds and shows the reader a warning when none comes. The selection is
+  // read off `state` when 送信 is pressed, so there is nothing else to do here.
+  app.action(AQ_MULTI_CHECKBOX_ACTION_ID, async ({ ack }) => {
+    await ack();
+  });
 
   await new Promise<void>((resolve) => httpServer.listen(config.wsPort, resolve));
   console.log(`[hub] WebSocket server listening on :${config.wsPort} (path /spoke)`);

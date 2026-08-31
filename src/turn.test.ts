@@ -946,3 +946,167 @@ test("a confirmed SendUserFile that does upload logs the candidate count and the
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- multi-select questions -------------------------------------------------
+
+/** A multi-select dialog as Claude Code 2.1.251 draws it (checkbox on every
+ *  row, the free-text one included) — the shape captured in prompts.test.ts. */
+function multiSelectPane(question: string): string {
+  return [
+    "←  ☐ 削る場所  ✔ Submit  →",
+    "",
+    `│ ${question}`,
+    "",
+    "❯ 1. [ ] §2.1「橋渡し」を圧縮",
+    "  現在10行。新設する段落と重複するので圧縮する。",
+    "  2. [ ] §6.2「モデルの大きさ」を圧縮",
+    "  現在14行。査読者の反論への防御なので薄くなる。",
+    "  3. [ ] §5.3の処理時間の記述を圧縮",
+    "  現在11行。内訳を簡略化して3行捻出。",
+    "  4. [ ] Type something",
+    "     Submit",
+    "─".repeat(60),
+    "  5. Chat about this",
+  ].join("\n");
+}
+
+/** Like fakeNotifier, but keeps what each posted message was later updated to
+ *  — which is where the terminal-answered replacement lands. */
+function recordingNotifier(): { notifier: Notifier; posts: string[]; updates: string[] } {
+  const posts: string[] = [];
+  const updates: string[] = [];
+  const handle: MessageHandle = {
+    async update(text) {
+      updates.push(text);
+    },
+  };
+  const notifier: Notifier = {
+    async postReply(_c, _t, text) {
+      posts.push(text);
+    },
+    async postMessage(_c, _t, text) {
+      posts.push(text);
+      return handle;
+    },
+  };
+  return { notifier, posts, updates };
+}
+
+function multiSelectHerdr(pane: () => string): { herdr: HerdrClient; sent: string[] } {
+  const sent: string[] = [];
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    async paneRead() {
+      return pane();
+    },
+    async agentSend(_p: string, text: string) {
+      sent.push(`text:${text}`);
+    },
+    async paneSendKeys(_p: string, ...keys: string[]) {
+      sent.push(...keys.map((k) => `key:${k}`));
+    },
+  } as unknown as HerdrClient;
+  return { herdr, sent };
+}
+
+
+/**
+ * Adopts the pane and waits for the prompt to be posted.
+ *
+ * adoptBlockedTerminal hands the pane to the poll loop and returns before that
+ * loop's first pass, so the phase is still `running` and there is no pending
+ * question to answer for a moment after it resolves.
+ */
+async function adoptAndAwaitPrompt(engine: TurnEngine): Promise<void> {
+  await adopt(engine, fakePairing());
+  await sleep(60);
+}
+
+/** While a prompt is up the loop sleeps on a 5s floor (turn.ts), so noticing
+ *  that a *different* prompt replaced it cannot be observed sooner. */
+const BLOCKED_POLL_FLOOR_MS = 5_600;
+
+test("a multi-select question can be answered from Slack", async () => {
+  // Until 2026-08-31 it could not: the blocks carried no interactive element, so
+  // the only way to answer was at the keyboard. Reported from a four-question
+  // dialog where question 1 was answered from Slack and question 2 — the
+  // multi-select one — was not.
+  const { notifier, updates } = recordingNotifier();
+  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    const result = await engine.answerQuestionMultiSelect(PANE, 1, [0, 2]);
+    assert.equal(result.ok, true);
+    // Options 1 and 3 toggled, then options.length + 1 downs onto Submit, then
+    // Enter. The fixture's fourth row is `Type something`, so there are three.
+    assert.deepEqual(sent.slice(0, 2), ["text:1", "text:3"]);
+    assert.equal(sent.filter((k) => k === "key:Down").length, 4);
+    assert.ok(sent.includes("key:Enter"));
+    assert.ok(
+      updates.some((u) => u.includes("§2.1「橋渡し」を圧縮") && u.includes("§5.3の処理時間の記述を圧縮")),
+      "the thread should say which options were chosen",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a stale submit for an already-answered question is refused", async () => {
+  const { notifier } = recordingNotifier();
+  const { herdr } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    assert.equal((await engine.answerQuestionMultiSelect(PANE, 1, [0])).ok, true);
+    const again = await engine.answerQuestionMultiSelect(PANE, 1, [1]);
+    assert.equal(again.ok, false, "the prompt id is spent");
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("indices outside the option list never reach the pane as keystrokes", async () => {
+  const { notifier } = recordingNotifier();
+  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    // 10 would be typed into the dialog as a keystroke meaning nothing — or, on
+    // a dialog with ten rows, as the wrong one.
+    await engine.answerQuestionMultiSelect(PANE, 1, [0, 9]);
+    assert.deepEqual(
+      sent.filter((k) => k.startsWith("text:")),
+      ["text:1"],
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("answering at the keyboard keeps the question in the thread", async () => {
+  // The message used to be replaced by the bare note, so a thread recorded that
+  // *something* had been asked and answered with no way to see what. Observed on
+  // the same four-question dialog: one line of evidence, and it named neither
+  // the question nor its options.
+  const { notifier, updates } = recordingNotifier();
+  let question = "どこから捻出しますか？";
+  const { herdr } = multiSelectHerdr(() => multiSelectPane(question));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    // A *different* question now showing, with the pane never leaving `blocked`,
+    // is how the poll loop learns the pending one was answered at the terminal.
+    question = "見直し範囲はどうしますか？";
+    await sleep(BLOCKED_POLL_FLOOR_MS);
+
+    const note = updates.find((u) => u.includes("（ターミナル側で回答済み）"));
+    assert.ok(note, "the prompt should be marked answered");
+    assert.ok(note.includes("どこから捻出しますか？"), "the question must survive the update");
+    assert.ok(note.includes("§2.1「橋渡し」を圧縮"), "so must the options");
+  } finally {
+    engine.abortAll();
+  }
+});

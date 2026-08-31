@@ -130,6 +130,19 @@ const QUESTION_TAB_BAR_RE = /[☐☒].*(?:Submit|→)|(?:←|→).*[☐☒]/;
 const RULE_LINE_RE = /^[\s─━—-]+$/;
 
 /**
+ * The review screen that follows a multi-select submission:
+ *
+ *     Ready to submit your answers?
+ *     ❯ 1. Submit answers
+ *       2. Cancel
+ *
+ * Captured live on 2.1.251. It appears only after the dialog's *last* question,
+ * so answerQuestionMultiSelect has to look for it rather than assume it — see
+ * that method for why sending the confirming digit blind would be wrong.
+ */
+export const SUBMIT_ANSWERS_RE = /^\s*(?:❯\s*)?1\.\s*Submit answers\s*$/m;
+
+/**
  * Strips the vertical gutter bar the TUI draws down the left of a question.
  *
  * Captured from a live multi-select dialog on 2.1.241, the question line reads

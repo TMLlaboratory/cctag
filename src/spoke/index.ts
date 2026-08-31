@@ -197,7 +197,23 @@ function connectOnce(config: SpokeConfig): Promise<void> {
       rpc.onCall("aq_answer", async (payload) => {
         // actor* are absent from an older Hub, which simply leaves answers unmarked.
         const p = payload as { channel: string; threadTs: string; value: string; actorUserId?: string; actorName?: string };
-        const v = JSON.parse(p.value) as { t: string; p: number; o: number };
+        const v = JSON.parse(p.value) as { k?: string; t: string; p: number; o: number; s?: number[] };
+        if (v.k === "aqm") {
+          await commands.handleAskUserQuestionMultiSelect({
+            channel: p.channel,
+            threadTs: p.threadTs,
+            terminalId: v.t,
+            promptId: v.p,
+            // Absent (not empty) means the Hub relayed the click without
+            // Slack's `state` — it predates checkboxes and cannot carry a
+            // selection. Distinguished from [] so the reader is told to update
+            // the Hub instead of being told they picked nothing.
+            optionIndices: v.s ?? null,
+            actorUserId: p.actorUserId,
+            actorName: p.actorName,
+          });
+          return {};
+        }
         await commands.handleAskUserQuestionButton({
           channel: p.channel,
           threadTs: p.threadTs,

@@ -661,6 +661,53 @@ export class TurnEngine {
     return { ok: true };
   }
 
+  async answerQuestionMultiSelect(
+    paneId: string,
+    promptId: number,
+    optionIndices: number[],
+    actor?: string,
+  ): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
+    if (
+      !state ||
+      state.phase !== "awaiting-question" ||
+      state.currentPromptId !== promptId ||
+      !state.pendingQuestionInfo ||
+      state.answering
+    ) {
+      return { ok: false, reason: "not-pending" };
+    }
+    const info = state.pendingQuestionInfo;
+    const submit = state.driver.answerQuestionMultiSelect;
+    // Only reachable if the blocks offered checkboxes, which only happens for a
+    // multi-select question on a driver that can submit one — but the guard is
+    // cheap and a stale message is not a reason to send digits into a
+    // single-select list.
+    if (!submit || !info.multiSelect) return { ok: false, reason: "not-pending" };
+
+    const chosen = optionIndices.filter((i) => i >= 0 && i < info.options.length);
+    if (chosen.length === 0) return { ok: false, reason: "not-pending" };
+
+    state.answering = true; // claimed — see TurnState.answering
+    try {
+      await submit(
+        this.herdr,
+        state.paneId,
+        chosen.map((i) => i + 1),
+        info,
+        state.lease.signal,
+      );
+    } catch (err) {
+      state.answering = false; // nothing was accepted; let the user try again
+      throw err;
+    }
+    const labels = chosen.map((i) => info.options[i].label).join(", ");
+    await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, labels, actor), []).catch(() => {});
+    this.markPromptResolved(state);
+    await this.restartStatusLine(state);
+    return { ok: true };
+  }
+
   async answerQuestionFreeText(paneId: string, freeText: string): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-question" || !state.pendingQuestionInfo || state.answering) {
@@ -771,6 +818,26 @@ export class TurnEngine {
   /** Clears everything tied to the prompt just answered and hands the turn back
    *  to the poll loop. Shared by all four answer paths so none can forget a
    *  field — notably `answering`, which would otherwise wedge the turn. */
+  /**
+   * What replaces a prompt message once it turns out to have been answered at
+   * the keyboard instead of from Slack.
+   *
+   * It used to be the bare note, which erased the question and its options — so
+   * a thread showed that *something* had been asked and answered, with no way to
+   * see what. Reported from production: a four-question dialog whose second
+   * question was multi-select left exactly one line of evidence, and it said
+   * nothing about the question. The same class of loss as the raw pane dumps
+   * postPrompt now logs, and the fix is easier here because the question is
+   * still in hand. A permission prompt keeps the bare note: its snippet is
+   * already logged on the path that cannot read it.
+   */
+  private answeredAtTerminalText(state: TurnState): string {
+    const info = state.pendingQuestionInfo;
+    if (!info) return "（ターミナル側で回答済み）";
+    const options = info.options.map((o, i) => `${i + 1}. ${o.label}`).join("\n");
+    return `❓ *${info.header}*: ${info.question}\n${options}\n\n（ターミナル側で回答済み）`;
+  }
+
   private markPromptResolved(state: TurnState): void {
     state.promptHandle = undefined;
     state.promptFingerprint = undefined;
@@ -1037,7 +1104,7 @@ export class TurnEngine {
           // and the agent went straight into the next. Nothing else reports
           // that, so without this the thread would keep offering buttons for a
           // prompt that is gone and never show the one actually waiting.
-          await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
+          await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
           state.pendingQuestionInfo = undefined;
           state.planFeedbackOptionNum = undefined;
           await this.postPrompt(state, paneText, prompt, fingerprint);
@@ -1050,7 +1117,7 @@ export class TurnEngine {
         // Was awaiting an answer, and the terminal is no longer blocked —
         // resolved, either by our own button/free-text (which already
         // cleared promptHandle) or directly at the terminal keyboard.
-        await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
+        await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
         this.markPromptResolved(state);
       }
 

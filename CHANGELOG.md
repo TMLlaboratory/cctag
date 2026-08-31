@@ -11,8 +11,22 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
-Documentation only so far — no release cut for it, since nothing a user runs
-has changed. It ships with whatever change comes next.
+### Fixed
+
+- A multi-select `AskUserQuestion` can now be answered from Slack. It never
+  could: the message carried a numbered list and an invitation to reply in free
+  text, and no interactive element at all. Reported from a four-question dialog
+  where question 1 was answered by button and question 2 — the multi-select one
+  — was not, so the whole dialog was finished at the keyboard instead. Slack has
+  had a `checkboxes` element the whole time; the gap was cctag's. The submitting
+  keystrokes were measured against a live dialog rather than inferred: a digit
+  *toggles* a box and does not submit, the `Submit` row sits one past the
+  free-text row, and the Enter there opens a review screen that needs its own
+  confirmation. Answering a multi-select from Slack requires the Hub to be
+  updated too; an older one is told to, rather than silently sending nothing.
+- A prompt answered at the terminal keeps its question in the thread. The
+  message was replaced by the bare note "answered at the terminal", so a thread
+  showed that *something* had been asked and answered with no way to see what.
 
 ### Changed
 
@@ -37,6 +51,8 @@ has changed. It ships with whatever change comes next.
 - Tests for the documentation invariants that nothing else noticed: the two
   READMEs keep the same heading structure, every internal link resolves, and the
   version the READMEs claim matches `package.json`.
+- `src/slack/blocks.test.ts`, which did not exist: the block builders had no
+  tests, which is how a branch that produced no buttons went unnoticed.
 
 ## [0.2.0] - 2026-08-25
 
