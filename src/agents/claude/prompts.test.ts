@@ -638,3 +638,30 @@ test("a cancelled pane gets no keystrokes past the point it was cancelled", asyn
   assert.ok(!sent.includes("key:Enter"), "the submitting Enter must not reach a released pane");
   assert.ok(!sent.includes("text:1"));
 });
+
+test("free text on a multi-select dialog is submitted, not un-ticked", async () => {
+  // Reported from production: replying "1,3" left the dialog sitting there.
+  // Measured on a live 2.1.251 pane — typing into the free-text row ticks it
+  // automatically, and the Enter the single-select path sends means "select"
+  // here, so it unticks the answer and submits nothing.
+  const { herdr, sent } = fakeHerdr(() => REVIEW_SCREEN);
+  await claudeDriver.answerQuestionFreeText!(herdr, "w0:p1", MULTI_INFO, "どれでもない");
+  assert.deepEqual(sent, [
+    // options.length downs onto the free-text row, then the text ...
+    "key:Down",
+    "key:Down",
+    "key:Down",
+    "key:Down",
+    "text:どれでもない",
+    // ... then one more Down onto Submit, Enter, and the review confirmation.
+    "key:Down",
+    "key:Enter",
+    "text:1",
+  ]);
+});
+
+test("free text on a single-select dialog still submits with the one Enter", async () => {
+  const { herdr, sent } = fakeHerdr(() => PREVIEW_PANE);
+  await claudeDriver.answerQuestionFreeText!(herdr, "w0:p1", PREVIEW_INFO, "別の案がある");
+  assert.deepEqual(sent, ["key:Down", "key:Down", "text:別の案がある", "key:Enter"]);
+});

@@ -1110,3 +1110,38 @@ test("answering at the keyboard keeps the question in the thread", async () => {
     engine.abortAll();
   }
 });
+
+test("a reply of just option numbers ticks those boxes instead of being typed as text", async () => {
+  // What a reader actually types, reported from real use. Claude Code does not
+  // read "1,3" as a selection — the free-text row records it verbatim — so
+  // without this the agent received the string "1,3" and had to guess.
+  const { notifier, updates } = recordingNotifier();
+  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    assert.equal((await engine.answerQuestionFreeText(PANE, "1,3")).ok, true);
+    assert.deepEqual(sent.slice(0, 2), ["text:1", "text:3"], "toggled, not typed");
+    assert.ok(
+      updates.some((u) => u.includes("§2.1「橋渡し」を圧縮") && u.includes("§5.3の処理時間の記述を圧縮")),
+      "the thread should name the options, not echo the digits",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a reply that is not just option numbers is still passed through as text", async () => {
+  const { notifier } = recordingNotifier();
+  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    // Out of range, so it cannot be a selection — and a duplicate would toggle
+    // the same box off again, which is worse than passing the text along.
+    assert.equal((await engine.answerQuestionFreeText(PANE, "1,9")).ok, true);
+    assert.ok(sent.includes("text:1,9"), `expected the text verbatim, got ${JSON.stringify(sent)}`);
+  } finally {
+    engine.abortAll();
+  }
+});

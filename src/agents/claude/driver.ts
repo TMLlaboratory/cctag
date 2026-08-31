@@ -231,7 +231,29 @@ export const claudeDriver: AgentDriver = {
     if (downs.length) await herdr.paneSendKeys(paneId, ...downs);
     await herdr.agentSend(paneId, text);
     await sleep(200);
+
+    if (!info.multiSelect) {
+      await herdr.paneSendKeys(paneId, "Enter");
+      return;
+    }
+
+    // On a multi-select dialog that same Enter *undoes* the answer. Measured on
+    // a live 2.1.251 pane, replying "1,3" to a three-option question:
+    //
+    //     ❯ 4. [✔] 1,3      typing into the row ticks it automatically
+    //     ❯ 4. [ ] 1,3      ... and Enter, which here means "select", unticks it
+    //
+    // The dialog then just sits there with the text typed, deselected and
+    // unsubmitted — reported from production as "replying 1,3 didn't work".
+    // Submitting is the same walk as answerQuestionMultiSelect's: one more Down
+    // onto Submit, Enter, then confirm the review screen.
+    await herdr.paneSendKeys(paneId, "Down");
+    await sleep(150);
     await herdr.paneSendKeys(paneId, "Enter");
+    await sleep(500);
+    const after = await herdr.paneRead(paneId, { source: "recent", lines: 60 });
+    if (!SUBMIT_ANSWERS_RE.test(after)) return;
+    await herdr.agentSend(paneId, "1");
   },
 
   async answerPlanFeedback(herdr, paneId, optionNum, text) {

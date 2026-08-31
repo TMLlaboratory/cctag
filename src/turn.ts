@@ -45,6 +45,28 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * A reply that is nothing but option numbers, as 0-based indices — or null when
+ * it is anything else.
+ *
+ * Full-width commas and the Japanese enumeration comma are accepted because a
+ * reply typed on a Japanese keyboard uses them. A single number counts: picking
+ * one option out of a multi-select list is an ordinary thing to want.
+ *
+ * Returns null for a duplicate, since toggling the same box twice would turn it
+ * back off — better to pass "1,1" through as text than to submit nothing.
+ */
+function optionNumbersIn(text: string, info: AskUserQuestionPaneInfo): number[] | null {
+  if (!info.multiSelect) return null;
+  const trimmed = text.trim();
+  if (!/^\d+(?:\s*[,、，]\s*\d+)*$/.test(trimmed)) return null;
+  const nums = trimmed.split(/[,、，]/).map((t) => Number(t.trim()));
+  if (nums.some((n) => !Number.isInteger(n) || n < 1 || n > info.options.length)) return null;
+  const indices = nums.map((n) => n - 1);
+  if (new Set(indices).size !== indices.length) return null;
+  return indices;
+}
+
+/**
  * Waits before the next poll, giving up as soon as the lease is cancelled.
  *
  * The wait is five seconds while a prompt is up, and the holder releases the pane
@@ -714,6 +736,19 @@ export class TurnEngine {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
+
+    // "1,3" to a multi-select question means options 1 and 3, not the literal
+    // string. Claude Code does not read it that way — the free-text row records
+    // whatever was typed, verbatim, so the agent received "1,3" and had to guess
+    // — and it is what a reader types anyway, reported from real use before the
+    // checkboxes existed. Only for multi-select, only when every token is a
+    // valid option number: anything else stays free text, where a genuine answer
+    // of "1,3" still gets through unchanged on a single-select question.
+    const asIndices = optionNumbersIn(freeText, info);
+    if (asIndices && state.driver.answerQuestionMultiSelect) {
+      return this.answerQuestionMultiSelect(paneId, state.currentPromptId, asIndices);
+    }
+
     const answer = state.driver.answerQuestionFreeText;
     if (!answer) return { ok: false, reason: "not-pending" };
 

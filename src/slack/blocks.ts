@@ -195,7 +195,7 @@ export function askUserQuestionBlocks(paneId: string, promptId: number, info: As
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*複数選択できます。* 選んで「送信」を押すか、このスレッドに返信して自由記述で答えてください。\n${info.options
+        text: `*複数選択できます。* 選んで「送信」を押すか、このスレッドに「1,3」のように番号で返信してください。\n${info.options
           .map((o, i) => `*${i + 1}.* ${o.label}${o.description ? `\n    ${o.description}` : ""}`)
           .join("\n")}`,
       },
@@ -237,7 +237,7 @@ export function askUserQuestionBlocks(paneId: string, promptId: number, info: As
           text:
             hiddenBoxes > 0
               ? `チェックボックスは${MAX_CHECKBOX_OPTIONS}件までです。残り${hiddenBoxes}件を選ぶ場合は、このスレッドに返信してください`
-              : "1つ以上選んでから「送信」を押してください",
+              : "番号以外の返信は、そのまま自由記述の回答として渡されます",
         },
       ],
     });

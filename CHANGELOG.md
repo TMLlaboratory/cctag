@@ -24,6 +24,15 @@ would have to keep. Pin an exact version if that matters to you.
   free-text row, and the Enter there opens a review screen that needs its own
   confirmation. Answering a multi-select from Slack requires the Hub to be
   updated too; an older one is told to, rather than silently sending nothing.
+- Replying to a multi-select question with free text no longer un-does itself.
+  Typing into the dialog's free-text row ticks it automatically, and the Enter
+  the single-select path sends means "select" there — so it unticked the answer
+  and submitted nothing, leaving the dialog on screen. Reported as "replying
+  1,3 didn't work".
+- A reply of nothing but option numbers ("1,3") now ticks those boxes. Claude
+  Code never read it that way: the free-text row records what was typed
+  verbatim, so the agent received the string and had to guess. Only for
+  multi-select, and only when every token is a valid option number.
 - A prompt answered at the terminal keeps its question in the thread. The
   message was replaced by the bare note "answered at the terminal", so a thread
   showed that *something* had been asked and answered with no way to see what.
