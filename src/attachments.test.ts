@@ -132,3 +132,46 @@ test("readOutboundAttachments skips missing and empty files", () => {
   );
   assert.deepEqual(files, []);
 });
+
+test("forgetting a handed-over file leaves a still-pending request able to confirm", async () => {
+  // forget() exists because BackgroundWatcher's tracker outlives a single
+  // hand-off, and nothing cleared it — so every settle re-sent everything
+  // confirmed since the watch began. It must drop only what was handed over:
+  // a SendUserFile still waiting on its tool_result has not been uploaded.
+  const tracker = new WrittenFileTracker();
+  tracker.ingest({
+    sendFileRequests: [
+      { toolUseId: "t1", paths: ["/tmp/a.pdf"] },
+      { toolUseId: "t2", paths: ["/tmp/b.pdf"] },
+    ],
+    toolOutcomes: [{ toolUseId: "t1", ok: true }], // t2's result has not arrived
+  });
+
+  const handedOver = tracker.paths();
+  assert.deepEqual(
+    handedOver.map((p) => p.path),
+    ["/tmp/a.pdf"],
+  );
+  tracker.forget(handedOver);
+  assert.deepEqual(tracker.paths(), [], "an uploaded file is not offered a second time");
+
+  tracker.ingest({ toolOutcomes: [{ toolUseId: "t2", ok: true }] });
+  assert.deepEqual(
+    tracker.paths().map((p) => p.path),
+    ["/tmp/b.pdf"],
+    "the pending request must still be able to confirm after a forget",
+  );
+});
+
+test("forgetting one file does not forget another confirmed in the same batch", async () => {
+  const tracker = new WrittenFileTracker();
+  tracker.ingest({
+    sendFileRequests: [{ toolUseId: "t1", paths: ["/tmp/a.pdf", "/tmp/b.pdf"] }],
+    toolOutcomes: [{ toolUseId: "t1", ok: true }],
+  });
+  tracker.forget([{ path: "/tmp/a.pdf" }]);
+  assert.deepEqual(
+    tracker.paths().map((p) => p.path),
+    ["/tmp/b.pdf"],
+  );
+});

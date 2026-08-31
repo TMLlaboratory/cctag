@@ -11,8 +11,15 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
-Documentation only so far — no release cut for it, since nothing a user runs
-has changed. It ships with whatever change comes next.
+### Fixed
+
+- Terminal-side work no longer re-sends every file it has already sent. The
+  watcher keeps one write tracker per watched pane and uploads on every settle
+  it notices, and nothing cleared the confirmed set — so each settle handed over
+  everything confirmed since the watch began. Measured in a thread where it
+  happened: the oldest file posted 13 times, the next 6, the next 4, oldest most
+  often. The text collected for a settle was emptied and the outbox baseline
+  advanced right beside it; only the writes were not.
 
 ### Changed
 
