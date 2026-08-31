@@ -10,10 +10,33 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * What "owner" actually means, said in the help rather than left to be guessed.
+ *
+ * The help used to read "（オーナーのみ）", which is correct as access control and
+ * was read as *the channel's* owner — reported from real use. The authority is
+ * not a narrowed Slack permission: the Spoke runs on the owner's own machine, so
+ * `connect` is that person choosing which of their own panes to expose
+ * (docs/how-it-works.md says exactly this, and was corrected before the strings
+ * a reader actually sees were).
+ */
+const OWNERSHIP_NOTE =
+  "（`connect` / `disconnect` はチャンネルの管理者ではなく、cctagが動いている計算機の使用者だけが実行できます）";
+
+/**
+ * Reply for a command that needs a pairing when the thread has none.
+ *
+ * A constant because the same sentence was written out at five call sites, and a
+ * wording fix had to find all five — which is how "オーナー" survived here after
+ * the documentation had already stopped using it that way.
+ */
+const NOT_CONNECTED_MESSAGE =
+  "接続されていません。cctagを動かしている本人がこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。";
+
 const CLAUDE_HELP_TEXT = [
   "*cctag の使い方*",
-  "• `@cctag connect` — このスレッドを Claude Code インスタンスに接続（オーナーのみ）",
-  "• `@cctag disconnect` — 接続を解除（オーナーのみ）",
+  "• `@cctag connect` — このスレッドを稼働中のコーディングエージェント（Claude Code / Codex CLI）に接続（cctagを動かしている本人のみ）",
+  "• `@cctag disconnect` — 接続を解除（cctagを動かしている本人のみ）",
   "• `@cctag status` — 接続状態を表示",
   "• `@cctag list` — 稼働中のインスタンス一覧",
   "• `@cctag model <name>` — Claude Code のモデルを切り替え（例: `model opus`）",
@@ -23,12 +46,13 @@ const CLAUDE_HELP_TEXT = [
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
   "• 画像やファイルを添付して `@cctag` すると、そのままインスタンスに渡されます（画像は画像として認識されます）",
   "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
+  OWNERSHIP_NOTE,
 ].join("\n");
 
 const CODEX_HELP_TEXT = [
   "*cctag の使い方（Codex CLI）*",
-  "• `@cctag connect` — このスレッドを Codex CLI インスタンスに接続（オーナーのみ）",
-  "• `@cctag disconnect` — 接続を解除（オーナーのみ）",
+  "• `@cctag connect` — このスレッドを稼働中のコーディングエージェント（Claude Code / Codex CLI）に接続（cctagを動かしている本人のみ）",
+  "• `@cctag disconnect` — 接続を解除（cctagを動かしている本人のみ）",
   "• `@cctag status` — 接続状態を表示",
   "• `@cctag list` — 稼働中のインスタンス一覧",
   "• `@cctag model <name> [level]` — モデル・推論レベルを切り替え（例: `model gpt-5.6-sol high`）",
@@ -36,13 +60,23 @@ const CODEX_HELP_TEXT = [
   "• `@cctag <メッセージ>` — 接続済みインスタンスにメッセージを送信",
   "• 添付ファイルはパスとして渡されます（Codex CLI は画像も読み取れます）",
   "• インスタンスが `.cctag/outbox/` に置いたファイルは、ターン終了時にこのスレッドへ自動添付されます",
+  OWNERSHIP_NOTE,
   "（`mode` / `plan` は Codex CLI では利用できません）",
 ].join("\n");
 
-/** Unpaired threads (driver unknown) and Claude Code panes get the full,
- *  byte-identical help text they always have; other agents get a variant
- *  without the capabilities they don't support. */
-function helpTextFor(driver: AgentDriver | null): string {
+/**
+ * The help for a thread, by whichever agent it is paired to.
+ *
+ * A thread with no pairing — and one whose pane herdr cannot currently reach —
+ * resolves to `null` and falls back to the Claude variant. That fallback is why
+ * the `connect` line names both agents instead of Claude Code alone: unpaired is
+ * exactly the state where the agent is not yet known, and `connect` offers every
+ * running pane regardless of it. Reported from real use, where someone asking
+ * for help before pairing was told to connect "a Claude Code instance".
+ *
+ * Other agents get a variant without the capabilities they don't support.
+ */
+export function helpTextFor(driver: AgentDriver | null): string {
   if (driver && driver.kind !== "claude") return CODEX_HELP_TEXT;
   return CLAUDE_HELP_TEXT;
 }
@@ -178,7 +212,7 @@ export class CommandHandler {
         await this.notifier.postReply(
           channel,
           threadTs,
-          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
+          NOT_CONNECTED_MESSAGE,
         );
         return;
       }
@@ -213,7 +247,7 @@ export class CommandHandler {
         await this.notifier.postReply(
           channel,
           threadTs,
-          "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
+          NOT_CONNECTED_MESSAGE,
         );
         return;
       }
@@ -253,7 +287,7 @@ export class CommandHandler {
           await this.notifier.postReply(
             channel,
             threadTs,
-            "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
+            NOT_CONNECTED_MESSAGE,
           );
           return;
         }
@@ -275,7 +309,7 @@ export class CommandHandler {
       }
       case "connect": {
         if (!this.isOwner(userId)) {
-          await this.notifier.postReply(channel, threadTs, "⚠️ `connect` はオーナーのみ実行できます。");
+          await this.notifier.postReply(channel, threadTs, "⚠️ `connect` は cctag を動かしている本人（チャンネルの管理者ではありません）のみ実行できます。");
           return;
         }
         const agents = await this.herdr.agentList();
@@ -284,7 +318,7 @@ export class CommandHandler {
       }
       case "disconnect": {
         if (!this.isOwner(userId)) {
-          await this.notifier.postReply(channel, threadTs, "⚠️ `disconnect` はオーナーのみ実行できます。");
+          await this.notifier.postReply(channel, threadTs, "⚠️ `disconnect` は cctag を動かしている本人のみ実行できます。");
           return;
         }
         const pairing = this.pairingStore.get(channel, threadTs);
@@ -376,7 +410,7 @@ export class CommandHandler {
       await this.notifier.postReply(
         channel,
         threadTs,
-        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
+        NOT_CONNECTED_MESSAGE,
       );
       return;
     }
@@ -492,7 +526,7 @@ export class CommandHandler {
       await this.notifier.postReply(
         channel,
         threadTs,
-        "接続されていません。オーナーがこのスレッドで「@cctag connect」を実行し、インスタンスを選択してください。",
+        NOT_CONNECTED_MESSAGE,
       );
       return;
     }
@@ -546,7 +580,7 @@ export class CommandHandler {
   async handlePairSelect(ctx: PairSelectContext): Promise<void> {
     const { channel, threadTs, userId, terminalId: paneId } = ctx;
     if (!this.isOwner(userId)) {
-      await this.notifier.postReply(channel, threadTs, "⚠️ オーナーのみ接続できます。");
+      await this.notifier.postReply(channel, threadTs, "⚠️ 接続できるのは cctag を動かしている本人のみです。");
       return;
     }
 

@@ -101,7 +101,7 @@ async function runServer(): Promise<void> {
     await app.client.chat.postMessage({
       channel,
       thread_ts: threadTs,
-      text: "⚠️ 起動していません。オーナーの cctag spoke デーモンが起動しているか確認してください。",
+      text: "⚠️ 起動していません。cctagを動かしている計算機のspokeデーモンが起動しているか確認してください。",
     });
   }
 

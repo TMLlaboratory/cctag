@@ -218,3 +218,43 @@ test("the frame states who, and nothing about how to treat them", async () => {
     assert.ok(!out.includes(word), `the frame must not tell the agent what to do (found ${word})`);
   }
 });
+
+// --- help text ---------------------------------------------------------------
+
+test("the help an unpaired thread gets does not name one agent as the thing to connect", async () => {
+  // Reported from real use. An unpaired thread has no driver, so helpTextFor
+  // falls back to the Claude variant — and that variant told the reader to
+  // connect "a Claude Code instance", in exactly the state where nobody knows
+  // yet which agent they will pick. `connect` offers every running pane.
+  const { helpTextFor } = await import("./commands.js");
+  const unpaired = helpTextFor(null);
+  const connectLine = unpaired.split("\n").find((l) => l.includes("`@cctag connect`"));
+  assert.ok(connectLine, "the help must document connect");
+  assert.ok(connectLine.includes("Claude Code"), connectLine);
+  assert.ok(connectLine.includes("Codex CLI"), connectLine);
+});
+
+test("no help text tells the reader that only 'the owner' can connect", async () => {
+  // "（オーナーのみ）" is accurate as access control and was read as *the
+  // channel's* owner. The authority is not a narrowed Slack permission: the
+  // Spoke runs on that person's own machine, so connect is them choosing among
+  // their own panes — which docs/how-it-works.md already said while these
+  // strings still did not.
+  const { helpTextFor } = await import("./commands.js");
+  const { codexDriver } = await import("./agents/codex/driver.js");
+  for (const text of [helpTextFor(null), helpTextFor(codexDriver)]) {
+    assert.ok(!text.includes("オーナー"), `help must not lean on the word オーナー:\n${text}`);
+    assert.ok(
+      text.includes("チャンネルの管理者ではなく"),
+      `help should say what owner-only actually means:\n${text}`,
+    );
+  }
+});
+
+test("a Codex-paired thread still gets the Codex variant", async () => {
+  const { helpTextFor } = await import("./commands.js");
+  const { codexDriver } = await import("./agents/codex/driver.js");
+  const codex = helpTextFor(codexDriver);
+  assert.ok(codex.includes("Codex CLI では利用できません"), "the Codex variant drops mode/plan");
+  assert.ok(!helpTextFor(null).includes("Codex CLI では利用できません"));
+});
