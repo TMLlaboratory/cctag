@@ -177,6 +177,28 @@ export interface AgentDriver {
      *  something else may already have claimed. */
     signal?: AbortSignal,
   ): Promise<void>;
+  /**
+   * Answers a *multi-select* question: toggles the chosen options and submits.
+   *
+   * Separate from answerQuestionOption because the keystrokes are not the same
+   * shape. Measured on a live 2.1.251 pane: a digit *toggles* a checkbox and
+   * leaves the cursor where it was, so several digits accumulate a selection and
+   * none of them submits — the opposite of the single-select list, where the
+   * digit confirms on its own. Submitting then takes two more steps, hence a
+   * dedicated method rather than a flag on the one above.
+   *
+   * Absent = this agent has no multi-select dialog, and cctag must not offer
+   * one in Slack.
+   */
+  answerQuestionMultiSelect?(
+    herdr: HerdrClient,
+    paneId: string,
+    /** 1-based option numbers, in the order they should be toggled. */
+    optionNums: number[],
+    info: AskUserQuestionPaneInfo,
+    /** See answerQuestionOption's. */
+    signal?: AbortSignal,
+  ): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
   answerQuestionFreeText?(
     herdr: HerdrClient,

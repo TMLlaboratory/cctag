@@ -7,6 +7,7 @@ import { CommandHandler, stripComposerAttribution, stripMention } from "../comma
 import { BackgroundWatcher } from "../watcher.js";
 import { incomingFilesFrom, isPlainOrFileShare, type FileBearingEvent } from "./files.js";
 import { displayNameFor, resolveUserMentions, SlackNotifier } from "./notifier.js";
+import { AQ_MULTI_CHECKBOX_ACTION_ID, selectedOptionIndices } from "./blocks.js";
 
 const { App } = Bolt;
 
@@ -90,8 +91,23 @@ export async function buildApp(config: Config) {
     const threadTs = actionBody.message?.thread_ts ?? actionBody.message?.ts;
     const raw = actionBody.actions[0]?.value;
     if (!channel || !threadTs || !raw) return;
-    const value = JSON.parse(raw) as { t: string; p: number; o: number };
+    const value = JSON.parse(raw) as { k?: string; t: string; p: number; o: number };
     const actorUserId = actionBody.user?.id;
+    const actorName = actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined;
+    if (value.k === "aqm") {
+      // No Hub in this configuration, so the ticked boxes are read straight off
+      // the body Slack delivered rather than out of a relayed value string.
+      await commands.handleAskUserQuestionMultiSelect({
+        channel,
+        threadTs,
+        terminalId: value.t,
+        promptId: value.p,
+        optionIndices: selectedOptionIndices(body) ?? [],
+        actorUserId,
+        actorName,
+      });
+      return;
+    }
     await commands.handleAskUserQuestionButton({
       channel,
       threadTs,
@@ -99,8 +115,13 @@ export async function buildApp(config: Config) {
       promptId: value.p,
       optionIndex: value.o,
       actorUserId,
-      actorName: actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined,
+      actorName,
     });
+  });
+
+  // See the Hub's copy: a tick needs an ack, and nothing more.
+  app.action(AQ_MULTI_CHECKBOX_ACTION_ID, async ({ ack }) => {
+    await ack();
   });
 
   app.action(/^perm_choice_/, async ({ ack, body }) => {

@@ -106,6 +106,17 @@ export interface AskUserQuestionButtonContext extends ButtonActor {
   optionIndex: number;
 }
 
+export interface AskUserQuestionMultiSelectContext extends ButtonActor {
+  channel: string;
+  threadTs: string;
+  /** See AskUserQuestionButtonContext.terminalId — same paneId-via-`t` round trip. */
+  terminalId: string;
+  promptId: number;
+  /** Ticked option indices, or null when the relay could not carry them at all
+   *  (a Hub older than checkbox support) — the two get different replies. */
+  optionIndices: number[] | null;
+}
+
 export interface PermissionButtonContext extends ButtonActor {
   channel: string;
   threadTs: string;
@@ -642,6 +653,30 @@ export class CommandHandler {
       ctx.terminalId,
       ctx.promptId,
       ctx.optionIndex,
+      this.actorLabel(ctx),
+    );
+    if (!result.ok) {
+      await this.notifier.postReply(ctx.channel, ctx.threadTs, "⚠️ この質問は既に回答済みです。");
+    }
+  }
+
+  async handleAskUserQuestionMultiSelect(ctx: AskUserQuestionMultiSelectContext): Promise<void> {
+    if (ctx.optionIndices === null) {
+      await this.notifier.postReply(
+        ctx.channel,
+        ctx.threadTs,
+        "⚠️ Hubが複数選択の送信に未対応です（Hub側の更新が必要です）。ターミナルで回答してください。",
+      );
+      return;
+    }
+    if (ctx.optionIndices.length === 0) {
+      await this.notifier.postReply(ctx.channel, ctx.threadTs, "⚠️ 選択肢を1つ以上選んでから送信してください。");
+      return;
+    }
+    const result = await this.turnEngine.answerQuestionMultiSelect(
+      ctx.terminalId,
+      ctx.promptId,
+      ctx.optionIndices,
       this.actorLabel(ctx),
     );
     if (!result.ok) {

@@ -20,6 +20,29 @@ would have to keep. Pin an exact version if that matters to you.
   happened: the oldest file posted 13 times, the next 6, the next 4, oldest most
   often. The text collected for a settle was emptied and the outbox baseline
   advanced right beside it; only the writes were not.
+- A multi-select `AskUserQuestion` can now be answered from Slack. It never
+  could: the message carried a numbered list and an invitation to reply in free
+  text, and no interactive element at all. Reported from a four-question dialog
+  where question 1 was answered by button and question 2 — the multi-select one
+  — was not, so the whole dialog was finished at the keyboard instead. Slack has
+  had a `checkboxes` element the whole time; the gap was cctag's. The submitting
+  keystrokes were measured against a live dialog rather than inferred: a digit
+  *toggles* a box and does not submit, the `Submit` row sits one past the
+  free-text row, and the Enter there opens a review screen that needs its own
+  confirmation. Answering a multi-select from Slack requires the Hub to be
+  updated too; an older one is told to, rather than silently sending nothing.
+- Replying to a multi-select question with free text no longer un-does itself.
+  Typing into the dialog's free-text row ticks it automatically, and the Enter
+  the single-select path sends means "select" there — so it unticked the answer
+  and submitted nothing, leaving the dialog on screen. Reported as "replying
+  1,3 didn't work".
+- A reply of nothing but option numbers ("1,3") now ticks those boxes. Claude
+  Code never read it that way: the free-text row records what was typed
+  verbatim, so the agent received the string and had to guess. Only for
+  multi-select, and only when every token is a valid option number.
+- A prompt answered at the terminal keeps its question in the thread. The
+  message was replaced by the bare note "answered at the terminal", so a thread
+  showed that *something* had been asked and answered with no way to see what.
 
 ### Changed
 
@@ -44,6 +67,8 @@ would have to keep. Pin an exact version if that matters to you.
 - Tests for the documentation invariants that nothing else noticed: the two
   READMEs keep the same heading structure, every internal link resolves, and the
   version the READMEs claim matches `package.json`.
+- `src/slack/blocks.test.ts`, which did not exist: the block builders had no
+  tests, which is how a branch that produced no buttons went unnoticed.
 
 ## [0.2.0] - 2026-08-25
 

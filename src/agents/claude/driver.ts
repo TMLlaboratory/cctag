@@ -11,6 +11,7 @@ import {
   parseCurrentMode,
   parsePermissionMenu,
   parsePreviewQuestionPane,
+  SUBMIT_ANSWERS_RE,
   classicAnchorIndex,
   permissionAnchorIndex,
   previewAnchorIndex,
@@ -179,6 +180,50 @@ export const claudeDriver: AgentDriver = {
     await herdr.paneSendKeys(paneId, "Enter");
   },
 
+  async answerQuestionMultiSelect(herdr, paneId, optionNums, info, signal) {
+    // Every step below was measured on a live multi-select dialog (Claude Code
+    // 2.1.251), not inferred from the single-select path — the last multi-select
+    // bug came from a fixture written by assumption, so this one is a capture.
+    //
+    //     ❯ 1. [ ] Alpha        <- a digit toggles this to [✔] and does NOT
+    //       2. [ ] Bravo           move the cursor or submit
+    //       3. [ ] Charlie
+    //       4. [ ] Delta
+    //       5. [ ] Type something
+    //          Submit           <- Down × (options.length + 1) lands here
+    for (const num of optionNums) {
+      await herdr.agentSend(paneId, String(num));
+      await sleep(150);
+    }
+
+    // The free-text row is options.length + 1, and Submit sits one past it. The
+    // cursor has not moved (the digits do not move it), so this count is from
+    // row 1 every time. answerQuestionFreeText uses options.length downs to
+    // reach the free-text row, which is the same geometry one row up.
+    await herdr.paneSendKeys(paneId, ...Array(info.options.length + 1).fill("Down"));
+    await sleep(200);
+    if (signal?.aborted) return;
+    await herdr.paneSendKeys(paneId, "Enter");
+
+    // Enter on Submit does not finish the dialog: a review screen appears —
+    //
+    //     Ready to submit your answers?
+    //     ❯ 1. Submit answers
+    //       2. Cancel
+    //
+    // — but only when this was the *last* question of the dialog. For an earlier
+    // one the next question comes up instead, and a `1` sent there would toggle
+    // that question's first option. So the pane is the witness, exactly as in
+    // answerQuestionOption; anything other than the review screen is left alone
+    // for the poll loop to post.
+    await sleep(500);
+    if (signal?.aborted) return;
+    const after = await herdr.paneRead(paneId, { source: "recent", lines: 60 });
+    if (!SUBMIT_ANSWERS_RE.test(after)) return;
+    if (signal?.aborted) return;
+    await herdr.agentSend(paneId, "1");
+  },
+
   async answerQuestionFreeText(herdr, paneId, info, text) {
     // Navigate down to the "Type something" row (the free-text row must be
     // reached via arrows and then have its placeholder replaced before Enter).
@@ -186,7 +231,29 @@ export const claudeDriver: AgentDriver = {
     if (downs.length) await herdr.paneSendKeys(paneId, ...downs);
     await herdr.agentSend(paneId, text);
     await sleep(200);
+
+    if (!info.multiSelect) {
+      await herdr.paneSendKeys(paneId, "Enter");
+      return;
+    }
+
+    // On a multi-select dialog that same Enter *undoes* the answer. Measured on
+    // a live 2.1.251 pane, replying "1,3" to a three-option question:
+    //
+    //     ❯ 4. [✔] 1,3      typing into the row ticks it automatically
+    //     ❯ 4. [ ] 1,3      ... and Enter, which here means "select", unticks it
+    //
+    // The dialog then just sits there with the text typed, deselected and
+    // unsubmitted — reported from production as "replying 1,3 didn't work".
+    // Submitting is the same walk as answerQuestionMultiSelect's: one more Down
+    // onto Submit, Enter, then confirm the review screen.
+    await herdr.paneSendKeys(paneId, "Down");
+    await sleep(150);
     await herdr.paneSendKeys(paneId, "Enter");
+    await sleep(500);
+    const after = await herdr.paneRead(paneId, { source: "recent", lines: 60 });
+    if (!SUBMIT_ANSWERS_RE.test(after)) return;
+    await herdr.agentSend(paneId, "1");
   },
 
   async answerPlanFeedback(herdr, paneId, optionNum, text) {

@@ -99,21 +99,147 @@ interface AqButtonValue {
   o: number; // option index
 }
 
+/**
+ * The multi-select submit button's payload. It carries no selection: what is
+ * ticked lives in Slack's own `state`, read at click time by
+ * selectedOptionIndices, because a button's value is fixed when the message is
+ * built and the boxes are ticked long after that.
+ */
+interface AqMultiButtonValue {
+  k: "aqm";
+  t: string;
+  p: number;
+}
+
+/** Ticked by the reader; carries no submit of its own. */
+export const AQ_MULTI_CHECKBOX_ACTION_ID = "aq_multi_select";
+/** Named to fall under the `aq_answer_` prefix both routers already match. */
+export const AQ_MULTI_SUBMIT_ACTION_ID = "aq_answer_multi";
+
+/** Slack's own cap on a checkboxes element. AskUserQuestion offers at most four
+ *  options today, so this is headroom rather than a limit anyone should hit. */
+const MAX_CHECKBOX_OPTIONS = 10;
+/** Slack rejects a checkbox option's text past 75 characters — see the comment
+ *  at the options map for why that is a hard failure and not a truncation. */
+const CHECKBOX_LABEL_MAX = 75;
+
+function checkboxLabel(num: number, label: string): string {
+  const prefix = `${num}. `;
+  const room = CHECKBOX_LABEL_MAX - prefix.length;
+  return prefix + (label.length > room ? `${label.slice(0, room - 1)}…` : label);
+}
+
+/**
+ * The submit button's value with the ticked boxes folded into it, for relaying
+ * to a Spoke over the one `aq_answer` call that already exists.
+ *
+ * A Hub too old to know about this leaves the value alone, so the field is
+ * simply absent on arrival — which the Spoke reports as "the Hub needs
+ * updating" rather than as an empty selection. Anything that is not the
+ * multi-select submit passes through untouched.
+ */
+export function withSelectedIndices(raw: string, body: unknown): string {
+  let parsed: { k?: string };
+  try {
+    parsed = JSON.parse(raw) as { k?: string };
+  } catch {
+    return raw;
+  }
+  if (parsed.k !== "aqm") return raw;
+  return JSON.stringify({ ...parsed, s: selectedOptionIndices(body) ?? undefined });
+}
+
+/**
+ * The option indices ticked in a checkboxes element, out of a `block_actions`
+ * body.
+ *
+ * Lives beside the builder above on purpose: the `value` strings it reads are
+ * the ones that builder wrote, and a change to one is a change to the other.
+ * Scans every block rather than keying off a block_id, since Slack assigns
+ * block ids itself when the message doesn't set them.
+ *
+ * Returns null when the element isn't in the body at all — which is how an
+ * older Hub, one that relays the click without Slack's `state`, is told apart
+ * from a reader who ticked nothing.
+ */
+export function selectedOptionIndices(body: unknown): number[] | null {
+  const values = (body as { state?: { values?: Record<string, Record<string, unknown>> } })?.state?.values;
+  if (!values) return null;
+  for (const block of Object.values(values)) {
+    const element = block?.[AQ_MULTI_CHECKBOX_ACTION_ID] as
+      | { selected_options?: Array<{ value?: string }> }
+      | undefined;
+    if (!element) continue;
+    return (element.selected_options ?? [])
+      .map((o) => Number(o.value))
+      .filter((n) => Number.isInteger(n) && n >= 0)
+      .sort((a, b) => a - b);
+  }
+  return null;
+}
+
 /** Renders an AskUserQuestion prompt read off the pane (one question at a time). */
 export function askUserQuestionBlocks(paneId: string, promptId: number, info: AskUserQuestionPaneInfo) {
   const header = `❓ ${info.header}`;
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: `*${header}*\n${info.question}` } }];
 
   if (info.multiSelect) {
-    const optionLines = info.options.map(
-      (o, i) => `${i + 1}. *${o.label}*${o.description ? ` — ${o.description}` : ""}`,
-    );
+    // Until 2026-08-31 this branch returned here with no interactive element at
+    // all — a numbered list and "reply in free text". Reported from production:
+    // question 1 of a four-question dialog was answered from Slack by button and
+    // question 2, the multi-select one, offered nothing to press, so the whole
+    // dialog got finished at the keyboard instead. Slack has had a checkboxes
+    // element the whole time; the gap was cctag's.
+    const shown = info.options.slice(0, MAX_CHECKBOX_OPTIONS);
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `複数選択可能な質問です。このスレッドへの返信で、選びたい項目をまとめて自由記述で答えてください:\n${optionLines.join("\n")}`,
+        text: `*複数選択できます。* 選んで「送信」を押すか、このスレッドに「1,3」のように番号で返信してください。\n${info.options
+          .map((o, i) => `*${i + 1}.* ${o.label}${o.description ? `\n    ${o.description}` : ""}`)
+          .join("\n")}`,
       },
+    });
+    blocks.push({
+      type: "actions",
+      elements: [
+        {
+          type: "checkboxes",
+          action_id: AQ_MULTI_CHECKBOX_ACTION_ID,
+          // Number and label only. A checkbox option's text and description cap
+          // at 75 characters each, and the descriptions here routinely run past
+          // 100 — an over-long field is not truncated by Slack, it rejects the
+          // whole message as invalid_blocks and cctag falls back to plain text,
+          // which is the very failure this branch exists to end. The full text
+          // is in the section above, so nothing is lost by keeping these short.
+          options: shown.map((o, i) => ({
+            text: { type: "plain_text", text: checkboxLabel(i + 1, o.label) },
+            value: String(i),
+          })),
+        },
+        {
+          type: "button",
+          text: { type: "plain_text", text: "送信" },
+          style: "primary",
+          value: JSON.stringify({ k: "aqm", t: paneId, p: promptId } satisfies AqMultiButtonValue),
+          // Deliberately under the aq_answer_ prefix the routers already match,
+          // so no new route is needed on either the Hub or the standalone app.
+          action_id: AQ_MULTI_SUBMIT_ACTION_ID,
+        },
+      ],
+    });
+    const hiddenBoxes = info.options.length - shown.length;
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text:
+            hiddenBoxes > 0
+              ? `チェックボックスは${MAX_CHECKBOX_OPTIONS}件までです。残り${hiddenBoxes}件を選ぶ場合は、このスレッドに返信してください`
+              : "番号以外の返信は、そのまま自由記述の回答として渡されます",
+        },
+      ],
     });
     return blocks;
   }

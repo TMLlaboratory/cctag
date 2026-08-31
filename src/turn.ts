@@ -45,6 +45,28 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * A reply that is nothing but option numbers, as 0-based indices — or null when
+ * it is anything else.
+ *
+ * Full-width commas and the Japanese enumeration comma are accepted because a
+ * reply typed on a Japanese keyboard uses them. A single number counts: picking
+ * one option out of a multi-select list is an ordinary thing to want.
+ *
+ * Returns null for a duplicate, since toggling the same box twice would turn it
+ * back off — better to pass "1,1" through as text than to submit nothing.
+ */
+function optionNumbersIn(text: string, info: AskUserQuestionPaneInfo): number[] | null {
+  if (!info.multiSelect) return null;
+  const trimmed = text.trim();
+  if (!/^\d+(?:\s*[,、，]\s*\d+)*$/.test(trimmed)) return null;
+  const nums = trimmed.split(/[,、，]/).map((t) => Number(t.trim()));
+  if (nums.some((n) => !Number.isInteger(n) || n < 1 || n > info.options.length)) return null;
+  const indices = nums.map((n) => n - 1);
+  if (new Set(indices).size !== indices.length) return null;
+  return indices;
+}
+
+/**
  * Waits before the next poll, giving up as soon as the lease is cancelled.
  *
  * The wait is five seconds while a prompt is up, and the holder releases the pane
@@ -661,12 +683,72 @@ export class TurnEngine {
     return { ok: true };
   }
 
+  async answerQuestionMultiSelect(
+    paneId: string,
+    promptId: number,
+    optionIndices: number[],
+    actor?: string,
+  ): Promise<AnswerResult> {
+    const state = this.turns.get(paneId);
+    if (
+      !state ||
+      state.phase !== "awaiting-question" ||
+      state.currentPromptId !== promptId ||
+      !state.pendingQuestionInfo ||
+      state.answering
+    ) {
+      return { ok: false, reason: "not-pending" };
+    }
+    const info = state.pendingQuestionInfo;
+    const submit = state.driver.answerQuestionMultiSelect;
+    // Only reachable if the blocks offered checkboxes, which only happens for a
+    // multi-select question on a driver that can submit one — but the guard is
+    // cheap and a stale message is not a reason to send digits into a
+    // single-select list.
+    if (!submit || !info.multiSelect) return { ok: false, reason: "not-pending" };
+
+    const chosen = optionIndices.filter((i) => i >= 0 && i < info.options.length);
+    if (chosen.length === 0) return { ok: false, reason: "not-pending" };
+
+    state.answering = true; // claimed — see TurnState.answering
+    try {
+      await submit(
+        this.herdr,
+        state.paneId,
+        chosen.map((i) => i + 1),
+        info,
+        state.lease.signal,
+      );
+    } catch (err) {
+      state.answering = false; // nothing was accepted; let the user try again
+      throw err;
+    }
+    const labels = chosen.map((i) => info.options[i].label).join(", ");
+    await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, labels, actor), []).catch(() => {});
+    this.markPromptResolved(state);
+    await this.restartStatusLine(state);
+    return { ok: true };
+  }
+
   async answerQuestionFreeText(paneId: string, freeText: string): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
     if (!state || state.phase !== "awaiting-question" || !state.pendingQuestionInfo || state.answering) {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
+
+    // "1,3" to a multi-select question means options 1 and 3, not the literal
+    // string. Claude Code does not read it that way — the free-text row records
+    // whatever was typed, verbatim, so the agent received "1,3" and had to guess
+    // — and it is what a reader types anyway, reported from real use before the
+    // checkboxes existed. Only for multi-select, only when every token is a
+    // valid option number: anything else stays free text, where a genuine answer
+    // of "1,3" still gets through unchanged on a single-select question.
+    const asIndices = optionNumbersIn(freeText, info);
+    if (asIndices && state.driver.answerQuestionMultiSelect) {
+      return this.answerQuestionMultiSelect(paneId, state.currentPromptId, asIndices);
+    }
+
     const answer = state.driver.answerQuestionFreeText;
     if (!answer) return { ok: false, reason: "not-pending" };
 
@@ -771,6 +853,26 @@ export class TurnEngine {
   /** Clears everything tied to the prompt just answered and hands the turn back
    *  to the poll loop. Shared by all four answer paths so none can forget a
    *  field — notably `answering`, which would otherwise wedge the turn. */
+  /**
+   * What replaces a prompt message once it turns out to have been answered at
+   * the keyboard instead of from Slack.
+   *
+   * It used to be the bare note, which erased the question and its options — so
+   * a thread showed that *something* had been asked and answered, with no way to
+   * see what. Reported from production: a four-question dialog whose second
+   * question was multi-select left exactly one line of evidence, and it said
+   * nothing about the question. The same class of loss as the raw pane dumps
+   * postPrompt now logs, and the fix is easier here because the question is
+   * still in hand. A permission prompt keeps the bare note: its snippet is
+   * already logged on the path that cannot read it.
+   */
+  private answeredAtTerminalText(state: TurnState): string {
+    const info = state.pendingQuestionInfo;
+    if (!info) return "（ターミナル側で回答済み）";
+    const options = info.options.map((o, i) => `${i + 1}. ${o.label}`).join("\n");
+    return `❓ *${info.header}*: ${info.question}\n${options}\n\n（ターミナル側で回答済み）`;
+  }
+
   private markPromptResolved(state: TurnState): void {
     state.promptHandle = undefined;
     state.promptFingerprint = undefined;
@@ -1037,7 +1139,7 @@ export class TurnEngine {
           // and the agent went straight into the next. Nothing else reports
           // that, so without this the thread would keep offering buttons for a
           // prompt that is gone and never show the one actually waiting.
-          await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
+          await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
           state.pendingQuestionInfo = undefined;
           state.planFeedbackOptionNum = undefined;
           await this.postPrompt(state, paneText, prompt, fingerprint);
@@ -1050,7 +1152,7 @@ export class TurnEngine {
         // Was awaiting an answer, and the terminal is no longer blocked —
         // resolved, either by our own button/free-text (which already
         // cleared promptHandle) or directly at the terminal keyboard.
-        await state.promptHandle?.update("（ターミナル側で回答済み）", []).catch(() => {});
+        await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
         this.markPromptResolved(state);
       }
 
