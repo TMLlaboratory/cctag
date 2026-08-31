@@ -9,6 +9,24 @@ this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0/).
 the interface still moves. A minor bump may change behavior that a `1.x` project
 would have to keep. Pin an exact version if that matters to you.
 
+## [Unreleased]
+
+### Fixed
+
+- The help no longer names one agent as the thing to connect. An unpaired thread
+  has no driver, so `helpTextFor` falls back to the Claude variant — and that
+  variant said to connect "a Claude Code instance", in exactly the state where
+  nobody has picked an agent yet. `connect` offers every running pane, Codex
+  included, and the help now says so.
+- The help says what "owner only" means. "（オーナーのみ）" is accurate as access
+  control and was read as *the channel's* owner. The authority is not a narrowed
+  Slack permission: the Spoke runs on that person's own machine, so `connect` is
+  them choosing among their own panes. `docs/how-it-works.md` already said this;
+  the strings a reader actually sees did not. The refusal replies and the
+  "not connected" reply carried the same word and are reworded too — the latter
+  was written out at five call sites, which is why a wording fix had missed it,
+  and is now one constant.
+
 ## [0.3.0] - 2026-08-31
 
 ### Fixed
