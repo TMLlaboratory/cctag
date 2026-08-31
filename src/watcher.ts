@@ -368,12 +368,24 @@ export class BackgroundWatcher {
       // Outside the collected-text guard: work can produce a file without
       // producing assistant text (a chart written by a script, say), and that
       // file is still worth posting.
+      //
+      // Handed over and then forgotten, the same way `collected` is emptied and
+      // `outboxBaseline` is advanced above. This state outlives a settle — it is
+      // per watched pane, not per turn — and nothing used to clear the write
+      // tracker, so every settle re-uploaded everything confirmed since the
+      // watch began. Measured in a production thread: the oldest file posted 13
+      // times, the next 6, the next 4. Forgotten only after the upload returns,
+      // so a throw (caught by tick) leaves the files to be retried; the loop
+      // awaits each pairing in turn, so nothing else can hand them over twice in
+      // the meantime.
+      const handedOver = state.writes.paths();
       state.outboxBaseline = await this.turnEngine.uploadOutboxAdditions(
         pairing,
         agent.cwd,
         state.outboxBaseline,
-        state.writes.paths(),
+        handedOver,
       );
+      state.writes.forget(handedOver);
     }
 
     // The corrected status, not herdr's: storing `working` for a pane the
