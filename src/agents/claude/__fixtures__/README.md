@@ -16,6 +16,7 @@ The four multi-select frames were captured on 2026-09-29 from a live Claude Code
 - `ask-user-question-multiselect-submit-row.screen.json` — Amber and Jade selected; cursor on the unnumbered Submit row after four Down keys (19 rows).
 - `ask-user-question-multiselect-review.screen.json` — Enter on Submit displays the actual review screen with `Amber, Jade`, `1. Submit answers`, and `2. Cancel` (13 rows).
 - `ask-user-question-multiselect-cancelled.screen.json` — selected the visible `2. Cancel` row without sending `1`; Claude reports `User declined to answer questions` (16 rows).
+- `idle-composer-named-session.screen.json` — blank composer after `/rename design`, captured on 2026-10-07 from a live Claude Code 2.1.291 session (Orca CLI 1.4.218). The session name sits in the rule above the prompt; the rule below stays plain. An excerpt: the rows above the finished turn were private work content and were dropped, and the recap and status-line values are redacted as listed in its `capture.redactions`. The read itself returned 33 rows with `truncated: false` and `limited: false`.
 - `shell-prompt.screen.json` — redacted shell tail from the Codex-after-quit capture; incomplete source screen, not a Claude composer.
 
 Existing transcript fixture:

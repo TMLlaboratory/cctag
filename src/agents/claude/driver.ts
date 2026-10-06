@@ -87,12 +87,19 @@ function answerListsMatch(
   );
 }
 
+// A session given a name with `/rename` draws that name into the rule above the
+// prompt (`──── design ─`), and only that rule; the one below stays plain.
+// Captured live on Claude Code 2.1.291. Requiring a bare rule above refused
+// every Slack message to a named session as "not idle" (#28).
+const COMPOSER_TOP_RULE_RE = /^[─━]+(?: .+ [─━]+)?$/u;
+const COMPOSER_BOTTOM_RULE_RE = /^[─━]+$/u;
+
 function composerFooterStart(rows: readonly string[], acceptTryPlaceholder = false): number | null {
   for (let i = 1; i < rows.length - 1; i++) {
     const inputRow = rows[i]!.trim();
     const isTryPlaceholder = acceptTryPlaceholder && /^❯\s+Try ".+"$/u.test(inputRow);
     if (inputRow !== "❯" && !isTryPlaceholder) continue;
-    if (!/^[─━]+$/u.test(rows[i - 1]!.trim()) || !/^[─━]+$/u.test(rows[i + 1]!.trim())) continue;
+    if (!COMPOSER_TOP_RULE_RE.test(rows[i - 1]!.trim()) || !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) continue;
     if (rows.slice(i + 2).some((row) => row.trim())) return i - 1;
   }
   return null;

@@ -944,6 +944,20 @@ test("Claude recognizes a complete captured empty composer", () => {
   assert.equal(isIdleComposer(capturedScreen("idle-composer.screen.json")), true);
 });
 
+test("Claude recognizes the empty composer of a session named with /rename", () => {
+  const named = capturedScreen("idle-composer-named-session.screen.json");
+  assert.match(named.text, /^─+ design ─$/mu, "the captured rule must carry the session name");
+  assert.equal(isIdleComposer(named), true);
+});
+
+test("Claude still requires a plain rule below the prompt", () => {
+  const named = capturedScreen("idle-composer-named-session.screen.json");
+  const rows = named.text.split("\n");
+  const prompt = rows.indexOf("❯");
+  rows[prompt + 1] = rows[prompt - 1]!;
+  assert.equal(isIdleComposer({ ...named, text: rows.join("\n") }), false);
+});
+
 test("Claude rejects the active ✳ status row by shape, independent of its verb", () => {
   const working = capturedScreen("working.screen.json");
   assert.equal(isIdleComposer(working), false);
