@@ -188,6 +188,9 @@ class FakeOrcaRuntime implements OrcaRuntime {
   screen: JsonObject = { ...capturedReadTerminal };
   screenSequence: JsonObject[] = [];
   terminalListFailure = false;
+  /** Listed by `ps -axww`, gone by the time `ps eww` and `lsof` run. */
+  readonly exitedAfterPs = new Set<number>();
+  lsofStderr = "";
 
   constructor() {
     this.loadQuestionFixture();
@@ -261,7 +264,7 @@ class FakeOrcaRuntime implements OrcaRuntime {
         const pidArg = args[args.indexOf("-p") + 1] ?? "";
         const pids = new Set(pidArg.split(",").map(Number));
         const stdout = this.processes
-          .filter((row) => pids.has(row.pid))
+          .filter((row) => pids.has(row.pid) && !this.exitedAfterPs.has(row.pid))
           .map((row) => {
             const environment = [
               row.paneKey ? `ORCA_PANE_KEY=${row.paneKey}` : "",
@@ -277,20 +280,26 @@ class FakeOrcaRuntime implements OrcaRuntime {
       }
     }
     if (file === "lsof") {
+      if (this.lsofStderr) return { stdout: "", stderr: this.lsofStderr, exitCode: 1, error: "Command failed: lsof" };
       if (args.includes("-FftpaDin")) {
         const pid = Number(args[args.indexOf("-p") + 1]);
-        return { stdout: this.descriptorOutputs.get(pid) ?? "", stderr: "", exitCode: 0 };
+        const stdout = this.descriptorOutputs.get(pid) ?? "";
+        return stdout ? { stdout, stderr: "", exitCode: 0 } : { stdout, stderr: "", exitCode: 1, error: "Command failed: lsof" };
       }
       if (args[0] === "-Fpa") {
-        return { stdout: this.openerOutputs.get(args[1] ?? "") ?? "", stderr: "", exitCode: 0 };
+        const stdout = this.openerOutputs.get(args[1] ?? "") ?? "";
+        return stdout ? { stdout, stderr: "", exitCode: 0 } : { stdout, stderr: "", exitCode: 1, error: "Command failed: lsof" };
       }
       const pidArg = args[args.indexOf("-p") + 1] ?? "";
-      const pids = new Set(pidArg.split(",").map(Number));
-      const stdout = this.processes
-        .filter((row) => pids.has(row.pid) && row.cwd)
+      const pids = pidArg.split(",").map(Number);
+      const live = this.processes.filter((row) => pids.includes(row.pid) && !this.exitedAfterPs.has(row.pid));
+      const stdout = live
+        .filter((row) => row.cwd)
         .map((row) => `p${row.pid}\nfcwd\nn${row.cwd}`)
         .join("\n");
-      return { stdout, stderr: "", exitCode: 0 };
+      return live.length === pids.length
+        ? { stdout, stderr: "", exitCode: 0 }
+        : { stdout, stderr: "", exitCode: 1, error: `Command failed: lsof ${args.join(" ")}` };
     }
     if (file === "stat") {
       const path = args.at(-1) ?? "";
@@ -1101,6 +1110,51 @@ test("truncated terminal lists make discovery incomplete", async () => {
   runtime.terminalListTruncated = true;
   const result = await backend(runtime).list();
   assert.equal(result.complete, false);
+});
+
+test("a process exiting between ps and lsof does not fail the lookup of another pane", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const exited: ProcessFixture = {
+    pid: 40010,
+    ppid: 1,
+    pgid: 40010,
+    tpgid: 40010,
+    tty: "ttys030",
+    lstart: "Mon Sep 28 17:07:36 2026",
+    command: "claude",
+    paneKey: "exited-pane",
+    terminalHandle: "exited-terminal",
+    cwd: "/exited",
+  };
+  runtime.processes = [...runtime.processes, exited];
+  runtime.exitedAfterPs.add(exited.pid);
+  const terminals = backend(runtime);
+
+  const agent = await terminals.get(TARGET);
+  assert.equal(agent?.cwd, "/workspace-B");
+  const listed = await terminals.list();
+  assert.deepEqual(listed.failures, []);
+  assert.deepEqual(
+    listed.agents.map((row) => row.ref.target),
+    [TARGET],
+  );
+});
+
+test("lsof explaining a failure on stderr still makes the backend unavailable", async () => {
+  const runtime = new FakeOrcaRuntime();
+  runtime.lsofStderr = "lsof: unknown option: x\nlsof 4.91\n usage: [-?abhKlnNoOPRtUvVX] ...";
+  await assert.rejects(backend(runtime).get(TARGET), BackendUnavailable);
+});
+
+test("the native runtime reports exit statuses as the process gave them, and none for a killed one", async () => {
+  // Not the fake: the fake cannot vouch for what Node reports.
+  const runtime = createOrcaRuntime();
+  const exited = await runtime.execFile("sh", ["-c", "exit 1"], { timeoutMs: 5_000 });
+  assert.equal(exited.exitCode, 1);
+  assert.equal(exited.stderr, "");
+  const killed = await runtime.execFile("sleep", ["5"], { timeoutMs: 50 });
+  assert.equal(killed.exitCode, -1);
+  assert.equal(killed.stderr, "");
 });
 
 test("get and exists reject missing targets from incomplete terminal lists", async () => {

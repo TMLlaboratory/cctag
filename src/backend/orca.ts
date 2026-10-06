@@ -115,6 +115,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Not every lsof exit 1: a bad option exits 1 too, and differs only in
+// explaining itself on stderr (measured on macOS).
+function lsofFoundOnlySome(file: string, result: OrcaExecResult): boolean {
+  return file === "lsof" && result.exitCode === 1 && !result.stderr.trim();
+}
+
 function resultError(result: OrcaExecResult): string {
   return result.stderr.trim() || result.error || `command exited with status ${result.exitCode}`;
 }
@@ -377,7 +383,8 @@ async function nativeExecFile(file: string, args: string[], options: { timeoutMs
     return {
       stdout: typeof failure.stdout === "string" ? failure.stdout : "",
       stderr: typeof failure.stderr === "string" ? failure.stderr : "",
-      exitCode: typeof failure.code === "number" ? failure.code : 1,
+      // Not 1: a timed-out lsof would then pass for one that found part of its list.
+      exitCode: typeof failure.code === "number" ? failure.code : -1,
       error: failure.message,
     };
   }
@@ -457,7 +464,9 @@ export class OrcaBackend implements Terminals {
     } catch (error) {
       throw new BackendUnavailable(errorMessage(error));
     }
-    if (result.exitCode !== 0) throw new BackendUnavailable(resultError(result));
+    if (result.exitCode !== 0 && !lsofFoundOnlySome(file, result)) {
+      throw new BackendUnavailable(resultError(result));
+    }
     return result.stdout;
   }
 
