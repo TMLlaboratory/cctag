@@ -6,6 +6,7 @@ import type { AnswerChannel, Terminals } from "./backend/index.js";
 import {
   ExpectationLost,
   SubmitRefused,
+  UNSENDABLE_TEXT_MESSAGE,
   WriteOutcomeUnknown,
   type AgentInfo,
   type AgentStatus,
@@ -315,10 +316,10 @@ test("a stashed Orca draft is reported in the thread after submission", async ()
   }
 });
 
-test("turn refusal forwards probe and stash uncertainty into its status message", async () => {
+test("turn refusal is reported once, in its status message, with probe and stash uncertainty", async () => {
   const target = `orca:${PANE}`;
   const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
-  const { notifier, updates } = fakeNotifier();
+  const { notifier, posts, updates } = fakeNotifier();
   const composer = { probe: "x", stash: "uncertain", submitUncertain: false } as const;
   const terminals = fakeBackend(
     () => "working",
@@ -339,7 +340,9 @@ test("turn refusal forwards probe and stash uncertainty into its status message"
   const engine = engineFor(terminals, notifier, 600_000);
 
   try {
-    await assert.rejects(engine.startTurn(pairing, "U1", "send this"), SubmitRefused);
+    await engine.startTurn(pairing, "U1", "send this");
+    assert.deepEqual(posts, ["⚙️ 実行中…"]);
+    assert.equal(engine.isBusy(target), false);
     assert.deepEqual(updates.map(({ text }) => text), [
       "⚠️ orca の入力欄の書きかけを Ctrl+S で退避しようとしましたが、送れる状態か確かめられなかったため、送信していません。 確かめのために打った `x` が入力欄に1文字残っているかもしれません。 書きかけが Ctrl+S で退避されたかどうかを確かめられませんでした。端末で入力欄を見てください。入力欄に文字があるときに Ctrl+S を押すと、その文字が退避され、前に退避したものは消えます。",
     ]);
@@ -903,7 +906,7 @@ test("Orca rejects original C0 text before downloading attachments", async () =>
     },
     "orca",
   );
-  const { notifier } = fakeNotifier();
+  const { notifier, posts } = fakeNotifier();
   const withFiles: Notifier = {
     ...notifier,
     async fetchIncomingFile() {
@@ -914,12 +917,10 @@ test("Orca rejects original C0 text before downloading attachments", async () =>
   const engine = engineFor(terminals, withFiles, 600_000);
 
   try {
-    await assert.rejects(
-      engine.startTurn(pairing, "U1", "\r", {
-        files: [{ id: "F1", name: "screen.png", size: 12 } as never],
-      }),
-      (error: unknown) => error instanceof SubmitRefused && error.reason === "unsafe-text",
-    );
+    await engine.startTurn(pairing, "U1", "\r", {
+      files: [{ id: "F1", name: "screen.png", size: 12 } as never],
+    });
+    assert.deepEqual(posts, [`${UNSENDABLE_TEXT_MESSAGE} 端末で確かめてください。`]);
     assert.equal(downloads, 0, "unsafe original text must be refused before attachment I/O");
     assert.deepEqual(submitted, []);
     assert.equal(engine.isBusy(target), false);

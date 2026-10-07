@@ -545,18 +545,6 @@ export class CommandHandler {
         await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
         return;
       }
-      if (err instanceof SubmitRefused) {
-        await this.notifier.postReply(
-          channel,
-          threadTs,
-          submitRefusedText(err.reason, backendForTarget(pairing.paneId), err.composer),
-        );
-        return;
-      }
-      if (err instanceof WriteOutcomeUnknown) {
-        await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(err));
-        return;
-      }
       await this.notifier.postReply(channel, threadTs, `❌ エラー: ${err instanceof Error ? err.message : String(err)}`);
     }
   }

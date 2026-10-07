@@ -399,7 +399,12 @@ export class TurnEngine {
       const driver = driverFor(agent.agent);
       const backend = backendForTarget(agent.ref.target);
       if (backend === "orca" && hasUnsendableC0Controls(text)) {
-        throw new SubmitRefused("unsafe-text", UNSENDABLE_TEXT_MESSAGE);
+        await this.notifier.postReply(
+          pairing.channel,
+          pairing.threadTs ?? "",
+          submitRefusedText("unsafe-text", backend),
+        );
+        return;
       }
 
 
@@ -535,13 +540,16 @@ export class TurnEngine {
       } catch (err) {
         // Input injection failed after the state was already registered —
         // roll it back so the terminal doesn't stay stuck "busy" forever.
-        const failureNotice =
-          err instanceof SubmitRefused
-            ? submitRefusedText(err.reason, backend, err.composer)
-            : err instanceof WriteOutcomeUnknown
-              ? writeOutcomeUnknownText(err)
-              : "❌ 開始に失敗しました";
-        await statusHandle.update(failureNotice).catch(() => {});
+        this.turns.delete(paneId);
+        if (err instanceof SubmitRefused) {
+          await statusHandle.update(submitRefusedText(err.reason, backend, err.composer)).catch(() => {});
+          return;
+        }
+        if (err instanceof WriteOutcomeUnknown) {
+          await statusHandle.update(writeOutcomeUnknownText(err)).catch(() => {});
+          return;
+        }
+        await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
         throw err;
       }
 

@@ -9,8 +9,6 @@ import type { TurnEngine } from "./turn.js";
 import {
   ExpectationLost,
   SubmitRefused,
-  UNSENDABLE_TEXT_MESSAGE,
-  WRITE_OUTCOME_UNKNOWN_MESSAGE,
   WriteOutcomeUnknown,
   type AgentInfo,
 } from "./backend/types.js";
@@ -639,126 +637,6 @@ test("ExpectationLost from Slack answers tells the user to inspect the terminal"
   );
 });
 
-test("SubmitRefused reasons and unknown write outcomes reach Slack with safe instructions", async () => {
-  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: "orca:tab-7:leaf-2", backend: "orca" };
-  const cases = [
-    ["not-idle", "⚠️ orca は入力待ちではないため送信しませんでした。ターミナルの状態を確認してください。"],
-    ["draft", "⚠️ orca の入力欄に未送信の文字があります。送信していません。ターミナルで確認してください。"],
-    ["probe-unverified", "⚠️ orca の入力欄が提案か書きかけかを確かめられなかったため、送信していません。 端末で確かめてください。"],
-    ["stash-unverified", "⚠️ orca の入力欄の書きかけを Ctrl+S で退避しようとしましたが、送れる状態か確かめられなかったため、送信していません。 端末で確かめてください。"],
-    ["gate", "⚠️ orca のダイアログが送信を拒否しました。このダイアログは端末で答えてください。"],
-    ["incomplete-screen", "⚠️ orca の画面を完全に確認できなかったため、送信しませんでした。 端末で確かめてください。"],
-    ["agent-changed", "⚠️ orca の接続先エージェントが切り替わったため、送信しませんでした。再度送信してください。 端末で確かめてください。"],
-    ["cancelled", "⚠️ orca への送信を中止しました。 端末で確かめてください。"],
-    ["unsafe-text", `${UNSENDABLE_TEXT_MESSAGE} 端末で確かめてください。`],
-  ] as const;
-  const replies: string[] = [];
-  const notifier = {
-    async postReply(_channel: string, _threadTs: string, text: string) {
-      replies.push(text);
-    },
-  } as unknown as Notifier;
-
-  for (const [reason, expected] of cases) {
-    const engine = {
-      isBusy: () => false,
-      async startTurn() {
-        throw new SubmitRefused(reason, "internal refusal");
-      },
-    } as unknown as TurnEngine;
-    const handler = new CommandHandler(
-      NO_TERMINALS,
-      { get: () => pairing } as unknown as PairingStore,
-      engine,
-      notifier,
-      OWNER,
-    );
-    await handler.handleMention({
-      channel: "C1",
-      threadTs: "1.1",
-      userId: OWNER,
-      text: "send this",
-      ts: "1.2",
-    });
-    assert.deepEqual(replies.splice(0), [expected], `Slack text for ${reason}`);
-  }
-
-  const unknownEngine = {
-    isBusy: () => false,
-    async startTurn() {
-      throw new WriteOutcomeUnknown();
-    },
-  } as unknown as TurnEngine;
-  await new CommandHandler(
-    NO_TERMINALS,
-    { get: () => pairing } as unknown as PairingStore,
-    unknownEngine,
-    notifier,
-    OWNER,
-  ).handleMention({
-    channel: "C1",
-    threadTs: "1.1",
-    userId: OWNER,
-    text: "send this",
-    ts: "1.3",
-  });
-  assert.deepEqual(replies.splice(0), [WRITE_OUTCOME_UNKNOWN_MESSAGE]);
-
-  const stashedGateEngine = {
-    isBusy: () => false,
-    async startTurn() {
-      throw new SubmitRefused("gate", "internal refusal", {
-        probe: null,
-        stash: "stashed",
-        submitUncertain: false,
-      });
-    },
-  } as unknown as TurnEngine;
-  await new CommandHandler(
-    NO_TERMINALS,
-    { get: () => pairing } as unknown as PairingStore,
-    stashedGateEngine,
-    notifier,
-    OWNER,
-  ).handleMention({
-    channel: "C1",
-    threadTs: "1.1",
-    userId: OWNER,
-    text: "send this",
-    ts: "1.4",
-  });
-  assert.deepEqual(replies.splice(0), [
-    "⚠️ orca のダイアログが送信を拒否しました。このダイアログは端末で答えてください。 送信の前に、入力欄の書きかけを Ctrl+S で退避しました。入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。文字があるときに押すと、退避した書きかけは消えます。",
-  ]);
-
-  const uncertainEngine = {
-    isBusy: () => false,
-    async startTurn() {
-      throw new WriteOutcomeUnknown(undefined, {
-        probe: "y",
-        stash: "uncertain",
-        submitUncertain: false,
-      });
-    },
-  } as unknown as TurnEngine;
-  await new CommandHandler(
-    NO_TERMINALS,
-    { get: () => pairing } as unknown as PairingStore,
-    uncertainEngine,
-    notifier,
-    OWNER,
-  ).handleMention({
-    channel: "C1",
-    threadTs: "1.1",
-    userId: OWNER,
-    text: "send this",
-    ts: "1.5",
-  });
-  assert.deepEqual(replies, [
-    "送信できたか確認できません。端末を確かめてください 確かめのために打った `y` が入力欄に1文字残っているかもしれません。 書きかけが Ctrl+S で退避されたかどうかを確かめられませんでした。端末で入力欄を見てください。入力欄に文字があるときに Ctrl+S を押すと、その文字が退避され、前に退避したものは消えます。",
-  ]);
-});
-
 test("an Orca message-path miss keeps the pairing for watcher grace", async () => {
   const pairing: Pairing = { ...BUTTON_PAIRING, paneId: "orca:tab-7:leaf-2" };
   let existsCalls = 0;
@@ -843,43 +721,6 @@ test("Herdr command-path confirmed absence still unpairs despite a stale Orca ta
 
   assert.equal(removed, 1);
   assert.deepEqual(replies, ["⚠️ インスタンスが見つかりません。ペアリングを解除しました。"]);
-});
-
-test("submit refusal text uses the target prefix instead of a mismatched stored tag", async () => {
-  const cases: Array<{ pairing: Pairing; expected: string }> = [
-    {
-      pairing: { ...BUTTON_PAIRING, paneId: "orca:tab-7:leaf-2" },
-      expected: "⚠️ orca は入力待ちではないため送信しませんでした。ターミナルの状態を確認してください。",
-    },
-    {
-      pairing: { ...BUTTON_PAIRING, backend: "orca" },
-      expected: "⚠️ herdr は入力待ちではないため送信しませんでした。ターミナルの状態を確認してください。",
-    },
-  ];
-  for (const { pairing, expected } of cases) {
-    const replies: string[] = [];
-    const engine = {
-      isBusy: () => false,
-      async startTurn() {
-        throw new SubmitRefused("not-idle", "internal refusal");
-      },
-    } as unknown as TurnEngine;
-    const pairingStore = { get: () => pairing } as unknown as PairingStore;
-    const notifier = {
-      async postReply(_channel: string, _threadTs: string, text: string) {
-        replies.push(text);
-      },
-    } as unknown as Notifier;
-
-    await new CommandHandler(NO_TERMINALS, pairingStore, engine, notifier, OWNER).handleMention({
-      channel: "C1",
-      threadTs: "1.1",
-      userId: OWNER,
-      text: "do the task",
-      ts: "1.2",
-    });
-    assert.deepEqual(replies, [expected]);
-  }
 });
 
 function ompAgentForCommands(target = "orca:tab-7:leaf-2"): AgentInfo {
