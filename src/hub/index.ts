@@ -23,6 +23,23 @@ const { App } = Bolt;
 /** Cap on the `fileOwner` authorization map (see rememberFileOwner). */
 const MAX_TRACKED_FILES = 500;
 
+/** Cap on the per-thread notification-cooldown map (see shouldNotifyUndeliverable). */
+const MAX_TRACKED_NOTIFY_COOLDOWNS = 500;
+
+/** How often a thread may be told its message dispatch failed. */
+const MESSAGE_NOTIFY_COOLDOWN_MS = 60_000;
+
+// Hub-side heartbeat values — deliberately identical to the Spoke-side
+// heartbeat (src/spoke/index.ts's HEARTBEAT_INTERVAL_MS / PONG_TIMEOUT_MS).
+// That heartbeat (#4) lets a Spoke notice its own half-open connection to
+// the Hub; this is the other direction, which nothing watched. Without this, a half-open Spoke connection (the TCP
+// path silently stops delivering packets, no FIN/RST) sits in
+// `spokesByOwner` looking alive — Linux's default TCP keepalive can take up
+// to two hours to notice at the OS level, and every Slack event routed to
+// that owner silently fails for the entire window.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const PONG_TIMEOUT_MS = 90_000;
+
 interface RegisterPayload {
   ownerUserId: string;
   pairings: Array<{ channel: string; threadTs?: string }>;
@@ -83,6 +100,31 @@ async function runServer(): Promise<void> {
     }
   }
 
+  // Per-thread last-notified timestamp for the "message" handler's
+  // undeliverable-notice cooldown. `message` fires for every plain message
+  // in a paired thread — ordinary chatter and a reply meant to answer a
+  // pending prompt look identical to the Hub, so a Spoke outage during an
+  // active conversation would otherwise post one warning per message
+  // instead of one per 60 seconds. The other four call sites
+  // (app_mention/pair_select/aq_answer/perm_choice) are each a single,
+  // deliberate user action, not a stream, so they stay unconditional.
+  // Bounded the same way fileOwner is above: insertion-ordered Map, oldest
+  // evicted once the cap is exceeded. Losing this on a Hub restart is fine
+  // — worst case is one extra notice for a thread that was mid-cooldown.
+  const lastNotifiedAt = new Map<string, number>();
+
+  function shouldNotifyUndeliverable(key: string): boolean {
+    const now = Date.now();
+    const last = lastNotifiedAt.get(key);
+    if (last !== undefined && now - last < MESSAGE_NOTIFY_COOLDOWN_MS) return false;
+    lastNotifiedAt.set(key, now);
+    if (lastNotifiedAt.size > MAX_TRACKED_NOTIFY_COOLDOWNS) {
+      const oldest = lastNotifiedAt.keys().next();
+      if (!oldest.done) lastNotifiedAt.delete(oldest.value);
+    }
+    return true;
+  }
+
   const app = new App({
     token: config.slackBotToken,
     appToken: config.slackAppToken,
@@ -104,6 +146,32 @@ async function runServer(): Promise<void> {
       thread_ts: threadTs,
       text: "⚠️ 起動していません。cctagを動かしている計算機のspokeデーモンが起動しているか確認してください。",
     });
+  }
+
+  /**
+   * Deliberately a separate function from notConnectedReply, with distinct
+   * wording — the two describe different failure states that must stay
+   * diagnosable from each other. notConnectedReply means no Spoke has ever
+   * registered for this owner; this one means a Spoke *was* registered in
+   * spokesByOwner, but a dispatched call to it just failed — almost always
+   * a stale connection the heartbeat above hasn't caught yet (up to ~90s),
+   * or one still fighting a network issue mid-detection. Merging the two
+   * messages would make it impossible to tell, from Slack alone, which
+   * situation actually happened.
+   */
+  async function unreachableReply(channel: string, threadTs: string): Promise<void> {
+    await app.client.chat
+      .postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: "⚠️ オーナーの cctag spoke に届きませんでした。接続が切れている可能性があります。少し待ってからもう一度お試しください。",
+      })
+      .catch((err) => {
+        // Already reporting one failure (the dispatch that failed) — this
+        // must never throw a second one out of a .catch() that's already
+        // handling the first.
+        console.error("[hub] unreachableReply itself failed:", err);
+      });
   }
 
   // This server only ever expects a WebSocket upgrade on /spoke. Without a
@@ -133,6 +201,30 @@ async function runServer(): Promise<void> {
 
     const rpc = new WsRpc(ws);
     let registeredOwnerId: string | undefined;
+
+    // Heartbeat: ping every 30s; if no pong has landed in the last 90s,
+    // treat the connection as dead and terminate() it so the "close"
+    // handler below actually gets a chance to remove it from
+    // spokesByOwner. A single rescheduled setTimeout, not setInterval —
+    // same reasoning as the Spoke-side heartbeat (src/spoke/index.ts):
+    // hand-rolled, and a fixed-cadence primitive buys nothing extra here.
+    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastPongAt = Date.now();
+    ws.on("pong", () => {
+      lastPongAt = Date.now();
+    });
+    const scheduleHeartbeatCheck = () => {
+      heartbeatTimer = setTimeout(() => {
+        if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+          console.log(`[hub] no pong in ${PONG_TIMEOUT_MS / 1000}s from ${issued.name}, terminating`);
+          ws.terminate();
+          return;
+        }
+        ws.ping();
+        scheduleHeartbeatCheck();
+      }, HEARTBEAT_INTERVAL_MS);
+    };
+    scheduleHeartbeatCheck();
 
     // A connected Spoke may only act on threads it actually owns (per
     // threadOwner) — an unowned thread (no pairing yet, e.g. mid-`connect`)
@@ -295,6 +387,7 @@ async function runServer(): Promise<void> {
     });
 
     ws.on("close", () => {
+      clearTimeout(heartbeatTimer);
       if (registeredOwnerId && spokesByOwner.get(registeredOwnerId) === rpc) {
         spokesByOwner.delete(registeredOwnerId);
         console.log(`[hub] spoke disconnected: ${issued.name}`);
@@ -325,7 +418,10 @@ async function runServer(): Promise<void> {
     const userName = userId ? await displayNameFor(app.client, userId, mentionCache) : undefined;
     await spoke
       .call("app_mention", { channel, threadTs, userId, userName, text, ts: event.ts, files })
-      .catch((err) => console.error("[hub] app_mention dispatch failed:", err));
+      .catch((err) => {
+        console.error("[hub] app_mention dispatch failed:", err);
+        return unreachableReply(channel, threadTs);
+      });
   });
 
   app.event("message", async ({ event }) => {
@@ -347,7 +443,14 @@ async function runServer(): Promise<void> {
     if (!spoke) return;
     await spoke
       .call("message", { channel: msgEvent.channel, threadTs: msgEvent.thread_ts, text: msgEvent.text ?? "" })
-      .catch((err) => console.error("[hub] message dispatch failed:", err));
+      .catch((err) => {
+        console.error("[hub] message dispatch failed:", err);
+        // Cooldowned, unlike the other four call sites: ordinary chatter and
+        // a reply meant to answer a pending prompt look identical here, so
+        // an outage during an active conversation would otherwise post one
+        // warning per message instead of one per 60 seconds.
+        if (shouldNotifyUndeliverable(key)) return unreachableReply(msgEvent.channel, msgEvent.thread_ts!);
+      });
   });
 
   app.action("pair_select", async ({ ack, body }) => {
@@ -370,7 +473,10 @@ async function runServer(): Promise<void> {
     }
     await spoke
       .call("pair_select", { channel, threadTs, userId: actionBody.user.id, terminalId })
-      .catch((err) => console.error("[hub] pair_select dispatch failed:", err));
+      .catch((err) => {
+        console.error("[hub] pair_select dispatch failed:", err);
+        return unreachableReply(channel, threadTs);
+      });
   });
 
   const actionRoute = (kind: "aq_answer" | "perm_choice") =>
@@ -400,7 +506,10 @@ async function runServer(): Promise<void> {
       const actorName = actorUserId ? await displayNameFor(app.client, actorUserId, mentionCache) : undefined;
       await spoke
         .call(kind, { channel, threadTs, value: withSelectedIndices(raw, body), actorUserId, actorName })
-        .catch((err) => console.error(`[hub] ${kind} dispatch failed:`, err));
+        .catch((err) => {
+          console.error(`[hub] ${kind} dispatch failed:`, err);
+          return unreachableReply(channel, threadTs);
+        });
     };
   app.action(/^aq_answer_/, actionRoute("aq_answer"));
   app.action(/^perm_choice_/, actionRoute("perm_choice"));

@@ -13,6 +13,17 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- The Hub now notices a Spoke that went silent. The Spoke already pinged the
+  Hub and reconnected when its pongs stopped, but nothing watched the other
+  direction: a Spoke that vanished without closing its connection (sleep, a
+  network change) stayed registered, and every Slack message for its owner was
+  dispatched into it and lost without a word until the OS gave up on the TCP
+  connection. The Hub pings each Spoke every 30 seconds and drops one that has
+  not answered for 90, and a dispatch that fails now gets a reply in the thread
+  saying the Spoke could not be reached — at most once a minute per thread for
+  ordinary messages, which arrive as a stream. Takes effect when the Hub is
+  redeployed; Spokes need no change, and the released Bun-compiled Spoke was
+  measured answering the Hub's pings.
 - The Hub's file cap now bounds what it will read, not just what it will accept.
   `CCTAG_MAX_FILE_MB` was compared only after a frame had been received and
   parsed, so an oversized upload was rejected having already cost the memory —
