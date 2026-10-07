@@ -105,6 +105,28 @@ function composerFooterStart(rows: readonly string[], acceptTryPlaceholder = fal
   return null;
 }
 
+const NAMED_COMPOSER_TOP_RULE_RE = /^[─━]+ .+ [─━]+$/u;
+
+// Recovered only under a named rule: that is the one layout Orca's extractor is
+// known to miss (it lifts the text into `draft` only below a bare rule, Orca
+// 1.4.218). Anywhere else a missing draft means Orca could not place the
+// composer at all, and reading one out of the rows would be a guess about where
+// the next keystroke lands (#30).
+function recoverComposerDraft(snap: ScreenSnapshot): ScreenSnapshot {
+  if (snap.draft !== null) return snap;
+  const rows = snap.text.split(/\r?\n/);
+  for (let i = rows.length - 2; i >= 1; i--) {
+    const text = /^❯\s(.+)$/u.exec(rows[i]!.trim())?.[1];
+    if (text === undefined || /^Try ".+"$/u.test(text)) continue;
+    if (!NAMED_COMPOSER_TOP_RULE_RE.test(rows[i - 1]!.trim()) || !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) {
+      continue;
+    }
+    rows[i] = "❯";
+    return { ...snap, text: rows.join("\n"), draft: text };
+  }
+  return snap;
+}
+
 function isComposerFooterSuffix(rows: readonly string[]): boolean {
   const start = composerFooterStart(rows);
   return start !== null && rows.slice(0, start).every((row) => !row.trim());
@@ -432,6 +454,7 @@ export const claudeDriver: AgentDriver = {
 
     return composerFooterStart(rows, snap.draft === null) !== null;
   },
+  recoverComposerDraft,
 
   async answerOption(channel, value, _expectedLabel) {
     await channel.digit(Number(value));

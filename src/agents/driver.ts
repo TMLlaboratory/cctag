@@ -192,6 +192,8 @@ export interface AgentDriver {
   parseCursorLabel(snap: ScreenSnapshot): string | null;
   /** Drivers that can positively identify the idle composer; Orca fails closed when absent. */
   isIdleComposer?(snap: ScreenSnapshot): boolean;
+  /** Moves composer text the backend left on screen into `draft`; returns the snapshot unchanged otherwise. */
+  recoverComposerDraft?(snap: ScreenSnapshot): ScreenSnapshot;
   /** Whether this driver can distinguish a Claude prompt suggestion from a typed draft via a one-character probe. */
   composerProbe?: true;
   /**

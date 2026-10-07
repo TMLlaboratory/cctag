@@ -1753,6 +1753,50 @@ test("Orca probes and removes a suggestion before submitting", async () => {
   );
 });
 
+function withComposerRow(screen: JsonObject, row: string): JsonObject {
+  const tail = (screen.tail as string[]).map((line) => (/^❯\s/u.test(line) ? row : line));
+  return { ...screen, tail };
+}
+
+test("Orca probes a named session's suggestion that it left on screen instead of in draft", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const suggestion = capturedProbeScreen("named-session-suggestion.json");
+  // Synthetic probe state derived from the raw named-session-suggestion.json capture.
+  const withProbe = withComposerRow(suggestion, "❯\u00a0x");
+  runtime.screen = suggestion;
+  runtime.screenSequence = [suggestion, suggestion, withProbe, withProbe, withProbe, suggestion, suggestion, suggestion];
+  runtime.sendReceipt = withSendStages(capturedSendResult, ["input_accepted"]);
+
+  const result = await backend(runtime).submit(currentRef(), "hello", submitContext());
+
+  assert.deepEqual(result, { status: "accepted", draftStashed: false });
+  assert.deepEqual(
+    runtime.sendCalls.map(({ args }) => args.slice(args.indexOf("--text") + 1)),
+    [
+      ["x", "--json"],
+      ["\u007f", "--json"],
+      ["hello", "--enter", "--wait-submit", "15", "--json"],
+    ],
+  );
+});
+
+test("Orca does not read a draft out of the rows below an unnamed rule", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const named = capturedProbeScreen("named-session-suggestion.json");
+  // Synthetic unnamed-rule state derived from the raw named-session-suggestion.json capture.
+  const unnamed = {
+    ...named,
+    tail: (named.tail as string[]).map((line) => line.replace(/^(─+) design ─$/u, "$1──────────")),
+  };
+  runtime.screen = unnamed;
+
+  await assert.rejects(
+    backend(runtime).submit(currentRef(), "hello", submitContext()),
+    (error: unknown) => error instanceof SubmitRefused && error.reason === "not-idle",
+  );
+  assert.deepEqual(runtime.sendCalls, []);
+});
+
 test("Orca accepts an empty composer after removing a suggestion", async () => {
   const runtime = new FakeOrcaRuntime();
   const suggestion = capturedProbeScreen("p4-10-suggestion.json");

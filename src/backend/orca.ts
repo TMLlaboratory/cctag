@@ -855,8 +855,12 @@ export class OrcaBackend implements Terminals {
     }
     checkCancelled();
     const handle = await this.writableHandle(ref);
+    const read = async () => {
+      const snapshot = await this.readHandle(ref.target, handle);
+      return ctx.driver.recoverComposerDraft?.(snapshot) ?? snapshot;
+    };
     checkCancelled();
-    const initial = await this.readHandle(ref.target, handle);
+    const initial = await read();
     checkCancelled();
     if (!initial.complete) throw refuse("incomplete-screen", "The terminal screen is incomplete.");
     const initialDraft = normalizedDraft(initial.draft);
@@ -877,7 +881,7 @@ export class OrcaBackend implements Terminals {
         let previousDraft: string | null | undefined;
         while (true) {
           checkCancelled();
-          const snapshot = await this.readHandle(ref.target, handle);
+          const snapshot = await read();
           checkCancelled();
           const draft = normalizedDraft(snapshot.draft);
           if (snapshot.complete && ctx.driver.isIdleComposer?.(snapshot) === true && isPositive(draft)) {
@@ -904,7 +908,7 @@ export class OrcaBackend implements Terminals {
         },
       ): Promise<void> => {
         checkCancelled();
-        const snapshot = await this.readHandle(ref.target, handle);
+        const snapshot = await read();
         checkCancelled();
         if (!snapshot.complete) throw refuse("incomplete-screen", "The terminal screen is incomplete before a probe write.");
         if (ctx.driver.isIdleComposer?.(snapshot) !== true) {
@@ -1204,7 +1208,8 @@ export class OrcaBackend implements Terminals {
         if (attempted) throw new ExpectationLost("The composer channel has already been used.");
         attempted = true;
         const handle = await this.writableHandle(ref);
-        const snap = await this.readHandle(ref.target, handle);
+        const read = await this.readHandle(ref.target, handle);
+        const snap = driver.recoverComposerDraft?.(read) ?? read;
         if (!snap.complete) throw new ExpectationLost("The Orca screen is incomplete before the composer write.");
         if (!driver.isIdleComposer?.(snap)) {
           throw new ExpectationLost("The Orca composer is not idle.");

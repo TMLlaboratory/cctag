@@ -29,3 +29,9 @@ Two screen reads from long-lived terminals, captured on 2026-10-02 with Orca 1.4
 
 - `screen-read-long-lived-truncated.json` — a Claude Code terminal: `truncated: true` (carried over from Orca's stream buffer), `limited: false`, 52 rows; the screen itself is whole.
 - `screen-read-omp-limited-truncated.json` — an `omp` terminal: `truncated: true`, `limited: true`, 68 rows.
+
+## Named-session composer capture
+
+Captured on 2026-10-08 with Orca CLI 1.4.222 (app 1.4.218) and a Claude Code older than 2.1.292 (the pane showed an update notice; its exact version was not recorded), from a session renamed with `/rename` showing a prompt suggestion. The raw `orca terminal read --screen --json` envelope and every TUI row around the composer are kept; transcript rows above it are replaced by `<task-content>`, the repository name in the footer by `<repo>`, and request IDs, terminal handles and runtime IDs are redacted.
+
+- `named-session-suggestion.json` — the rule above the prompt carries the session name (`──── design ─`). Orca returns no `draft` and leaves the suggestion in `tail` as `❯` + U+00A0 + text, where a session without a name gets the text in `draft` and a bare `❯` row.
