@@ -1109,7 +1109,13 @@ export class OrcaBackend implements Terminals {
         throw new ExpectationLost("The Orca prompt changed before the answer write.");
       }
       const cursorLabel = expectedLabel ?? prompt.expectedCursorLabel;
-      if (cursorLabel !== undefined && prompt.driver.parseCursorLabel(snap) !== cursorLabel) {
+      const visibleLabel = prompt.driver.parseCursorLabel(snap);
+      // Whitespace removed, not compared as is: typed text comes back wrapped and
+      // broken at its newlines, and a Japanese line wraps with no space to collapse.
+      if (
+        cursorLabel !== undefined &&
+        (visibleLabel === null || visibleLabel.replace(/\s+/g, "") !== cursorLabel.replace(/\s+/g, ""))
+      ) {
         throw new ExpectationLost("The Orca cursor changed before Enter.");
       }
 

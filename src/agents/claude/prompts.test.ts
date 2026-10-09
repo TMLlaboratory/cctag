@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  classicDialogState,
   looksLikeQuestionScreen,
   parseAskUserQuestionPane,
+  parseCursorLabel,
   parsePreviewQuestionPane,
   previewAnchorIndex,
 } from "./prompts.js";
@@ -1030,4 +1032,66 @@ test("Claude sees the empty composer below a mod's side pane that stayed open af
   assert.doesNotMatch(stripped, /回答済み|偽タイマーで単体テスト \(Recommended\)\s+│/u);
   assert.match(stripped, /Update available!/u, "full-width rows below the pane must survive");
   assert.equal(isIdleComposer({ ...screen, text: stripped }), true);
+});
+
+const TYPED_ANSWER = "審査員に触ってもらう前提で進めたい．\nアカウントを分けるか，権限を絞った管理者 role にするのがよいと思う．";
+const THREE_OPTIONS = { header: "", question: "", options: [{ label: "a" }, { label: "b" }, { label: "c" }], multiSelect: false };
+const freeTextScreen = (state: "before" | "cursor-on-row" | "typed") =>
+  stripSidePane(capturedScreen(`free-text-${state}.screen.json`).text);
+
+test("Claude reads a question that wraps onto two rows whole, not just its last row", () => {
+  const prompt = claudeDriver.parseBlockedPane(freeTextScreen("before"));
+  assert.equal(prompt.kind, "question");
+  if (prompt.kind !== "question") return;
+  assert.equal(
+    prompt.info.question,
+    "Hub が無反応の Spoke に気づいたときにスレッドへ知らせる機能について、境界の条件と通知の文面の両方を確かめたいのですが、テストはどの方針で書きますか？",
+  );
+});
+
+test("Claude still knows the question once an answer is typed into its free-text row", () => {
+  const fingerprints = (["before", "cursor-on-row", "typed"] as const).map((state) => {
+    const prompt = claudeDriver.parseBlockedPane(freeTextScreen(state));
+    assert.equal(prompt.kind, "question", state);
+    return prompt.kind === "question" ? prompt.verified.fingerprint : null;
+  });
+  assert.equal(new Set(fingerprints).size, 1, "typing must not make it a different prompt");
+
+  const typed = freeTextScreen("typed");
+  assert.equal(parseCursorLabel(typed), TYPED_ANSWER, "the cursor label carries every line that was typed");
+  assert.deepEqual(classicDialogState(typed), { freeTextNum: 4, freeTextEdited: true, cursorNum: 4 });
+  assert.deepEqual(classicDialogState(freeTextScreen("cursor-on-row")), {
+    freeTextNum: 4,
+    freeTextEdited: false,
+    cursorNum: 4,
+  });
+  assert.deepEqual(classicDialogState(freeTextScreen("before")), { freeTextNum: 4, freeTextEdited: false, cursorNum: 1 });
+});
+
+test("free text moves from where the cursor is, not from option 1", async () => {
+  const fromTop = fakeHerdr(() => freeTextScreen("before"), undefined, freeTextScreen("before"));
+  await claudeDriver.answerQuestionFreeText!(fromTop.herdr, fromTop.channel, TEST_REF, THREE_OPTIONS, "x");
+  assert.deepEqual(fromTop.sent, ["key:Down", "key:Down", "key:Down", "text:x", "key:Enter"]);
+
+  // Three Downs from here overshoot onto "Chat about this" (measured on a live pane).
+  const onRow = fakeHerdr(() => freeTextScreen("cursor-on-row"), undefined, freeTextScreen("before"));
+  await claudeDriver.answerQuestionFreeText!(onRow.herdr, onRow.channel, TEST_REF, THREE_OPTIONS, "x");
+  assert.deepEqual(onRow.sent, ["text:x", "key:Enter"]);
+});
+
+test("no key is sent into a free-text row that already holds text, or as a digit while the cursor is on it", async () => {
+  const typed = fakeHerdr(() => freeTextScreen("typed"), undefined, freeTextScreen("before"));
+  await assert.rejects(
+    claudeDriver.answerQuestionFreeText!(typed.herdr, typed.channel, TEST_REF, THREE_OPTIONS, "x"),
+    (error: unknown) => error instanceof ExpectationLost && /入力途中の文/u.test(error.userMessage ?? ""),
+  );
+  assert.deepEqual(typed.sent, []);
+
+  // From the free-text row a digit is typed into the text instead of choosing (measured).
+  const onRow = fakeHerdr(() => freeTextScreen("cursor-on-row"), undefined, freeTextScreen("before"));
+  await assert.rejects(
+    claudeDriver.answerQuestionOption!(onRow.herdr, onRow.channel, "w0:p1", 1, THREE_OPTIONS),
+    (error: unknown) => error instanceof ExpectationLost && /自由記述の欄/u.test(error.userMessage ?? ""),
+  );
+  assert.deepEqual(onRow.sent, []);
 });

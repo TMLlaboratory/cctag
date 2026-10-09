@@ -31,6 +31,17 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- On Orca, a free-text answer to a Claude Code question is submitted again.
+  Typing replaced the "Type something." row the dialog was recognized by, so
+  the check before Enter took the screen for a different prompt and stopped,
+  leaving the text typed but unsent. An answer with a line break also failed
+  the check, which read only its first line.
+- An answer from Slack starts from where the dialog's cursor is. Buttons and
+  free text assumed option 1, so after someone moved the cursor at the terminal
+  a digit was typed into the free-text row and free text landed on "Chat about
+  this". With text already in the free-text row, or a digit to send while the
+  cursor is on it, cctag now says so and sends nothing.
+- A question that wraps onto two rows is posted whole, not only its last row.
 - A Claude Code question is read again while a mod draws a side pane beside
   the TUI (seen with qa-guide). The pane's text shared every row with the
   dialog, so on Orca the question was reported as unreadable, and on herdr it

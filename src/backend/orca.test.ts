@@ -9,6 +9,7 @@ import { OMP_RESUME_NOTICE, ompDriver } from "../agents/omp/driver.js";
 import type { SubmitContext } from "./index.js";
 import type { OrcaRuntime, OrcaExecResult } from "./orca.js";
 import { createOrcaRuntime, OrcaBackend } from "./orca.js";
+import { stripSidePane } from "./side-pane.js";
 import {
   BackendUnavailable,
   ExpectationLost,
@@ -2791,4 +2792,16 @@ test("screen reads drop a Claude Code mod's side pane", async () => {
   assert.equal(snapshot.complete, true);
   assert.match(snapshot.text, /^ {2}4\. Type something\.$/mu);
   assert.doesNotMatch(snapshot.text, /回答待ち/u);
+});
+
+test("an answer typed into the free-text row can still be confirmed on Orca", async () => {
+  const runtime = new FakeOrcaRuntime();
+  runtime.screen = capturedClaudeScreen("free-text-before.screen.json");
+  const prompt = claudeDriver.parseBlockedPane(stripSidePane(capturedText(runtime.screen)));
+  if (prompt.kind !== "question") throw new Error("the captured dialog must parse as a question");
+  const channel = backend(runtime).openAnswer(currentRef(), prompt.verified);
+
+  runtime.screen = capturedClaudeScreen("free-text-typed.screen.json");
+  await channel.confirm("審査員に触ってもらう前提で進めたい．\nアカウントを分けるか，権限を絞った管理者 role にするのがよいと思う．");
+  assert.deepEqual(runtime.sendCalls.at(-1)?.args.slice(-2), ["--enter", "--json"]);
 });
