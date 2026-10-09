@@ -11,6 +11,7 @@ import type {
   ModelAnswerChannel,
 } from "./index.js";
 import { runHerdrRaw, sendHerdrKeys, sendHerdrText } from "./raw.js";
+import { stripSidePane } from "./side-pane.js";
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 import {
   BackendUnavailable,
@@ -151,7 +152,7 @@ export class HerdrBackend implements Terminals {
     assertHerdrTarget(target);
     const args = ["pane", "read", target, "--source", region === "screen" ? "visible" : "recent"];
     if (lines > 0) args.push("--lines", String(lines));
-    return { text: await runHerdrRaw(this.bin, args), draft: null, complete: true };
+    return { text: stripSidePane(await runHerdrRaw(this.bin, args)), draft: null, complete: true };
   }
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel {
     const channel = this.createAnswerChannel(ref, prompt);

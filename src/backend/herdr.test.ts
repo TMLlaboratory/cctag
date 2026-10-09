@@ -427,3 +427,25 @@ test("compound answer channels keep Submit open through the final action", async
     submitCli.cleanup();
   }
 });
+
+test("Herdr reads drop a Claude Code mod's side pane, so the question beside it parses", async () => {
+  const { text } = JSON.parse(
+    readFileSync(new URL("../agents/claude/__fixtures__/side-pane-question-herdr.screen.json", import.meta.url), "utf8"),
+  ) as { text: string };
+  assert.equal(claudeDriver.parseBlockedPane(text).kind, "blind-permission", "unstripped, it reads as a y/n menu");
+
+  const cli = fakeHerdrCli(["idle"], "wT:p1", [text]);
+  try {
+    const snapshot = await new HerdrBackend(cli.bin).read("wT:p1", 200, "history");
+    const prompt = claudeDriver.parseBlockedPane(snapshot.text);
+    assert.equal(prompt.kind, "question");
+    if (prompt.kind !== "question") return;
+    assert.equal(prompt.info.question, "Hub の Spoke 無応答検知（heartbeat）のテストは、どの方針で書きますか？");
+    assert.deepEqual(
+      prompt.info.options.map((o) => o.label),
+      ["フェイククロック単体テスト", "実 Hub・実 Spoke の統合テスト", "単体＋実機キャプチャ併用"],
+    );
+  } finally {
+    cli.cleanup();
+  }
+});

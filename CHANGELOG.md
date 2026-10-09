@@ -31,6 +31,12 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- A Claude Code question is read again while a mod draws a side pane beside
+  the TUI (seen with qa-guide). The pane's text shared every row with the
+  dialog, so on Orca the question was reported as unreadable, and on herdr it
+  was offered as a y/n permission menu whose buttons would have typed into it.
+  When a prompt still cannot be read, Slack now shows the bottom of the screen,
+  where the prompt is, instead of the top.
 - On Orca, a Slack message is no longer refused because Claude Code shows a
   next-prompt suggestion in the composer: Orca reports the suggestion like typed
   text, so cctag now tells the two apart with one reversible character. A
