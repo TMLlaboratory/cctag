@@ -31,6 +31,10 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- A thread reply that mentions @cctag now answers a Claude Code question or
+  plan waiting for a typed answer. It used to be refused as busy, because the
+  turn is still running while the prompt waits, so the "reply in this thread"
+  the prompt offers only worked without the mention.
 - On Orca, a Slack message is no longer refused because Claude Code shows a
   next-prompt suggestion in the composer: Orca reports the suggestion like typed
   text, so cctag now tells the two apart with one reversible character. A

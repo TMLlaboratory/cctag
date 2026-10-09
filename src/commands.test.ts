@@ -654,6 +654,8 @@ test("an Orca message-path miss keeps the pairing for watcher grace", async () =
     async startTurn() {
       throw new Error("agent-not-found");
     },
+    answerQuestionFreeText: async () => ({ ok: false, reason: "not-pending" }),
+    answerPlanFeedback: async () => ({ ok: false, reason: "not-pending" }),
   } as unknown as TurnEngine;
   const pairingStore = {
     get: () => pairing,
@@ -696,6 +698,8 @@ test("Herdr command-path confirmed absence still unpairs despite a stale Orca ta
     async startTurn() {
       throw new Error("agent-not-found");
     },
+    answerQuestionFreeText: async () => ({ ok: false, reason: "not-pending" }),
+    answerPlanFeedback: async () => ({ ok: false, reason: "not-pending" }),
   } as unknown as TurnEngine;
   const pairingStore = {
     get: () => pairing,
@@ -1055,4 +1059,51 @@ test("disconnect cancels an OMP lease without sending terminal input", async () 
   assert.equal(cancelled, 1);
   assert.equal(removed, 1);
   assert.deepEqual(replies, ["🔌 接続を解除しました。"]);
+});
+
+test("a mention while a question waits for a typed answer answers it instead of being refused as busy", async () => {
+  const replies: string[] = [];
+  const answered: string[] = [];
+  let started = 0;
+  let pending: "question" | "plan" | null = "question";
+  const engine = {
+    isBusy: () => true,
+    async startTurn() {
+      started++;
+    },
+    async answerQuestionFreeText(_paneId: string, text: string) {
+      if (pending !== "question") return { ok: false, reason: "not-pending" };
+      answered.push(`question: ${text}`);
+      return { ok: true };
+    },
+    async answerPlanFeedback(_paneId: string, text: string) {
+      if (pending !== "plan") return { ok: false, reason: "not-pending" };
+      answered.push(`plan: ${text}`);
+      return { ok: true };
+    },
+  } as unknown as TurnEngine;
+  const handler = new CommandHandler(
+    NO_TERMINALS,
+    { get: () => BUTTON_PAIRING } as unknown as PairingStore,
+    engine,
+    {
+      async postReply(_channel: string, _threadTs: string, text: string) {
+        replies.push(text);
+      },
+    } as unknown as Notifier,
+    OWNER,
+  );
+  const mention = (text: string) => handler.handleMention({ channel: "C1", threadTs: "1.1", userId: OWNER, text, ts: "1.2" });
+
+  await mention("審査員に触ってもらう前提で、管理者の role を分けたい");
+  pending = "plan";
+  await mention("テストの節を先に書いて");
+  assert.deepEqual(answered, ["question: 審査員に触ってもらう前提で、管理者の role を分けたい", "plan: テストの節を先に書いて"]);
+  assert.deepEqual(replies, []);
+
+  pending = null;
+  await mention("次の作業もお願い");
+  assert.equal(replies.length, 1, "with nothing waiting, a running turn still refuses the message");
+  assert.match(replies[0], /実行中/u);
+  assert.equal(started, 0);
 });
