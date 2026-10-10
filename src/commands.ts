@@ -739,6 +739,7 @@ export class CommandHandler {
       ctx.terminalId,
       ctx.promptId,
       ctx.optionIndex,
+      this.pairingStore.get(ctx.channel, ctx.threadTs)?.key,
       this.actorLabel(ctx),
     );
     if (!result.ok) {
@@ -763,6 +764,7 @@ export class CommandHandler {
       ctx.terminalId,
       ctx.promptId,
       ctx.optionIndices,
+      this.pairingStore.get(ctx.channel, ctx.threadTs)?.key,
       this.actorLabel(ctx),
     );
     if (!result.ok) {
@@ -775,6 +777,7 @@ export class CommandHandler {
       ctx.terminalId,
       ctx.promptId,
       ctx.num,
+      this.pairingStore.get(ctx.channel, ctx.threadTs)?.key,
       this.actorLabel(ctx),
     );
     if (!result.ok) {
