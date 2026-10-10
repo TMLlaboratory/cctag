@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CommandHandler } from "./commands.js";
@@ -8,22 +9,92 @@ import type { TurnEngine } from "./turn.js";
 
 const OWNER = "U_OWNER";
 
-/** Captures what the engine was told about who acted. */
-function handlerRecording(actors: (string | undefined)[]): CommandHandler {
+const BUTTON_PAIRING: Pairing = {
+  key: "C1:1.1",
+  channel: "C1",
+  threadTs: "1.1",
+  paneId: "wA:p1",
+  terminalId: "term_test",
+  cwd: "/tmp",
+  pairedBy: OWNER,
+  pairedAt: "2026-01-01T00:00:00.000Z",
+};
+
+/** Posts a simulated permission button and reads back its prompt ID as Slack does. */
+async function postedButtonPromptId(): Promise<number> {
+  const promptId = randomInt(1, 2 ** 48);
+  let postedBlocks: unknown[] = [];
+  const notifier: Notifier = {
+    async postReply() {},
+    async postMessage(_channel, _threadTs, _text, blocks) {
+      postedBlocks = blocks ?? [];
+      return { async update() {} };
+    },
+  };
+  await notifier.postMessage("C1", "1.1", "permission prompt", [
+    {
+      type: "actions",
+      elements: [{ type: "button", value: JSON.stringify({ k: "perm", t: "wA:p1", p: promptId, n: "1" }) }],
+    },
+  ]);
+
+  for (const block of postedBlocks) {
+    if (block === null || typeof block !== "object" || !("elements" in block) || !Array.isArray(block.elements)) {
+      continue;
+    }
+    for (const element of block.elements) {
+      if (element === null || typeof element !== "object" || !("value" in element) || typeof element.value !== "string") {
+        continue;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(element.value);
+      } catch {
+        payload = undefined;
+      }
+      if (
+        payload !== null &&
+        typeof payload === "object" &&
+        "p" in payload &&
+        typeof payload.p === "number" &&
+        Number.isSafeInteger(payload.p)
+      ) {
+        return payload.p;
+      }
+    }
+  }
+  throw new Error("fake notifier did not capture a permission button ID");
+}
+
+/** Captures actor labels and the resolved pairing keys sent to TurnEngine. */
+function handlerRecording(
+  actors: (string | undefined)[],
+  pairingKeys: (string | undefined)[] = [],
+  pairing: Pairing = BUTTON_PAIRING,
+): CommandHandler {
   const engine = {
-    async answerPermissionButton(_p: string, _id: number, _n: string, actor?: string) {
+    async answerPermissionButton(_p: string, _id: number, _n: string, pairingKey: string | undefined, actor?: string) {
+      pairingKeys.push(pairingKey);
       actors.push(actor);
       return { ok: true } as const;
     },
-    async answerQuestionButton(_p: string, _id: number, _o: number, actor?: string) {
+    async answerQuestionButton(_p: string, _id: number, _o: number, pairingKey: string | undefined, actor?: string) {
+      pairingKeys.push(pairingKey);
       actors.push(actor);
       return { ok: true } as const;
     },
   } as unknown as TurnEngine;
+  const pairingStore = {
+    get(channel: string, threadTs?: string) {
+      if (pairing.channel !== channel) return undefined;
+      if (pairing.threadTs && pairing.threadTs !== threadTs) return undefined;
+      return pairing;
+    },
+  } as unknown as PairingStore;
   const notifier = { async postReply() {}, async postMessage() {
     return { async update() {} };
   } } as unknown as Notifier;
-  return new CommandHandler({} as HerdrClient, {} as PairingStore, engine, notifier, OWNER);
+  return new CommandHandler({} as HerdrClient, pairingStore, engine, notifier, OWNER);
 }
 
 test("somebody other than the owner is named", async () => {
@@ -32,7 +103,7 @@ test("somebody other than the owner is named", async () => {
     channel: "C1",
     threadTs: "1.1",
     terminalId: "wA:p1",
-    promptId: 1,
+    promptId: await postedButtonPromptId(),
     num: "1",
     actorUserId: "U_SATO",
     actorName: "佐藤",
@@ -46,7 +117,7 @@ test("the owner is not named, so an unmarked answer keeps its old meaning", asyn
     channel: "C1",
     threadTs: "1.1",
     terminalId: "wA:p1",
-    promptId: 1,
+    promptId: await postedButtonPromptId(),
     num: "1",
     actorUserId: OWNER,
     actorName: "雲居玄道",
@@ -60,7 +131,7 @@ test("an unresolvable name falls back to the id rather than losing the fact", as
     channel: "C1",
     threadTs: "1.1",
     terminalId: "wA:p1",
-    promptId: 1,
+    promptId: await postedButtonPromptId(),
     optionIndex: 0,
     actorUserId: "U_GHOST",
   });
@@ -73,10 +144,23 @@ test("a Hub too old to send the actor simply leaves answers unmarked", async () 
     channel: "C1",
     threadTs: "1.1",
     terminalId: "wA:p1",
-    promptId: 1,
+    promptId: await postedButtonPromptId(),
     num: "2",
   });
   assert.deepEqual(actors, [undefined]);
+});
+
+test("a button in a channel resolves its channel-level pairing key", async () => {
+  const pairingKeys: (string | undefined)[] = [];
+  const channelPairing: Pairing = { ...BUTTON_PAIRING, key: "C1", threadTs: undefined };
+  await handlerRecording([], pairingKeys, channelPairing).handlePermissionButton({
+    channel: "C1",
+    threadTs: "1.1",
+    terminalId: "wA:p1",
+    promptId: await postedButtonPromptId(),
+    num: "1",
+  });
+  assert.deepEqual(pairingKeys, ["C1"]);
 });
 
 // --- attributing messages from people other than the owner --------------------
