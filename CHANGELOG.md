@@ -13,6 +13,11 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- Interrupting Claude Code now ends the turn. The transcript records an
+  interrupt as a user message beginning `[Request interrupted by user`, which
+  was read as a new turn starting: the transcript never said the interrupted
+  turn had ended. It is now an `aborted` boundary, as Codex's `turn_aborted`
+  already was.
 - Bold in an agent's reply now renders as bold in Slack. The italic rule ran
   after the bold one and rewrote its `*x*` as `_x_`, so every `**x**` since the
   first release came out italic — and next to Japanese text, where Slack needs a

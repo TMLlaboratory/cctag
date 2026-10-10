@@ -152,6 +152,20 @@ export function extractToolOutcomes(records: TranscriptRecord[]): ToolOutcome[] 
  *  ones that must NOT count. */
 const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens", "refusal"]);
 
+const INTERRUPTED_USER_PREFIX = "[Request interrupted by user";
+
+function parseBoundaryTimestamp(timestamp: string | undefined): number | null {
+  if (timestamp === undefined) return null;
+  const timestampMs = Date.parse(timestamp);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
+}
+
+function isInterruptedUserContent(content: unknown): boolean {
+  if (!Array.isArray(content) || content.length !== 1) return false;
+  const block = content[0] as ContentBlock | undefined;
+  return block?.type === "text" && typeof block.text === "string" && block.text.startsWith(INTERRUPTED_USER_PREFIX);
+}
+
 /**
  * Turn boundaries in a Claude Code transcript.
  *
@@ -175,7 +189,8 @@ const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens"
  * A start is a genuine user record — content that is a plain string, or blocks
  * with no `tool_result` among them. Tool results come back as `user` records
  * too, and treating those as starts would re-arm the tracker on every tool call
- * in the turn.
+ * in the turn. Claude's single-text-block interrupt marker is instead an
+ * `aborted` boundary.
  *
  * Sidechain records (subagent transcripts) are skipped: their turns are not the
  * pane's turn, and letting them arm or settle the tracker would report a
@@ -186,21 +201,31 @@ export function extractLifecycle(records: TranscriptRecord[]): TurnLifecycleEven
   for (const r of records) {
     if (r.isSidechain === true) continue;
     if (r.type === "system" && r.subtype === "turn_duration") {
-      events.push({ kind: "completed" });
+      events.push({ kind: "completed", timestamp: parseBoundaryTimestamp(r.timestamp) });
       continue;
     }
     if (r.type === "assistant") {
       const stop = r.message?.stop_reason;
-      if (typeof stop === "string" && TERMINAL_STOP_REASONS.has(stop)) events.push({ kind: "completed" });
+      if (typeof stop === "string" && TERMINAL_STOP_REASONS.has(stop)) {
+        events.push({ kind: "completed", timestamp: parseBoundaryTimestamp(r.timestamp) });
+      }
       continue;
     }
     if (r.type === "user") {
       const content = r.message?.content;
       if (typeof content === "string") {
-        events.push({ kind: "started" });
+        events.push({
+          kind: "started",
+          timestamp: parseBoundaryTimestamp(r.timestamp),
+        });
       } else if (Array.isArray(content)) {
         const isToolResult = (content as ContentBlock[]).some((b) => b?.type === "tool_result");
-        if (!isToolResult) events.push({ kind: "started" });
+        if (!isToolResult) {
+          events.push({
+            kind: isInterruptedUserContent(content) ? "aborted" : "started",
+            timestamp: parseBoundaryTimestamp(r.timestamp),
+          });
+        }
       }
     }
   }
