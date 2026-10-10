@@ -95,7 +95,7 @@ export function doneStatusText(elapsedSec: number, toolCounts: Record<string, nu
 interface AqButtonValue {
   k: "aq";
   t: string; // paneId (herdr agent-command target — see pairing.ts)
-  p: number; // promptId (race guard — this prompt's slot in the turn)
+  p: number; // process-unique prompt ID (stale-button guard)
   o: number; // option index
 }
 

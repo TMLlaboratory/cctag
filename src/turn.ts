@@ -37,11 +37,27 @@ import {
   permissionParseFailureBlocks,
   unreadableQuestionBlocks,
 } from "./slack/blocks.js";
+import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const PROMPT_ID_LIMIT = 2 ** 48;
+const issuedPromptIds = new Set<number>();
+
+function nextPromptId(): number {
+  if (issuedPromptIds.size >= PROMPT_ID_LIMIT - 1) {
+    throw new Error("prompt ID space exhausted");
+  }
+  let id: number;
+  do {
+    id = randomInt(1, PROMPT_ID_LIMIT);
+  } while (issuedPromptIds.has(id));
+  issuedPromptIds.add(id);
+  return id;
 }
 
 /**
@@ -151,11 +167,8 @@ interface TurnState {
   /** This turn's claim on the pane. Its signal is what the poll loop watches,
    *  so cancelling the lease stops the loop; released by finalize/abort. */
   lease: PaneLease;
-  // AskUserQuestion / permission prompts are read off the pane, not the
-  // transcript — see agents/claude/prompts.ts for why. Each newly-posted
-  // prompt gets a fresh id so stale button clicks (from an already-resolved
-  // or already-superseded prompt) can be rejected.
-  currentPromptId: number;
+  // Process-unique across all turns, so an old button can never name a new prompt.
+  promptId: number | null;
   /** Identity of the prompt `promptHandle` is showing, so a different one
    *  appearing while the pane stays `blocked` is detectable. Null when the pane
    *  didn't parse — never compared in that case (see promptFingerprint). */
@@ -433,7 +446,7 @@ export class TurnEngine {
         settle: new SettleTracker(),
         failures: { agentGet: 0, paneRead: 0 },
         lease,
-        currentPromptId: 0,
+        promptId: null,
       };
       this.turns.set(paneId, state);
 
@@ -624,7 +637,7 @@ export class TurnEngine {
         settle: adoptedSettle,
         failures: { agentGet: 0, paneRead: 0 },
         lease,
-        currentPromptId: 0,
+        promptId: null,
       };
       this.turns.set(paneId, state);
 
@@ -650,6 +663,7 @@ export class TurnEngine {
     paneId: string,
     promptId: number,
     optionIndex: number,
+    pairingKey: string | undefined,
     /** Set only when somebody other than the owner pressed it — see
      *  CommandHandler.actorLabel for why the owner's own answers stay unmarked. */
     actor?: string,
@@ -658,7 +672,8 @@ export class TurnEngine {
     if (
       !state ||
       state.phase !== "awaiting-question" ||
-      state.currentPromptId !== promptId ||
+      state.promptId !== promptId ||
+      state.pairing.key !== pairingKey ||
       !state.pendingQuestionInfo ||
       state.answering
     ) {
@@ -687,13 +702,15 @@ export class TurnEngine {
     paneId: string,
     promptId: number,
     optionIndices: number[],
+    pairingKey: string | undefined,
     actor?: string,
   ): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
     if (
       !state ||
       state.phase !== "awaiting-question" ||
-      state.currentPromptId !== promptId ||
+      state.promptId !== promptId ||
+      state.pairing.key !== pairingKey ||
       !state.pendingQuestionInfo ||
       state.answering
     ) {
@@ -745,8 +762,8 @@ export class TurnEngine {
     // valid option number: anything else stays free text, where a genuine answer
     // of "1,3" still gets through unchanged on a single-select question.
     const asIndices = optionNumbersIn(freeText, info);
-    if (asIndices && state.driver.answerQuestionMultiSelect) {
-      return this.answerQuestionMultiSelect(paneId, state.currentPromptId, asIndices);
+    if (asIndices && state.driver.answerQuestionMultiSelect && state.promptId !== null) {
+      return this.answerQuestionMultiSelect(paneId, state.promptId, asIndices, state.pairing.key);
     }
 
     const answer = state.driver.answerQuestionFreeText;
@@ -769,11 +786,18 @@ export class TurnEngine {
     paneId: string,
     promptId: number,
     num: string,
+    pairingKey: string | undefined,
     /** See answerQuestionButton's. */
     actor?: string,
   ): Promise<AnswerResult> {
     const state = this.turns.get(paneId);
-    if (!state || state.phase !== "awaiting-permission" || state.currentPromptId !== promptId || state.answering) {
+    if (
+      !state ||
+      state.phase !== "awaiting-permission" ||
+      state.promptId !== promptId ||
+      state.pairing.key !== pairingKey ||
+      state.answering
+    ) {
       return { ok: false, reason: "not-pending" };
     }
     state.answering = true;
@@ -874,6 +898,7 @@ export class TurnEngine {
   }
 
   private markPromptResolved(state: TurnState): void {
+    state.promptId = null;
     state.promptHandle = undefined;
     state.promptFingerprint = undefined;
     state.pendingQuestionInfo = undefined;
@@ -895,7 +920,8 @@ export class TurnEngine {
     fingerprint: string | null,
   ): Promise<void> {
     const paneId = state.paneId;
-    state.currentPromptId += 1;
+    const promptId = nextPromptId();
+    state.promptId = promptId;
     state.promptFingerprint = fingerprint;
     state.answering = false;
 
@@ -906,7 +932,7 @@ export class TurnEngine {
         state.pairing.channel,
         state.pairing.threadTs ?? "",
         `❓ ${aq.header}: ${aq.question}`,
-        askUserQuestionBlocks(paneId, state.currentPromptId, aq),
+        askUserQuestionBlocks(paneId, promptId, aq),
       );
       state.phase = "awaiting-question";
       return;
@@ -961,10 +987,10 @@ export class TurnEngine {
       state.pairing.threadTs ?? "",
       header,
       buttonMenu
-        ? permissionBlocks(paneId, state.currentPromptId, buttonMenu, isPlanPrompt ? header : undefined)
+        ? permissionBlocks(paneId, promptId, buttonMenu, isPlanPrompt ? header : undefined)
         : unreadableQuestion
           ? unreadableQuestionBlocks(paneText)
-          : permissionParseFailureBlocks(paneId, state.currentPromptId, paneText),
+          : permissionParseFailureBlocks(paneId, promptId, paneText),
     );
     state.phase = "awaiting-permission";
   }

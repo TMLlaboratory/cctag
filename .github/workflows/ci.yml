@@ -8,9 +8,13 @@ name: CI
 # On pull requests so a change is verified before it's merged, and on pushes to
 # main so main itself stays verified — including for commits that land directly
 # there, which is the normal route for docs-only changes.
+#
+# Every pull request, not only those into main: a stacked PR targets the branch
+# below it, and a `branches: [main]` filter silently skipped those — three were
+# open with no CI run at all. Each one is merged eventually, so each one is
+# checked now.
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
@@ -69,26 +73,28 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # Loads the library graph — everything except the three entry points,
-      # which call main() at import and would start connecting to Slack. An
-      # import is enough to catch what this job exists for: syntax or built-in
-      # APIs the emitted JS uses but Node 20 doesn't have.
+      # Loads the library graph — every built module except the three entry
+      # points, which call main() at import and would start connecting to
+      # Slack. An import is enough to catch what this job exists for: syntax or
+      # built-in APIs the emitted JS uses but Node 20 doesn't have.
+      #
+      # Discovered rather than listed: a hand-kept list went stale the first
+      # time a module was renamed, and failed on the module that was gone while
+      # never checking the ones that replaced it. The entry points are what
+      # changes rarely, so they are what gets named.
       - name: Load the built output on the declared floor
         run: |
           node --input-type=module -e "
+            import { readdirSync } from 'node:fs';
+            import { join } from 'node:path';
             import { pathToFileURL } from 'node:url';
-            const modules = [
-              'dist/settle.js',
-              'dist/turn.js',
-              'dist/watcher.js',
-              'dist/commands.js',
-              'dist/pairing.js',
-              'dist/leases.js',
-              'dist/attachments.js',
-              'dist/herdr/client.js',
-              'dist/agents/driver.js',
-              'dist/slack/notifier.js',
-            ];
+            const entryPoints = new Set(['dist/index.js', 'dist/hub/index.js', 'dist/spoke/index.js']);
+            const built = readdirSync('dist', { recursive: true }).map((f) => join('dist', f));
+            // A renamed entry point would otherwise be imported and run main().
+            for (const e of entryPoints) if (!built.includes(e)) throw new Error('entry point moved: ' + e);
+            const modules = built
+              .filter((f) => f.endsWith('.js') && !f.endsWith('.test.js') && !entryPoints.has(f))
+              .sort();
             for (const m of modules) await import(pathToFileURL(m).href);
             console.log('loaded ' + modules.length + ' modules on ' + process.version);
           "

@@ -52,20 +52,63 @@ function fakePairing(): Pairing {
   } as Pairing;
 }
 
-/** Records every message posted, so a re-post shows up as a second entry. */
-function fakeNotifier(): { notifier: Notifier; posts: string[] } {
+/** Records posted messages and button blocks so tests use the issued prompt ID. */
+function fakeNotifier(): { notifier: Notifier; posts: string[]; postedBlocks: unknown[][] } {
   const posts: string[] = [];
+  const postedBlocks: unknown[][] = [];
   const handle: MessageHandle = { async update() {} };
   const notifier: Notifier = {
     async postReply(_c, _t, text) {
       posts.push(text);
     },
-    async postMessage(_c, _t, text) {
+    async postMessage(_c, _t, text, blocks) {
       posts.push(text);
+      postedBlocks.push(blocks ?? []);
       return handle;
     },
   };
-  return { notifier, posts };
+  return { notifier, posts, postedBlocks };
+}
+
+function promptIdInButtonBlock(value: unknown): number | undefined {
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const id = promptIdInButtonBlock(child);
+      if (id !== undefined) return id;
+    }
+    return undefined;
+  }
+  if (value === null || typeof value !== "object") return undefined;
+  if ("value" in value && typeof value.value === "string") {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(value.value);
+    } catch {
+      payload = undefined;
+    }
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      "p" in payload &&
+      typeof payload.p === "number" &&
+      Number.isSafeInteger(payload.p)
+    ) {
+      return payload.p;
+    }
+  }
+  for (const child of Object.values(value)) {
+    const id = promptIdInButtonBlock(child);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
+
+function promptIdFromPostedBlocks(postedBlocks: unknown[][]): number {
+  for (let i = postedBlocks.length - 1; i >= 0; i--) {
+    const id = promptIdInButtonBlock(postedBlocks[i]);
+    if (id !== undefined) return id;
+  }
+  throw new Error("no prompt button was posted");
 }
 
 function fakeHerdr(
@@ -314,7 +357,7 @@ test("a prompt answered twice drives the TUI once", async () => {
   // check before either reaches the state mutation that happens after `await`.
   // Both then answered the pane — for Codex that is digit-plus-Enter twice,
   // whose second copy can land on whatever menu appeared next and confirm it.
-  const { notifier } = fakeNotifier();
+  const { notifier, postedBlocks } = fakeNotifier();
   const sent: string[] = [];
   const herdr = {
     async agentGet() {
@@ -323,7 +366,7 @@ test("a prompt answered twice drives the TUI once", async () => {
     async paneRead() {
       return PERMISSION_PANE;
     },
-    // Slow enough that the second click arrives while the first is still in
+    // Slow enough that the second click arrives while the first is in
     // flight — the real race, rather than a simulated one.
     async agentSend(_paneId: string, text: string) {
       await sleep(40);
@@ -334,10 +377,12 @@ test("a prompt answered twice drives the TUI once", async () => {
 
   try {
     await adopt(engine, fakePairing());
-    await sleep(200); // prompt posted, promptId is now 1
+    await sleep(200); // prompt posted before reading its button value
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const pairingKey = fakePairing().key;
 
-    const first = engine.answerPermissionButton(PANE, 1, "1");
-    const second = await engine.answerPermissionButton(PANE, 1, "1");
+    const first = engine.answerPermissionButton(PANE, promptId, "1", pairingKey);
+    const second = await engine.answerPermissionButton(PANE, promptId, "1", pairingKey);
     await first;
     await sleep(100); // let any second injection land before counting
 
@@ -351,7 +396,7 @@ test("a prompt answered twice drives the TUI once", async () => {
 test("a failed answer is not left claimed, so it can be retried", async () => {
   // The rollback half: if input injection throws, the prompt must go back to
   // pending rather than wedging the turn with nothing able to answer it.
-  const { notifier } = fakeNotifier();
+  const { notifier, postedBlocks } = fakeNotifier();
   let attempts = 0;
   const herdr = {
     async agentGet() {
@@ -370,9 +415,11 @@ test("a failed answer is not left claimed, so it can be retried", async () => {
   try {
     await adopt(engine, fakePairing());
     await sleep(200);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const pairingKey = fakePairing().key;
 
-    await assert.rejects(engine.answerPermissionButton(PANE, 1, "1"), /send-text failed/);
-    const retry = await engine.answerPermissionButton(PANE, 1, "1");
+    await assert.rejects(engine.answerPermissionButton(PANE, promptId, "1", pairingKey), /send-text failed/);
+    const retry = await engine.answerPermissionButton(PANE, promptId, "1", pairingKey);
     assert.deepEqual(retry, { ok: true }, "the same prompt must still be answerable after a failure");
     assert.equal(attempts, 2);
   } finally {
@@ -720,7 +767,7 @@ test("answering from Slack puts a status line where the answer was", async () =>
   // well up the thread. The answer looked like it had gone nowhere, the next
   // message was sent, and it came back rejected as busy while the terminal was in
   // fact working.
-  const { notifier, posts } = fakeNotifier();
+  const { notifier, posts, postedBlocks } = fakeNotifier();
   const engine = engineFor(
     fakeHerdr(() => "blocked"),
     notifier,
@@ -731,8 +778,12 @@ test("answering from Slack puts a status line where the answer was", async () =>
     await adopt(engine, fakePairing());
     await sleep(200);
     const before = posts.filter((p) => p.includes("実行中")).length;
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
 
-    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1"), { ok: true });
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", fakePairing().key),
+      { ok: true },
+    );
 
     assert.equal(
       posts.filter((p) => p.includes("実行中")).length,
@@ -748,10 +799,12 @@ test("the new status line is the one the poll loop then updates", async () => {
   // Otherwise it would post "実行中…" once and then keep editing the old message up
   // the thread, which is the same invisibility in a new place.
   const events: string[] = [];
+  const postedBlocks: unknown[][] = [];
   let status: AgentInfo["agentStatus"] = "blocked";
   const tracking: Notifier = {
     async postReply() {},
-    async postMessage(_c, _t, text) {
+    async postMessage(_c, _t, text, blocks) {
+      postedBlocks.push(blocks ?? []);
       const tag = text.slice(0, 6);
       events.push(`post[${tag}]`);
       return {
@@ -771,7 +824,11 @@ test("the new status line is the one the poll loop then updates", async () => {
   try {
     await adopt(engine, fakePairing());
     await sleep(200);
-    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1"), { ok: true });
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", fakePairing().key),
+      { ok: true },
+    );
     status = "working"; // the agent picks the work up
     events.length = 0;
     // Past the five-second floor the loop is waiting out: an answer deliberately
@@ -795,11 +852,12 @@ test("an answer records who pressed it when that was not the owner", async () =>
   // a button payload — unlike anything typed into a message — so it is worth
   // recording; the owner's own answers stay unmarked, which keeps a thread only
   // they use looking exactly as it did.
-  const { notifier } = fakeNotifier();
+  const { notifier, postedBlocks } = fakeNotifier();
   const updates: string[] = [];
   const recording: Notifier = {
     ...notifier,
-    async postMessage(_c, _t, text) {
+    async postMessage(_c, _t, text, blocks) {
+      postedBlocks.push(blocks ?? []);
       return {
         async update(t: string) {
           if (text.includes("許可")) updates.push(t);
@@ -817,7 +875,11 @@ test("an answer records who pressed it when that was not the owner", async () =>
   try {
     await adopt(engine, fakePairing());
     await sleep(200);
-    assert.deepEqual(await engine.answerPermissionButton(PANE, 1, "1", "佐藤"), { ok: true });
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", fakePairing().key, "佐藤"),
+      { ok: true },
+    );
     assert.ok(
       updates.some((u) => u.includes("佐藤")),
       `the actor must be recorded, got ${JSON.stringify(updates)}`,
@@ -826,13 +888,13 @@ test("an answer records who pressed it when that was not the owner", async () =>
     engine.abortAll();
   }
 });
-
 test("the owner's own answer is left unmarked", async () => {
-  const { notifier } = fakeNotifier();
+  const { notifier, postedBlocks } = fakeNotifier();
   const updates: string[] = [];
   const recording: Notifier = {
     ...notifier,
-    async postMessage(_c, _t, text) {
+    async postMessage(_c, _t, text, blocks) {
+      postedBlocks.push(blocks ?? []);
       return {
         async update(t: string) {
           if (text.includes("許可")) updates.push(t);
@@ -850,7 +912,8 @@ test("the owner's own answer is left unmarked", async () => {
   try {
     await adopt(engine, fakePairing());
     await sleep(200);
-    await engine.answerPermissionButton(PANE, 1, "1"); // no actor — the owner
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    await engine.answerPermissionButton(PANE, promptId, "1", fakePairing().key); // no actor — the owner
     assert.deepEqual(updates, ["→ 1 を送信しました"], "unmarked means the owner, as it always has");
   } finally {
     engine.abortAll();
@@ -972,9 +1035,15 @@ function multiSelectPane(question: string): string {
 
 /** Like fakeNotifier, but keeps what each posted message was later updated to
  *  — which is where the terminal-answered replacement lands. */
-function recordingNotifier(): { notifier: Notifier; posts: string[]; updates: string[] } {
+function recordingNotifier(): {
+  notifier: Notifier;
+  posts: string[];
+  updates: string[];
+  postedBlocks: unknown[][];
+} {
   const posts: string[] = [];
   const updates: string[] = [];
+  const postedBlocks: unknown[][] = [];
   const handle: MessageHandle = {
     async update(text) {
       updates.push(text);
@@ -984,12 +1053,13 @@ function recordingNotifier(): { notifier: Notifier; posts: string[]; updates: st
     async postReply(_c, _t, text) {
       posts.push(text);
     },
-    async postMessage(_c, _t, text) {
+    async postMessage(_c, _t, text, blocks) {
       posts.push(text);
+      postedBlocks.push(blocks ?? []);
       return handle;
     },
   };
-  return { notifier, posts, updates };
+  return { notifier, posts, updates, postedBlocks };
 }
 
 function multiSelectHerdr(pane: () => string): { herdr: HerdrClient; sent: string[] } {
@@ -1019,8 +1089,8 @@ function multiSelectHerdr(pane: () => string): { herdr: HerdrClient; sent: strin
  * loop's first pass, so the phase is still `running` and there is no pending
  * question to answer for a moment after it resolves.
  */
-async function adoptAndAwaitPrompt(engine: TurnEngine): Promise<void> {
-  await adopt(engine, fakePairing());
+async function adoptAndAwaitPrompt(engine: TurnEngine, pairing: Pairing = fakePairing()): Promise<void> {
+  await adopt(engine, pairing);
   await sleep(60);
 }
 
@@ -1033,12 +1103,13 @@ test("a multi-select question can be answered from Slack", async () => {
   // the only way to answer was at the keyboard. Reported from a four-question
   // dialog where question 1 was answered from Slack and question 2 — the
   // multi-select one — was not.
-  const { notifier, updates } = recordingNotifier();
+  const { notifier, updates, postedBlocks } = recordingNotifier();
   const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
-    const result = await engine.answerQuestionMultiSelect(PANE, 1, [0, 2]);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const result = await engine.answerQuestionMultiSelect(PANE, promptId, [0, 2], fakePairing().key);
     assert.equal(result.ok, true);
     // Options 1 and 3 toggled, then options.length + 1 downs onto Submit, then
     // Enter. The fixture's fourth row is `Type something`, so there are three.
@@ -1055,13 +1126,15 @@ test("a multi-select question can be answered from Slack", async () => {
 });
 
 test("a stale submit for an already-answered question is refused", async () => {
-  const { notifier } = recordingNotifier();
+  const { notifier, postedBlocks } = recordingNotifier();
   const { herdr } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
-    assert.equal((await engine.answerQuestionMultiSelect(PANE, 1, [0])).ok, true);
-    const again = await engine.answerQuestionMultiSelect(PANE, 1, [1]);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const pairingKey = fakePairing().key;
+    assert.equal((await engine.answerQuestionMultiSelect(PANE, promptId, [0], pairingKey)).ok, true);
+    const again = await engine.answerQuestionMultiSelect(PANE, promptId, [1], pairingKey);
     assert.equal(again.ok, false, "the prompt id is spent");
   } finally {
     engine.abortAll();
@@ -1069,14 +1142,15 @@ test("a stale submit for an already-answered question is refused", async () => {
 });
 
 test("indices outside the option list never reach the pane as keystrokes", async () => {
-  const { notifier } = recordingNotifier();
+  const { notifier, postedBlocks } = recordingNotifier();
   const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
     // 10 would be typed into the dialog as a keystroke meaning nothing — or, on
     // a dialog with ten rows, as the wrong one.
-    await engine.answerQuestionMultiSelect(PANE, 1, [0, 9]);
+    await engine.answerQuestionMultiSelect(PANE, promptId, [0, 9], fakePairing().key);
     assert.deepEqual(
       sent.filter((k) => k.startsWith("text:")),
       ["text:1"],
@@ -1141,6 +1215,116 @@ test("a reply that is not just option numbers is still passed through as text", 
     // the same box off again, which is worse than passing the text along.
     assert.equal((await engine.answerQuestionFreeText(PANE, "1,9")).ok, true);
     assert.ok(sent.includes("text:1,9"), `expected the text verbatim, got ${JSON.stringify(sent)}`);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("prompt IDs stay safe and distinct across turns", async () => {
+  const ids = new Set<number>();
+  for (let i = 0; i < 12; i++) {
+    const { notifier, postedBlocks } = fakeNotifier();
+    const engine = engineFor(fakeHerdr(() => "blocked"), notifier, 600_000);
+    try {
+      await adoptAndAwaitPrompt(engine);
+      const promptId = promptIdFromPostedBlocks(postedBlocks);
+      assert.ok(Number.isSafeInteger(promptId) && promptId > 0, `unsafe prompt ID: ${promptId}`);
+      assert.equal(ids.has(promptId), false, `prompt ID was reused: ${promptId}`);
+      ids.add(promptId);
+    } finally {
+      engine.abortAll();
+      for (let attempt = 0; attempt < 40 && engine.isBusy(PANE); attempt++) await sleep(25);
+      assert.equal(engine.isBusy(PANE), false, "the poll loop must release before the next turn");
+    }
+  }
+});
+
+test("a button from the previous turn cannot answer the next same-kind prompt", async () => {
+  const pairing = fakePairing();
+  const oldButton = fakeNotifier();
+  const previousTurn = engineFor(fakeHerdr(() => "blocked"), oldButton.notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(previousTurn, pairing);
+  } finally {
+    previousTurn.abortAll();
+    for (let attempt = 0; attempt < 40 && previousTurn.isBusy(PANE); attempt++) await sleep(25);
+    assert.equal(previousTurn.isBusy(PANE), false);
+  }
+  const previousPromptId = promptIdFromPostedBlocks(oldButton.postedBlocks);
+
+  const nextButton = fakeNotifier();
+  const writes: string[] = [];
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    async agentSend(_paneId: string, text: string) {
+      writes.push(`text:${text}`);
+    },
+    async paneSendKeys(_paneId: string, ...keys: string[]) {
+      writes.push(...keys.map((key) => `key:${key}`));
+    },
+  } as unknown as HerdrClient;
+  const currentTurn = engineFor(herdr, nextButton.notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(currentTurn, pairing);
+    const currentPromptId = promptIdFromPostedBlocks(nextButton.postedBlocks);
+    assert.notEqual(currentPromptId, previousPromptId);
+    assert.deepEqual(
+      await currentTurn.answerPermissionButton(PANE, previousPromptId, "1", pairing.key),
+      { ok: false, reason: "not-pending" },
+    );
+    assert.deepEqual(writes, [], "the stale button must not write to the pane");
+  } finally {
+    currentTurn.abortAll();
+  }
+});
+
+test("a matching prompt ID from another pairing is rejected without writing keys", async () => {
+  const { notifier, postedBlocks } = fakeNotifier();
+  const writes: string[] = [];
+  const herdr = {
+    async agentGet() {
+      return fakeAgent("blocked");
+    },
+    async paneRead() {
+      return PERMISSION_PANE;
+    },
+    async agentSend(_paneId: string, text: string) {
+      writes.push(`text:${text}`);
+    },
+    async paneSendKeys(_paneId: string, ...keys: string[]) {
+      writes.push(...keys.map((key) => `key:${key}`));
+    },
+  } as unknown as HerdrClient;
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", "C1:another-thread"),
+      { ok: false, reason: "not-pending" },
+    );
+    assert.deepEqual(writes, [], "a button from another thread must not write to the pane");
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a channel pairing accepts its own permission button", async () => {
+  const pairing: Pairing = { ...fakePairing(), key: "C1", threadTs: undefined };
+  const { notifier, postedBlocks } = fakeNotifier();
+  const engine = engineFor(fakeHerdr(() => "blocked"), notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine, pairing);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", pairing.key),
+      { ok: true },
+    );
   } finally {
     engine.abortAll();
   }
