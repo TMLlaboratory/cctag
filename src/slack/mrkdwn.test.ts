@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { segmentForSlack } from "./mrkdwn.js";
+import { markdownToMrkdwn, segmentForSlack } from "./mrkdwn.js";
 import { markdownTableBlock, markdownTableFallback } from "./blocks.js";
 
 const kinds = (md: string): string[] => segmentForSlack(md).map((s) => s.kind);
@@ -85,4 +85,43 @@ test("a rejected block post falls back to text instead of losing the turn's outp
   assert.equal(replies.length, 1, "the answer must still reach the thread");
   assert.match(replies[0], /答えです/);
   assert.match(replies[0], /```/, "the table degrades to a monospace grid");
+});
+
+const Z = "​";
+
+test("markdownToMrkdwn keeps bold as bold instead of turning it into italic", () => {
+  // The italic pass used to rewrite the `*x*` the bold pass had just produced.
+  assert.equal(markdownToMrkdwn("this is **bold** text"), "this is *bold* text");
+  assert.equal(markdownToMrkdwn("- **項目** の説明"), "• *項目* の説明");
+});
+
+test("markdownToMrkdwn puts a zero-width space where Slack would see no boundary", () => {
+  // Checked in a live thread: `これは*太字*です` and `「*太字*」` show the
+  // asterisks; spaces, line edges and a zero-width space all render bold.
+  assert.equal(markdownToMrkdwn("これは**太字**です"), `これは${Z}*太字*${Z}です`);
+  assert.equal(markdownToMrkdwn("「**太字**」"), `「${Z}*太字*${Z}」`);
+  assert.equal(markdownToMrkdwn("これは **太字** です"), "これは *太字* です");
+  assert.equal(markdownToMrkdwn("**太字**"), "*太字*");
+});
+
+test("markdownToMrkdwn still converts italic, alongside bold on the same line", () => {
+  assert.equal(markdownToMrkdwn("*斜体* と **太字**"), "_斜体_ と *太字*");
+});
+
+test("markdownToMrkdwn does not nest bold inside a heading", () => {
+  // A heading is already a bold line; `**` inside it would leave `**x**`.
+  assert.equal(markdownToMrkdwn("## **見出し**の続き"), "*見出しの続き*");
+});
+
+test("markdownToMrkdwn leaves inline code alone", () => {
+  // Seen live: `**x**` in code came out as `*x*`, and a lone `*` in code
+  // paired with a later one and broke the span.
+  assert.equal(markdownToMrkdwn("`**x**` は太字"), "`**x**` は太字");
+  assert.equal(markdownToMrkdwn("`*` が文字のまま、`_太字_` に"), "`*` が文字のまま、`_太字_` に");
+  assert.equal(markdownToMrkdwn("`*` と **太字** と `*`"), "`*` と *太字* と `*`");
+});
+
+test("markdownToMrkdwn leaves asterisks in a code fence alone", () => {
+  const md = ["```", "**not bold**", "```"].join("\n");
+  assert.equal(markdownToMrkdwn(md), md);
 });

@@ -40,6 +40,15 @@ would have to keep. Pin an exact version if that matters to you.
   empty, so sending to it is no longer refused. When cctag cannot confirm the
   composer's state it sends nothing and says what may be left there. Verified
   with Claude Code 2.1.287.
+- Bold in an agent's reply now renders as bold in Slack. The italic rule ran
+  after the bold one and rewrote its `*x*` as `_x_`, so every `**x**` since the
+  first release came out italic — and next to Japanese text, where Slack needs a
+  boundary outside the markers, as literal underscores. A zero-width space now
+  goes outside a bold or italic marker wherever there is no whitespace or line
+  edge, which is what makes `これは*太字*です` and `「*太字*」` render (checked
+  in a live thread). Inline code is also left alone now: `` `**x**` `` used to
+  come out as `*x*`, and a lone `` `*` `` could pair with a later one and break
+  the span.
 - A question or permission button now answers only the prompt it was posted for,
   and only from the thread the pane is paired to. Prompt IDs restarted at 1 on
   every turn, so a button left over from an earlier turn could match a newer
