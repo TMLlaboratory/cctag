@@ -23,6 +23,7 @@ interface CodexPayload {
 
 export interface CodexRecord {
   type?: string;
+  timestamp?: string;
   payload?: CodexPayload;
 }
 
@@ -176,14 +177,22 @@ export function extractCodexTurnOutput(records: CodexRecord[]): { texts: string[
   return { texts, toolNames };
 }
 
+function parseBoundaryTimestamp(timestamp: string | undefined): number | null {
+  if (timestamp === undefined) return null;
+  const timestampMs = Date.parse(timestamp);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
+}
+
 /**
  * Turn boundaries in a Codex rollout.
  *
  * Codex states these outright, which makes it the easier of the two formats:
  * `event_msg` records carry `task_started` and `task_complete` (with `turn_id`,
  * `duration_ms`, `completed_at`), plus `turn_aborted` for an interrupted turn.
+ * Each event's top-level timestamp is the boundary time.
  * Measured across 86 local rollouts: 46 starts against 45 completes and 1
- * abort — exactly one end per start.
+ * abort — exactly one end per start. An unparseable timestamp is carried as
+ * `null` without discarding the boundary.
  *
  * These are the only `event_msg` records read. The rest are deliberately
  * ignored, `agent_message` above all: extractCodexTurnOutput takes assistant
@@ -195,9 +204,13 @@ export function extractCodexLifecycle(records: CodexRecord[]): TurnLifecycleEven
   for (const r of records) {
     if (r.type !== "event_msg" || !r.payload) continue;
     const { type, turn_id: turnId } = r.payload;
-    if (type === "task_started") events.push({ kind: "started", turnId });
-    else if (type === "task_complete") events.push({ kind: "completed", turnId });
-    else if (type === "turn_aborted") events.push({ kind: "aborted", turnId });
+    if (type === "task_started") {
+      events.push({ kind: "started", turnId, timestamp: parseBoundaryTimestamp(r.timestamp) });
+    } else if (type === "task_complete") {
+      events.push({ kind: "completed", turnId, timestamp: parseBoundaryTimestamp(r.timestamp) });
+    } else if (type === "turn_aborted") {
+      events.push({ kind: "aborted", turnId, timestamp: parseBoundaryTimestamp(r.timestamp) });
+    }
   }
   return events;
 }

@@ -1,6 +1,64 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractSendUserFileRequests, extractToolOutcomes, type TranscriptRecord } from "./transcript.js";
+import { readFileSync } from "node:fs";
+import { extractLifecycle, extractSendUserFileRequests, extractToolOutcomes, type TranscriptRecord } from "./transcript.js";
+
+test("a cancelled tool prompt is an aborted boundary, not a new start", () => {
+  const records = readFileSync(new URL("./__fixtures__/claude-interrupt.jsonl", import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as TranscriptRecord);
+  const start = records[0]!;
+  const toolUse = records[1]!;
+  const rejectedToolResult = records[2]!;
+  const interrupt = records[3]!;
+
+  assert.deepEqual(extractLifecycle([start]), [{ kind: "started", timestamp: Date.parse(start.timestamp!) }]);
+  assert.deepEqual(extractLifecycle([toolUse]), []);
+  assert.deepEqual(extractLifecycle([rejectedToolResult]), []);
+  assert.deepEqual(extractLifecycle([interrupt]), [{ kind: "aborted", timestamp: Date.parse(interrupt.timestamp!) }]);
+  assert.deepEqual(extractLifecycle(records), [
+    { kind: "started", timestamp: Date.parse(start.timestamp!) },
+    { kind: "aborted", timestamp: Date.parse(interrupt.timestamp!) },
+  ]);
+});
+
+test("only a single text block with an interrupt prefix aborts a Claude turn", () => {
+  const timestamp = "2026-09-27T14:49:01.084Z";
+  const marker = "[Request interrupted by user";
+  const user = (content: unknown): TranscriptRecord => ({
+    type: "user",
+    timestamp,
+    message: { content },
+  });
+  assert.deepEqual(extractLifecycle([
+    user([{ type: "text", text: `${marker}]` }]),
+    user([{ type: "text", text: `${marker} for tool use]` }]),
+    user(`${marker} for tool use]`),
+    user([{ type: "text", text: `${marker}]` }, { type: "text", text: "more" }]),
+    user([{ type: "text", text: `${marker}]` }, { type: "image", source: "redacted" }]),
+  ]), [
+    { kind: "aborted", timestamp: Date.parse(timestamp) },
+    { kind: "aborted", timestamp: Date.parse(timestamp) },
+    { kind: "started", timestamp: Date.parse(timestamp) },
+    { kind: "started", timestamp: Date.parse(timestamp) },
+    { kind: "started", timestamp: Date.parse(timestamp) },
+  ]);
+});
+
+test("Claude boundary records without a parsable timestamp retain their event kinds", () => {
+  assert.deepEqual(extractLifecycle([
+    { type: "user", message: { content: "new turn" } },
+    { type: "assistant", timestamp: "not a timestamp", message: { stop_reason: "end_turn" } },
+    { type: "system", subtype: "turn_duration" },
+    { type: "user", timestamp: "invalid", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
+  ]), [
+    { kind: "started", timestamp: null },
+    { kind: "completed", timestamp: null },
+    { kind: "completed", timestamp: null },
+    { kind: "aborted", timestamp: null },
+  ]);
+});
 
 function assistantToolUse(id: string, name: string, input: unknown): TranscriptRecord {
   return { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } };

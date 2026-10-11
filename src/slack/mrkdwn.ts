@@ -51,6 +51,14 @@ export function markdownToMrkdwn(input: string): string {
 const CHUNK_LIMIT = 3900;
 
 /**
+ * Slack's cap on a section block's text. Lower than CHUNK_LIMIT, which is sized
+ * for a plain message: a 3,000–3,900-character run of prose went into one
+ * section and Slack rejected the whole post as `invalid_blocks`. The margin is
+ * for the fence markers chunkForSlack adds when it splits a code block.
+ */
+const SECTION_TEXT_LIMIT = 3000 - "```\n".length - "\n```".length;
+
+/**
  * Splits text into chunks under CHUNK_LIMIT, preferring paragraph boundaries
  * and never splitting inside a fenced code block (re-opens the fence if a
  * block has to be split across chunks).
@@ -93,8 +101,8 @@ export interface MarkdownTable {
 /**
  * One piece of a turn's output, in the order it appeared.
  *
- * Text pieces are already mrkdwn-converted and chunked; table pieces are still
- * raw so the caller can decide between a Block Kit table and a fallback.
+ * Text pieces are already mrkdwn-converted and chunked to fit a section block;
+ * table pieces are still raw so the caller can decide between a Block Kit table and a fallback.
  */
 export type SlackSegment = { kind: "text"; text: string } | { kind: "table"; table: MarkdownTable };
 
@@ -128,7 +136,7 @@ export function segmentForSlack(markdown: string): SlackSegment[] {
   const pushText = (raw: string): void => {
     const trimmed = raw.replace(/^\n+|\n+$/g, "");
     if (!trimmed) return;
-    for (const chunk of chunkForSlack(markdownToMrkdwn(trimmed))) segments.push({ kind: "text", text: chunk });
+    for (const chunk of chunkForSlack(markdownToMrkdwn(trimmed), SECTION_TEXT_LIMIT)) segments.push({ kind: "text", text: chunk });
   };
 
   for (const [i, part] of markdown.split(/(```[\s\S]*?```)/g).entries()) {

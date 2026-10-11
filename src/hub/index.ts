@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws";
 import type { IncomingFile } from "../attachments.js";
 import { TokenStore } from "./tokenStore.js";
 import { maxFramePayload } from "./frame.js";
+import { setBounded } from "./bounded.js";
 import { WsRpc } from "../ws/rpc.js";
 import { VERSION } from "../version.js";
 import {
@@ -39,6 +40,10 @@ const MESSAGE_NOTIFY_COOLDOWN_MS = 60_000;
 // that owner silently fails for the entire window.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 90_000;
+
+/** Cap on `messageLocations`. Edits land within a turn (the status line) or
+ *  when a prompt is answered, so the recent tail is all that is ever used. */
+const MAX_TRACKED_MESSAGES = 5000;
 
 interface RegisterPayload {
   ownerUserId: string;
@@ -81,6 +86,11 @@ async function runServer(): Promise<void> {
 
   const spokesByOwner = new Map<string, WsRpc>();
   const threadOwner = new Map<string, string>();
+  // Where each posted message lives, so a Spoke can edit it later by msgId.
+  // Bounded: an entry is added for every message a Spoke posts, and nothing
+  // removed them — the table grew for the life of the Hub process. An edit to
+  // an evicted message finds nothing and is skipped, as update_message already
+  // does for an unknown msgId.
   const messageLocations = new Map<string, { channel: string; ts: string; ownerUserId: string }>();
   // Which owner each forwarded attachment was offered to — the authorization
   // list `fetch_file` checks against. Bounded, because it grows with every
@@ -90,14 +100,7 @@ async function runServer(): Promise<void> {
   let msgSeq = 0;
 
   function rememberFileOwner(files: IncomingFile[], ownerUserId: string): void {
-    for (const f of files) {
-      fileOwner.set(f.id, ownerUserId);
-      if (fileOwner.size > MAX_TRACKED_FILES) {
-        // Map iteration is insertion-ordered, so this drops the oldest entry.
-        const oldest = fileOwner.keys().next();
-        if (!oldest.done) fileOwner.delete(oldest.value);
-      }
-    }
+    for (const f of files) setBounded(fileOwner, f.id, ownerUserId, MAX_TRACKED_FILES);
   }
 
   // Per-thread last-notified timestamp for the "message" handler's
@@ -300,7 +303,12 @@ async function runServer(): Promise<void> {
         blocks: p.blocks as never,
       });
       const msgId = `m${++msgSeq}`;
-      messageLocations.set(msgId, { channel: p.channel, ts: res.ts as string, ownerUserId: registeredOwnerId! });
+      setBounded(
+        messageLocations,
+        msgId,
+        { channel: p.channel, ts: res.ts as string, ownerUserId: registeredOwnerId! },
+        MAX_TRACKED_MESSAGES,
+      );
       return { msgId };
     });
 

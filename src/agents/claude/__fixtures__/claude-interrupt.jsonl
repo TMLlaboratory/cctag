@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-09-27T14:48:48.520Z","isSidechain":false,"message":{"role":"user","content":"<prompt>","stop_reason":null}}
+{"type":"assistant","timestamp":"2026-09-27T14:48:53.416Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","text":null,"is_error":null,"tool_use_id":null}],"stop_reason":"tool_use"}}
+{"type":"user","timestamp":"2026-09-27T14:49:01.082Z","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","text":null,"is_error":true,"tool_use_id":"<id>"}],"stop_reason":null}}
+{"type":"user","timestamp":"2026-09-27T14:49:01.083Z","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]","is_error":null,"tool_use_id":null}],"stop_reason":null}}
