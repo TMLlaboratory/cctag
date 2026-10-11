@@ -523,6 +523,10 @@ export class CommandHandler {
       await this.notifier.postReply(channel, threadTs, OMP_THREAD_REPLY);
       return;
     }
+    // Not a new turn while a question or plan waits for a typed answer: the prompt
+    // tells the reader to reply in the thread, the turn is still running, and a
+    // reply that began with @cctag was refused as busy with no way to answer.
+    if (files.length === 0 && (await this.answerPendingPrompt(pairing.paneId, text, channel, threadTs))) return;
     if (this.turnEngine.isBusy(pairing.paneId)) {
       await this.notifier.postReply(channel, threadTs, BUSY_MESSAGE);
       return;
@@ -910,13 +914,18 @@ export class CommandHandler {
       await this.notifier.postReply(ctx.channel, ctx.threadTs, OMP_THREAD_REPLY);
       return;
     }
+    await this.answerPendingPrompt(pairing.paneId, ctx.text, ctx.channel, ctx.threadTs);
+  }
+
+  /** Answers the question or plan prompt waiting on this pane, if any; true when one took the text. */
+  private async answerPendingPrompt(paneId: string, text: string, channel: string, threadTs: string): Promise<boolean> {
     try {
-      const asQuestion = await this.turnEngine.answerQuestionFreeText(pairing.paneId, ctx.text);
-      if (asQuestion.ok) return;
-      await this.turnEngine.answerPlanFeedback(pairing.paneId, ctx.text);
+      if ((await this.turnEngine.answerQuestionFreeText(paneId, text)).ok) return true;
+      return (await this.turnEngine.answerPlanFeedback(paneId, text)).ok;
     } catch (err) {
       if (!(err instanceof ExpectationLost)) throw err;
-      await this.notifier.postReply(ctx.channel, ctx.threadTs, err.userMessage ?? EXPECTATION_LOST_REPLY);
+      await this.notifier.postReply(channel, threadTs, err.userMessage ?? EXPECTATION_LOST_REPLY);
+      return true;
     }
   }
 }
