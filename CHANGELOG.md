@@ -13,6 +13,13 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- The Hub no longer keeps the location of every message it has ever posted.
+  `messageLocations`, which lets a Spoke edit a message it posted earlier, got
+  an entry per post and lost none, so it grew for the life of the process. It
+  is now capped at the 5,000 most recent, as `fileOwner` already was at 500;
+  edits happen within a turn or when a prompt is answered, and an edit to an
+  evicted message is skipped as an unknown one already was. Takes effect when
+  the Hub is redeployed.
 - Interrupting Claude Code now ends the turn. The transcript records an
   interrupt as a user message beginning `[Request interrupted by user`, which
   was read as a new turn starting: the transcript never said the interrupted
