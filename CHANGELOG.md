@@ -13,6 +13,21 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- The Hub now notices a Spoke that went silent. The Spoke already pinged the
+  Hub and reconnected when its pongs stopped, but nothing watched the other
+  direction: a Spoke that vanished without closing its connection (sleep, a
+  network change) stayed registered, and every Slack message for its owner was
+  dispatched into it and lost without a word until the OS gave up on the TCP
+  connection. The Hub pings each Spoke every 30 seconds and drops one that has
+  not answered for 90. A dispatch that fails now gets a reply in the thread:
+  that the Spoke could not be reached when its connection closed, or that it
+  has not answered when the call timed out — which can also be a mention whose
+  attachment is still downloading, so that reply does not say the message was
+  lost. An exception on the Spoke gets no reply, since the Spoke got the message
+  and is alive. Ordinary messages, which arrive as a stream, get at most one
+  reply a minute per thread. Takes effect when the Hub is
+  redeployed; Spokes need no change, and the released Bun-compiled Spoke was
+  measured answering the Hub's pings.
 - Long replies no longer lose their tables. Prose was cut into pieces of up
   to 3,900 characters, but a Block Kit section holds 3,000, so a reply with a
   3,000–3,900-character run of prose was rejected as `invalid_blocks` and
