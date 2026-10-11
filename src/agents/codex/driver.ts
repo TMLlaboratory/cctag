@@ -121,12 +121,12 @@ export const codexDriver: AgentDriver = {
     // blocked prompt is a command-approval (or directory-trust) menu.
     const menu = parseCodexMenu(paneText);
     if (!menu) {
-      return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver) };
+      return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-then-enter") };
     }
     const content = { kind: "permission" as const, menu, isPlanPrompt: false };
     const fingerprint = promptFingerprint(content);
     if (fingerprint === null) {
-      return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver) };
+      return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-then-enter") };
     }
     return {
       ...content,

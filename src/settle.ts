@@ -150,14 +150,14 @@ export async function resolveStatus(input: {
     return { status, extendDeadline: status === "blocked" };
   }
 
+  if (input.settle.settledByTranscript) return { status: "idle", extendDeadline: false };
+
   const { waitingSince, state } = input.evidence;
   if (waitingSince !== null && (input.boundaries.lastEndAt === null || input.boundaries.lastEndAt < waitingSince)) {
     // A null end timestamp cannot prove that the turn ended after waiting began;
     // treat it like no timed end so an existing blocked state is never released.
     return { status: "blocked", extendDeadline: true };
   }
-
-  if (input.settle.settledByTranscript) return { status: "idle", extendDeadline: false };
 
   if (input.boundaries.lastBoundary === "started") {
     let screen: StatusScreenEvidence | null;

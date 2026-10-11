@@ -1177,14 +1177,33 @@ export class OrcaBackend implements Terminals {
 
   openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel {
     this.refuseOmpInput(ref, prompt.driver?.kind);
+    if (prompt.form !== "key-confirms") {
+      throw new ExpectationLost("Orca has no verified blind confirmation that needs an Enter.");
+    }
     let attempted = false;
     return {
       answer: async (choice) => {
         if (attempted) throw new ExpectationLost("The blind confirmation channel has already been used.");
         attempted = true;
+        const current = await this.get(ref.target);
+        const evidence = current?.evidence;
+        // Not state === "waiting" alone: no Claude permission prompt is captured on
+        // Orca, and one reported as a null state with agentWait.since would
+        // otherwise refuse every blind answer.
+        const waiting =
+          evidence?.kind === "hint" &&
+          (evidence.state === "waiting" || (evidence.state === null && evidence.waitingSince !== null));
+        if (!waiting) {
+          throw new ExpectationLost("Orca no longer reports the agent waiting for the blind confirmation.");
+        }
         const handle = await this.writableHandle(ref);
         const snap = await this.readHandle(ref.target, handle);
         if (!snap.complete) throw new ExpectationLost("The Orca screen is incomplete before the blind confirmation.");
+        // Not openAnswer's fingerprint re-check: a blind prompt is one the driver
+        // could not parse, so there is no fingerprint to compare.
+        if (prompt.driver.isIdleComposer?.(snap)) {
+          throw new ExpectationLost("The blind confirmation is no longer on screen.");
+        }
         if (!(await this.sameProcess(ref))) {
           throw new ExpectationLost("The Orca process changed before the blind confirmation.");
         }

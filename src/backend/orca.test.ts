@@ -2245,9 +2245,10 @@ test("Orca writes read their terminal and screen before the final process check"
   const paths = ["submit", "answer", "blind", "composer"] as const;
   const idle = capturedClaudeScreen("idle-composer.screen.json");
   const question = capturedClaudeScreen("ask-user-question-multiselect-before-down.screen.json");
+  const working = capturedClaudeScreen("working.screen.json");
 
   const write = async (runtime: FakeOrcaRuntime, path: (typeof paths)[number]): Promise<void> => {
-    runtime.screen = path === "answer" ? question : idle;
+    runtime.screen = path === "answer" ? question : path === "blind" ? working : idle;
     const terminals = backend(runtime);
     if (path === "submit") {
       await terminals.submit(currentRef(), "hello", submitContext());
@@ -2660,12 +2661,16 @@ test("Orca Claude multi-select never confirms when the review screen does not ap
   assert.equal(runtime.sendCalls[3]!.args.includes("--enter"), true);
 });
 
-test("Orca blind permission sends exactly one y-or-n byte without Enter", async () => {
-  const runtime = new FakeOrcaRuntime();
-  runtime.screen = capturedClaudeScreen("idle-composer.screen.json");
+function blindPrompt() {
   const parsed = claudeDriver.parseBlockedPane("ordinary terminal output");
   if (parsed.kind !== "blind-permission") throw new Error("expected a blind permission prompt");
-  const channel = backend(runtime).openBlind(currentRef(), parsed.blind);
+  return parsed.blind;
+}
+
+test("Orca blind permission sends exactly one y-or-n byte without Enter while the agent waits", async () => {
+  const runtime = new FakeOrcaRuntime();
+  runtime.screen = capturedClaudeScreen("working.screen.json");
+  const channel = backend(runtime).openBlind(currentRef(), blindPrompt());
 
   await channel.answer("y");
   await assert.rejects(channel.answer("n"), ExpectationLost);
@@ -2673,6 +2678,28 @@ test("Orca blind permission sends exactly one y-or-n byte without Enter", async 
   assert.equal(runtime.sendCalls.length, 1);
   assert.equal(runtime.sendCalls[0]!.args[runtime.sendCalls[0]!.args.indexOf("--text") + 1], "y");
   assert.equal(runtime.sendCalls[0]!.args.includes("--enter"), false);
+
+  // A wait Orca reports only through the terminal's agentWait counts as well.
+  const terminalOnly = new FakeOrcaRuntime();
+  terminalOnly.screen = capturedClaudeScreen("working.screen.json");
+  terminalOnly.worktreeAgentsOverride = [{ ...worktreeQuestionAgent, state: null }];
+  await backend(terminalOnly).openBlind(currentRef(), blindPrompt()).answer("y");
+  assert.equal(terminalOnly.sendCalls.length, 1);
+});
+
+test("Orca blind permission refuses once someone answered at the terminal", async () => {
+  // Answered at the terminal while the Slack button was still up: the composer
+  // is back, and a `y` sent now would land in it as the start of a message.
+  const answered = new FakeOrcaRuntime();
+  answered.screen = capturedClaudeScreen("idle-composer.screen.json");
+  await assert.rejects(backend(answered).openBlind(currentRef(), blindPrompt()).answer("y"), ExpectationLost);
+  assert.equal(answered.sendCalls.length, 0);
+
+  const resumed = new FakeOrcaRuntime();
+  resumed.screen = capturedClaudeScreen("working.screen.json");
+  resumed.worktreeAgentsOverride = [{ ...worktreeQuestionAgent, state: "working" }];
+  await assert.rejects(backend(resumed).openBlind(currentRef(), blindPrompt()).answer("y"), ExpectationLost);
+  assert.equal(resumed.sendCalls.length, 0);
 });
 
 test("Orca composer BackTab is one raw write after process, screen, idle, and draft gates", async () => {

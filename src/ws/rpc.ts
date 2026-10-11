@@ -3,6 +3,18 @@ import type WebSocket from "ws";
 type Handler = (payload: unknown) => Promise<unknown> | unknown;
 type NotifyHandler = (payload: unknown) => void;
 
+/** Why a call() was rejected: the connection closed under it, no result came in
+*  time, or the other side's handler threw. Only "closed" says the connection
+ *  is gone; the other two leave it open and the call possibly still running. */
+export class RpcFailure extends Error {
+  constructor(
+    readonly kind: "closed" | "timeout" | "remote",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 type Envelope =
   | { kind: "call"; id: string; type: string; payload: unknown }
   | { kind: "result"; id: string; ok: true; result: unknown }
@@ -24,7 +36,7 @@ export class WsRpc {
   constructor(private readonly ws: WebSocket) {
     ws.on("message", (data: WebSocket.RawData) => this.onMessage(data.toString()));
     ws.on("close", () => {
-      for (const [, p] of this.pending) p.reject(new Error("connection closed"));
+      for (const [, p] of this.pending) p.reject(new RpcFailure("closed", "connection closed"));
       this.pending.clear();
     });
   }
@@ -54,7 +66,7 @@ export class WsRpc {
       if (!p) return;
       this.pending.delete(msg.id);
       if (msg.ok) p.resolve(msg.result);
-      else p.reject(new Error(msg.error));
+      else p.reject(new RpcFailure("remote", msg.error));
     } else if (msg.kind === "notify") {
       this.notifyHandlers.get(msg.type)?.(msg.payload);
     }
@@ -68,7 +80,7 @@ export class WsRpc {
     const id = `${Date.now()}-${++this.seq}`;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`rpc timeout waiting for "${type}"`));
+        if (this.pending.delete(id)) reject(new RpcFailure("timeout", `rpc timeout waiting for "${type}"`));
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (v) => {

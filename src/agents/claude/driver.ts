@@ -410,7 +410,7 @@ export const claudeDriver: AgentDriver = {
     if (!menu) {
       return looksLikeQuestionScreen(paneText)
         ? { kind: "unreadable-question" }
-        : { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver) };
+        : { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver, "key-confirms") };
     }
     const feedbackNum = findPlanFeedbackOption(paneText);
     const content = {
@@ -421,7 +421,7 @@ export const claudeDriver: AgentDriver = {
     };
     const fingerprint = promptFingerprint(content);
     if (fingerprint === null) {
-      return { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver) };
+      return { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver, "key-confirms") };
     }
     return {
       ...content,
@@ -576,6 +576,7 @@ export const claudeDriver: AgentDriver = {
     // onto Submit, Enter, then confirm the review screen.
     if (isOrca) assertAnswerNotAborted(signal);
     await channel.move("Down", 1);
+    await sleep(150);
     if (isOrca) assertAnswerNotAborted(signal);
     await channel.confirm("Submit", false);
     if (isOrca) {
