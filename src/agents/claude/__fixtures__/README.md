@@ -30,3 +30,9 @@ Side-pane frames, captured on 2026-10-09 from a live Claude Code 2.1.292 session
 - `side-pane-question.screen.json` — single-select question with the mod pane open to its right; every row carries the pane after a `│` at display column 128.
 - `side-pane-after-answer.screen.json` — the same session after answering option 1; the pane stays open beside the transcript, and the composer and footer are drawn full-width below it.
 - `side-pane-question-herdr.screen.json` — the same kind of question on herdr 0.9.3 (120-column pane, pane opened with `/qa-guide`). Not an Orca read: it stores the raw stdout of `herdr pane read <pane> --source recent --lines 200` as `text`, 40 rows. The divider sits at display column 70 and the question row runs flush against it.
+
+Free-text frames, captured on 2026-10-10 from one live Claude Code 2.1.292 session in an Orca terminal (Orca CLI 1.4.222, qa-guide 0.4.0 installed), each the `result.terminal` object of a default unbounded `--screen --json` read. The question was dictated long enough to wrap onto two gutter rows. Redactions are padded to the original display width.
+
+- `free-text-before.screen.json` — the dialog as it first appears, cursor on option 1.
+- `free-text-cursor-on-row.screen.json` — after three Down keys, cursor on the empty `4. Type something.` row.
+- `free-text-typed.screen.json` — after one `orca terminal send --text` carrying a two-line answer: the placeholder is replaced by the text, the second line continues indented below it, and nothing is submitted.

@@ -12,9 +12,10 @@ const FIXTURE_DIRS = [
 function screenTexts(): { name: string; text: string }[] {
   return FIXTURE_DIRS.flatMap((dir) =>
     readdirSync(dir)
-      .filter((name) => name.endsWith(".json") && !name.startsWith("side-pane-"))
+      .filter((name) => name.endsWith(".json"))
       .flatMap((name) => {
         const json = JSON.parse(readFileSync(new URL(name, dir), "utf8"));
+        if (json.capture?.modPlugin) return [];
         const tail = (json.result?.terminal ?? json.terminal)?.tail;
         return Array.isArray(tail) ? [{ name, text: tail.join("\n") }] : [];
       }),

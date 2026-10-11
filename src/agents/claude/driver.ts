@@ -22,6 +22,7 @@ import {
   parsePreviewQuestionPane,
   SUBMIT_ANSWERS_RE,
   classicAnchorIndex,
+  classicDialogState,
   permissionAnchorIndex,
   previewAnchorIndex,
   parseCursorLabel as parseClaudeCursorLabel,
@@ -59,6 +60,23 @@ function assertAnswerNotAborted(signal?: AbortSignal): void {
     throw new ExpectationLost("the compound answer was interrupted before completion");
   }
 }
+const CURSOR_ON_FREE_TEXT = "カーソルが自由記述の欄にあるので、送っていません。端末で答えてください";
+const CURSOR_MOVED = "カーソルが最初の選択肢から動いているので、送っていません。端末で答えてください";
+const FREE_TEXT_EDITED = "自由記述の欄に入力途中の文があるので、送っていません。端末で確かめてください";
+
+/**
+ * The live classic dialog as it is now, read before an answer's first key.
+ *
+ * The answers used to assume a fresh dialog — cursor on option 1, free-text row
+ * empty — and count keys from there. A dialog someone has touched at the
+ * keyboard is not that: from the free-text row a digit is typed into the text
+ * rather than choosing, and counting Downs from option 1 overshoots onto "Chat
+ * about this" (both measured on a live pane).
+ */
+async function liveDialog(terminals: Terminals, target: string) {
+  return classicDialogState((await terminals.read(target, 200, "history")).text);
+}
+
 const ANSWER_REVIEW_FAILURE =
   "確認画面を確かめられなかったので送信していません。端末で確かめてください";
 
@@ -461,6 +479,11 @@ export const claudeDriver: AgentDriver = {
   },
 
   async answerQuestionOption(terminals, channel, target, optionNum, answered, signal) {
+    const dialog = await liveDialog(terminals, target);
+    if (dialog && dialog.cursorNum === dialog.freeTextNum) {
+      throw new ExpectationLost("the cursor is on the free-text row", CURSOR_ON_FREE_TEXT);
+    }
+    if (dialog && dialog.cursorNum === null) throw new ExpectationLost("the cursor is not on the dialog", CURSOR_MOVED);
     await channel.digit(optionNum);
     await sleep(400);
     // Deliberately not caught. Without a successful read there is no way to know
@@ -500,6 +523,8 @@ export const claudeDriver: AgentDriver = {
     //       4. [ ] Delta
     //       5. [ ] Type something
     //          Submit           <- Down × (options.length + 1) lands here
+    const dialog = await liveDialog(terminals, ref.target);
+    if (dialog && dialog.cursorNum !== 1) throw new ExpectationLost("the cursor is not on option 1", CURSOR_MOVED);
     assertAnswerNotAborted(signal);
     for (const num of optionNums) {
       assertAnswerNotAborted(signal);
@@ -552,8 +577,12 @@ export const claudeDriver: AgentDriver = {
     if (isOrca && hasUnsendableC0Controls(text)) {
       throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
     }
+    const dialog = await liveDialog(terminals, ref.target);
+    if (dialog?.freeTextEdited) throw new ExpectationLost("the free-text row already holds text", FREE_TEXT_EDITED);
+    if (dialog && dialog.cursorNum === null) throw new ExpectationLost("the cursor is not on the dialog", CURSOR_MOVED);
+    const down = dialog ? dialog.freeTextNum - dialog.cursorNum! : info.options.length;
     if (isOrca) assertAnswerNotAborted(signal);
-    if (info.options.length > 0) await channel.move("Down", info.options.length);
+    if (down !== 0) await channel.move(down > 0 ? "Down" : "Up", Math.abs(down));
     if (isOrca) assertAnswerNotAborted(signal);
     await channel.text(text);
     await sleep(200);

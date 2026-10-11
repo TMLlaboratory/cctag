@@ -116,6 +116,8 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
  */
 const TYPE_SOMETHING_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(?:\[[ x✔]\]\s*)?Type something\.?\s*$/;
 const OPTION_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(?:\[([ x✔])\]\s*)?(.+?)\s*$/;
+/** The classic list's last row, numbered right after the free-text row. */
+const NUMBERED_CHAT_ROW_RE = /^\s*(?:❯\s*)?(\d+)\.\s*Chat about this\s*$/;
 const HEADER_LINE_RE = /^\s*[☐☒]\s*(.+?)\s*$/;
 const NUMBERED_START_RE = /^\s*(?:❯\s*)?\d+\./;
 /**
@@ -188,11 +190,70 @@ export function looksLikeQuestionScreen(paneText: string): boolean {
  * find, and being tried first it won.
  */
 export function classicAnchorIndex(paneText: string): number {
-  const lines = paneText.split("\n");
+  return freeTextRow(paneText.split("\n"))?.idx ?? -1;
+}
+
+/**
+ * The free-text row of the live classic dialog: its line, its number, and
+ * whether something has been typed into it.
+ *
+ * Not found by the "Type something." placeholder alone: typing into the row
+ * replaces the placeholder with the typed text, so the dialog vanished from the
+ * parser the moment an answer was typed, and Orca's check before Enter refused
+ * every free-text answer as a changed screen. The numbered "Chat about this"
+ * row below it survives the typing. A multi-select dialog has no such row and
+ * keeps the placeholder as its only anchor.
+ */
+function freeTextRow(lines: string[]): { idx: number; num: number; edited: boolean } | null {
+  let placeholder: { idx: number; num: number; edited: boolean } | null = null;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (TYPE_SOMETHING_RE.test(lines[i])) return i;
+    const m = TYPE_SOMETHING_RE.exec(lines[i]);
+    if (m) {
+      placeholder = { idx: i, num: parseInt(m[1], 10), edited: false };
+      break;
+    }
   }
-  return -1;
+  let typed: { idx: number; num: number; edited: boolean } | null = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const chat = NUMBERED_CHAT_ROW_RE.exec(lines[i]);
+    if (!chat) continue;
+    const num = parseInt(chat[1], 10) - 1;
+    for (let j = i - 1; j >= 0; j--) {
+      const m = /^\s*(?:❯\s*)?(\d+)\./.exec(lines[j]);
+      if (!m) continue;
+      if (parseInt(m[1], 10) === num) typed = { idx: j, num, edited: !TYPE_SOMETHING_RE.test(lines[j]) };
+      break;
+    }
+    break;
+  }
+  if (!typed || (placeholder && placeholder.idx > typed.idx)) return placeholder;
+  return typed;
+}
+
+/**
+ * Where the live classic dialog's cursor is, and whether its free-text row
+ * already holds text — what an answer has to know before it sends a key, since
+ * a digit typed while the cursor sits on the free-text row goes into the text
+ * instead of choosing an option (measured on a live pane). Null when no classic
+ * dialog is on screen.
+ */
+export function classicDialogState(
+  paneText: string,
+): { freeTextNum: number; freeTextEdited: boolean; cursorNum: number | null } | null {
+  const lines = paneText.split("\n");
+  const row = freeTextRow(lines);
+  if (!row) return null;
+  let cursorNum: number | null = null;
+  for (let i = row.idx; i >= 0; i--) {
+    const m = /^\s*(❯\s*)?(\d+)\./.exec(lines[i]);
+    if (!m) continue;
+    if (m[1]) {
+      cursorNum = parseInt(m[2], 10);
+      break;
+    }
+    if (m[2] === "1") break;
+  }
+  return { freeTextNum: row.num, freeTextEdited: row.edited, cursorNum };
 }
 
 /** Returns null if this pane text isn't showing an AskUserQuestion menu. */
@@ -202,17 +263,10 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
   // The *last* one on screen: a pane read wide enough to hold a tall dialog can
   // also still hold an older, already-answered one, and the live dialog is
   // always the bottom-most. Anchoring on the first would parse the dead one.
-  let typeSomethingIdx = -1;
-  let typeSomethingNum = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const m = TYPE_SOMETHING_RE.exec(lines[i]);
-    if (m) {
-      typeSomethingIdx = i;
-      typeSomethingNum = parseInt(m[1], 10);
-      break;
-    }
-  }
-  if (typeSomethingIdx === -1) return null;
+  const row = freeTextRow(lines);
+  if (!row) return null;
+  const typeSomethingIdx = row.idx;
+  const typeSomethingNum = row.num;
 
   // Options first, then the question. The old order — question, then options
   // after it — meant option 1's own line was skipped whenever the question
@@ -259,15 +313,14 @@ export function parseAskUserQuestionPane(paneText: string): AskUserQuestionPaneI
     !RULE_LINE_RE.test(line) &&
     !HEADER_LINE_RE.test(line);
 
-  // Nearest prose line above the first option — the question sits directly
-  // above its options in every layout measured.
-  let question = "";
-  for (let i = firstOptionIdx - 1; i >= 0; i--) {
-    if (isProse(lines[i])) {
-      question = stripGutter(lines[i]);
-      break;
-    }
-  }
+  // The run of prose lines nearest above the first option, not just the nearest
+  // line: a long question wraps, and the nearest line alone posted only its tail
+  // (seen live: "戻す手段がありません。どうしますか？").
+  let i = firstOptionIdx - 1;
+  while (i >= 0 && !isProse(lines[i])) i--;
+  const questionLines: string[] = [];
+  while (i >= 0 && isProse(lines[i])) questionLines.unshift(stripGutter(lines[i--]));
+  const question = questionLines.reduce((sofar, line) => sofar + joinWrapped(sofar, line), "");
 
   let header = "質問";
   for (let i = firstOptionIdx; i >= 0; i--) {
@@ -562,12 +615,14 @@ export function parseCursorLabel(paneText: string): string | null {
   const lines = paneText.split("\n");
   let selectedNum: string | null = null;
   let selectedLabel = "";
+  let selectedIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^\s*❯\s+Submit\s*$/.test(lines[i]!)) return "Submit";
     const match = /^\s*❯\s*(\d+)\.\s*(.*?)\s*$/.exec(lines[i]!);
     if (match) {
       selectedNum = match[1];
       selectedLabel = match[2].trim();
+      selectedIdx = i;
       break;
     }
   }
@@ -590,6 +645,13 @@ export function parseCursorLabel(paneText: string): string | null {
   const question = parseAskUserQuestionPane(paneText);
   if (!question) return selectedLabel;
   if (optionNumber <= question.options.length) return question.options[optionNumber - 1].label;
-  if (optionNumber === question.options.length + 1) return selectedLabel;
-  return null;
+  if (optionNumber !== question.options.length + 1) return null;
+  // Typed text, so every line of it: an answer with a line break, or one longer
+  // than the row, continues on indented lines below the numbered one.
+  const typed = [selectedLabel];
+  for (let i = selectedIdx + 1; i < lines.length; i++) {
+    if (!CONTINUATION_RE.test(lines[i]!) || NUMBERED_START_RE.test(lines[i]!) || RULE_LINE_RE.test(lines[i]!)) break;
+    typed.push(lines[i]!.trim());
+  }
+  return typed.join("\n");
 }
