@@ -11,6 +11,8 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
 ### Fixed
 
 - The Hub now notices a Spoke that went silent. The Spoke already pinged the
@@ -82,7 +84,6 @@ would have to keep. Pin an exact version if that matters to you.
 - `assets/cctag-hub.service` sets `MemoryMax`, so a spike kills the Hub at fault
   rather than leaving the choice of victim to the OOM killer — on a box where the
   other victim could be the other workspace's Hub, or sshd.
-
 - A thread whose agent is not known gets its own help text. The Claude variant
   had been doing double duty as the fallback, which is why the same defect was
   reported twice: first the `connect` line told an unpaired reader to connect "a
@@ -279,6 +280,7 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TMLlaboratory/cctag/releases/tag/v0.2.0
