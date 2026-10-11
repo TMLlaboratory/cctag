@@ -29,6 +29,21 @@ export function classifiedStatus(evidence: StatusEvidence): AgentStatus {
  * actually knows. See the drivers' lifecycle extraction for what marks a
  * boundary in each format.
  */
+/**
+ * How long herdr may report `idle`/`done` against a transcript that says the
+ * turn is still running before that report is believed.
+ *
+ * herdr's idle can be momentary mid-turn. Measured 2026-10-12 (issue #47): an
+ * adopted terminal turn was closed as "完了（テキスト応答なし）" nine seconds in,
+ * while the transcript's last records were a `tool_use` and its result — no
+ * `end_turn`, no `turn_duration`. Believing it at once let one flicker end a
+ * live turn; never believing it would bring back the hang #35 fixed for a turn
+ * that ends without writing a boundary. A bounded wait does neither: a turn
+ * that writes its end (the normal case) still settles at once, through
+ * `settledByTranscript`.
+ */
+export const IDLE_AGAINST_RUNNING_GRACE_MS = 15_000;
+
 export class SettleTracker {
   /**
    * `unknown` until a turn is seen to start. A completion only counts once a
@@ -39,6 +54,9 @@ export class SettleTracker {
    * first means that is ignored instead of finalizing the turn that just began.
    */
   private phase: "unknown" | "running" | "finished" = "unknown";
+
+  /** When herdr began reporting idle/done against a running turn; null otherwise. */
+  private idleSince: number | null = null;
 
   /** Declares a turn already in progress when its start predates this offset.
    *
@@ -54,8 +72,10 @@ export class SettleTracker {
   /** Feeds boundaries from a freshly-tailed batch, in order. */
   observe(events: readonly TurnLifecycleEvent[]): void {
     for (const event of events) {
-      if (event.kind === "started") this.phase = "running";
-      else if (this.phase === "running") this.phase = "finished";
+      if (event.kind === "started") {
+        this.phase = "running";
+        this.idleSince = null; // a new turn's idle is timed from scratch
+      } else if (this.phase === "running") this.phase = "finished";
     }
   }
 
@@ -79,10 +99,19 @@ export class SettleTracker {
    * returned as-is, which keeps the failure direction safe: an agent whose
    * format grows a boundary this doesn't recognize simply behaves as it does
    * today rather than being declared finished early.
+   *
+   * The one exception: `idle`/`done` while the transcript says the turn is
+   * still running reads as `working` until it has lasted
+   * IDLE_AGAINST_RUNNING_GRACE_MS — see there.
    */
-  effectiveStatus(status: AgentStatus): AgentStatus {
+  effectiveStatus(status: AgentStatus, now: number = Date.now()): AgentStatus {
+    if (status !== "idle" && status !== "done") this.idleSince = null;
     if (status === "blocked") return status;
     if (status === "working" && this.settledByTranscript) return "idle";
+    if ((status === "idle" || status === "done") && this.turnRunning) {
+      this.idleSince ??= now;
+      if (now - this.idleSince < IDLE_AGAINST_RUNNING_GRACE_MS) return "working";
+    }
     return status;
   }
 }

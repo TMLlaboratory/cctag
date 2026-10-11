@@ -31,6 +31,12 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- A turn on herdr is no longer closed by a moment of `idle` mid-turn. herdr's
+  `idle`/`done` was believed at once even while the transcript said the turn
+  was still running, so an adopted terminal turn was posted as
+  "完了（テキスト応答なし）" nine seconds in, its transcript ending on a tool
+  call. Against a running turn, that status now has to last 15 seconds; a turn
+  that writes its end still settles at once (#47).
 - A Claude Code question in a named session reaches Slack again on herdr.
   The dialog's bottom rule carries the session name, and herdr's rule for a
   blocked form looks only below the last rule, so herdr reported the pane

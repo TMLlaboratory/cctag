@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   EMPTY_TRANSCRIPT_BOUNDARIES,
+  IDLE_AGAINST_RUNNING_GRACE_MS,
   resolveStatus,
   SettleTracker,
   transcriptBoundaries,
@@ -484,6 +485,34 @@ test("lifecycle baselines join multi-chunk records and leave partial tails reada
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("herdr's idle against a running turn is believed only once it lasts", () => {
+  // Issue #47: a momentary idle mid-turn closed an adopted turn while its
+  // transcript ended on a tool_use, with no end record.
+  const t = new SettleTracker();
+  t.observe([{ kind: "started", timestamp: 1 }]);
+  assert.equal(t.effectiveStatus("idle", 1_000), "working");
+  assert.equal(t.effectiveStatus("done", 1_000 + IDLE_AGAINST_RUNNING_GRACE_MS - 1), "working");
+  assert.equal(t.effectiveStatus("idle", 1_000 + IDLE_AGAINST_RUNNING_GRACE_MS), "idle", "a turn that ends without a boundary still ends");
+});
+
+test("the idle grace restarts after any other status, and after a new start", () => {
+  const t = new SettleTracker();
+  t.markTurnRunning();
+  assert.equal(t.effectiveStatus("idle", 0), "working");
+  assert.equal(t.effectiveStatus("working", 10_000), "working");
+  assert.equal(t.effectiveStatus("idle", IDLE_AGAINST_RUNNING_GRACE_MS), "working", "timed from the second idle, not the first");
+  assert.equal(t.effectiveStatus("blocked", IDLE_AGAINST_RUNNING_GRACE_MS + 1), "blocked");
+  t.observe([{ kind: "started", timestamp: 2 }]);
+  assert.equal(t.effectiveStatus("idle", 2 * IDLE_AGAINST_RUNNING_GRACE_MS + 2), "working");
+});
+
+test("a turn the transcript has closed settles at once, with no grace", () => {
+  const t = new SettleTracker();
+  t.observe([{ kind: "started", timestamp: 1 }, { kind: "completed", timestamp: 2 }]);
+  assert.equal(t.effectiveStatus("idle", 0), "idle");
+  assert.equal(t.effectiveStatus("done", 0), "done");
 });
 
 // Issue #46: herdr reported `idle` with this question on screen, because the
