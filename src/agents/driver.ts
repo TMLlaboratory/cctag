@@ -56,14 +56,16 @@ export interface ToolOutcome {
  * A turn boundary in the agent's own transcript — what SettleTracker decides
  * completion from, instead of trusting herdr's `agent_status` (see settle.ts).
  *
+ * `timestamp` is epoch milliseconds, or `null` when unparseable. Consumers
+ * must treat `null` as time not proven, never as reason to release `blocked`.
  * `turnId` is carried where the format supplies one (Codex does; Claude Code
  * doesn't) so a completion can be matched to its start rather than inferred
  * from order alone.
  */
 export type TurnLifecycleEvent =
-  | { kind: "started"; turnId?: string }
-  | { kind: "completed"; turnId?: string }
-  | { kind: "aborted"; turnId?: string };
+  | { kind: "started"; timestamp: number | null; turnId?: string }
+  | { kind: "completed"; timestamp: number | null; turnId?: string }
+  | { kind: "aborted"; timestamp: number | null; turnId?: string };
 
 export interface TurnOutput {
   texts: string[];

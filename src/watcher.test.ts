@@ -274,12 +274,13 @@ function writeTranscript(dir: string, name: string, texts: string[]): void {
 function writeCompletedTurn(dir: string, name: string, text: string): void {
   mkdirSync(dir, { recursive: true });
   const lines = [
-    { type: "user", message: { role: "user", content: "やって" } },
+    { type: "user", timestamp: "2026-09-27T14:48:48.520Z", message: { role: "user", content: "やって" } },
     {
       type: "assistant",
+      timestamp: "2026-09-27T14:48:53.416Z",
       message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
     },
-    { type: "system", subtype: "turn_duration", durationMs: 1234 },
+    { type: "system", subtype: "turn_duration", timestamp: "2026-09-27T14:49:01.083Z", durationMs: 1234 },
   ].map((r) => JSON.stringify(r));
   writeFileSync(join(dir, name), lines.join("\n") + "\n");
 }
@@ -594,12 +595,20 @@ test("a pane that is really gone is still unpaired", async () => {
 // overrides it, which is how an earlier version of this test came to pass
 // without the fix in place.
 
-const TURN_START = { type: "user", message: { role: "user", content: "やって" } };
+const TURN_START = {
+  type: "user",
+  timestamp: "2026-09-27T14:48:48.520Z",
+  message: { role: "user", content: "やって" },
+};
 
 function turnEnd(text: string): unknown[] {
   return [
-    { type: "assistant", message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } },
-    { type: "system", subtype: "turn_duration", durationMs: 1234 },
+    {
+      type: "assistant",
+      timestamp: "2026-09-27T14:48:53.416Z",
+      message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+    },
+    { type: "system", subtype: "turn_duration", timestamp: "2026-09-27T14:49:01.083Z", durationMs: 1234 },
   ];
 }
 
