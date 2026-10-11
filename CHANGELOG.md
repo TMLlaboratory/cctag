@@ -37,6 +37,44 @@ would have to keep. Pin an exact version if that matters to you.
   was offered as a y/n permission menu whose buttons would have typed into it.
   When a prompt still cannot be read, Slack now shows the bottom of the screen,
   where the prompt is, instead of the top.
+- The Hub now notices a Spoke that went silent. The Spoke already pinged the
+  Hub and reconnected when its pongs stopped, but nothing watched the other
+  direction: a Spoke that vanished without closing its connection (sleep, a
+  network change) stayed registered, and every Slack message for its owner was
+  dispatched into it and lost without a word until the OS gave up on the TCP
+  connection. The Hub pings each Spoke every 30 seconds and drops one that has
+  not answered for 90. A dispatch that fails now gets a reply in the thread:
+  that the Spoke could not be reached when its connection closed, or that it
+  has not answered when the call timed out — which can also be a mention whose
+  attachment is still downloading, so that reply does not say the message was
+  lost. An exception on the Spoke gets no reply, since the Spoke got the message
+  and is alive. Ordinary messages, which arrive as a stream, get at most one
+  reply a minute per thread. Takes effect when the Hub is
+  redeployed; Spokes need no change, and the released Bun-compiled Spoke was
+  measured answering the Hub's pings.
+- Long replies no longer lose their tables. Prose was cut into pieces of up
+  to 3,900 characters, but a Block Kit section holds 3,000, so a reply with a
+  3,000–3,900-character run of prose was rejected as `invalid_blocks` and
+  re-posted as plain text, its tables turned into monospace grids. Long
+  bilingual replies hit this most. Prose bound for blocks is now cut at the
+  section limit.
+- The Hub no longer keeps the location of every message it has ever posted.
+  `messageLocations`, which lets a Spoke edit a message it posted earlier, got
+  an entry per post and lost none, so it grew for the life of the process. It
+  is now capped at the 5,000 most recent, as `fileOwner` already was at 500;
+  edits happen within a turn or when a prompt is answered, and an edit to an
+  evicted message is skipped as an unknown one already was. Takes effect when
+  the Hub is redeployed.
+- Interrupting Claude Code now ends the turn. The transcript records an
+  interrupt as a user message beginning `[Request interrupted by user`, which
+  was read as a new turn starting: the transcript never said the interrupted
+  turn had ended. It is now an `aborted` boundary, as Codex's `turn_aborted`
+  already was.
+- A Claude Code local command (such as `/compact`, `/model`, `/effort` or
+  `/copy`) now ends its turn when it prints its output. These commands write no
+  assistant reply, so the transcript read as a turn that started and never
+  ended. herdr's own idle status hid this; a backend that takes the turn's end
+  from the transcript waited until the turn timed out.
 - On Orca, a Slack message is no longer refused because Claude Code shows a
   next-prompt suggestion in the composer: Orca reports the suggestion like typed
   text, so cctag now tells the two apart with one reversible character. A
@@ -46,6 +84,15 @@ would have to keep. Pin an exact version if that matters to you.
   empty, so sending to it is no longer refused. When cctag cannot confirm the
   composer's state it sends nothing and says what may be left there. Verified
   with Claude Code 2.1.287.
+- Bold in an agent's reply now renders as bold in Slack. The italic rule ran
+  after the bold one and rewrote its `*x*` as `_x_`, so every `**x**` since the
+  first release came out italic — and next to Japanese text, where Slack needs a
+  boundary outside the markers, as literal underscores. A zero-width space now
+  goes outside a bold or italic marker wherever there is no whitespace or line
+  edge, which is what makes `これは*太字*です` and `「*太字*」` render (checked
+  in a live thread). Inline code is also left alone now: `` `**x**` `` used to
+  come out as `*x*`, and a lone `` `*` `` could pair with a later one and break
+  the span.
 - A question or permission button now answers only the prompt it was posted for,
   and only from the thread the pane is paired to. Prompt IDs restarted at 1 on
   every turn, so a button left over from an earlier turn could match a newer

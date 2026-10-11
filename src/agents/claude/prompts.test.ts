@@ -858,6 +858,29 @@ test("free text on a multi-select dialog is submitted, not un-ticked", async () 
   ]);
 });
 
+test("free text on a multi-select dialog waits for the Down to land before Enter", async () => {
+  // An Enter that overtakes the Down lands on the free-text row and unticks the
+  // answer, as above. main waited 150ms here; the key order alone cannot show it.
+  const { herdr, channel } = fakeHerdr(() => REVIEW_SCREEN, undefined, MULTI_PROMPT);
+  const at: Array<[string, number]> = [];
+  const timed: AnswerChannel = {
+    ...channel,
+    async move(direction, count) {
+      at.push([`key:${direction}`, Date.now()]);
+      await channel.move(direction, count);
+    },
+    async confirm(...args) {
+      at.push(["key:Enter", Date.now()]);
+      await channel.confirm(...args);
+    },
+  };
+  await claudeDriver.answerQuestionFreeText!(herdr, timed, TEST_REF, MULTI_INFO, "どれでもない");
+  const enter = at.findIndex(([key]) => key === "key:Enter");
+  const [prev, downAt] = at[enter - 1]!;
+  assert.equal(prev, "key:Down");
+  assert.ok(at[enter]![1] - downAt >= 140, `Enter followed Down after ${at[enter]![1] - downAt}ms`);
+});
+
 test("free text on a single-select dialog still submits with the one Enter", async () => {
   const { herdr, channel, sent } = fakeHerdr(() => PREVIEW_PANE);
   await claudeDriver.answerQuestionFreeText!(herdr, channel, TEST_REF, PREVIEW_INFO, "別の案がある");
