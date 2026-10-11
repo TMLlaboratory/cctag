@@ -383,14 +383,16 @@ export function unreadableQuestionBlocks(rawSnippet: string) {
           "誤ったキーを送らないよう、ボタンは出していません — *ターミナルで直接回答してください*。",
       },
     },
-    { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(0, 2900) + "\n```" } },
+    // The tail, not the head: the read is long and its bottom is the live prompt.
+    // Keeping the first 2900 characters posted old transcript with the question cut off.
+    { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(-2900) + "\n```" } },
   ];
 }
 
 export function permissionParseFailureBlocks(paneId: string, promptId: number, rawSnippet: string) {
   return [
     { type: "section", text: { type: "mrkdwn", text: "⚠️ 許可リクエスト（メニューを解析できませんでした）" } },
-    { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(0, 2900) + "\n```" } },
+    { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(-2900) + "\n```" } },
     {
       type: "actions",
       elements: [

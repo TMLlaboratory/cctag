@@ -8,6 +8,7 @@ import {
   previewAnchorIndex,
 } from "./prompts.js";
 import { claudeDriver } from "./driver.js";
+import { stripSidePane } from "../../backend/side-pane.js";
 import type { AnswerChannel, Terminals } from "../../backend/index.js";
 import type { AgentRef, ScreenSnapshot } from "../../backend/types.js";
 import { ExpectationLost } from "../../backend/types.js";
@@ -1025,4 +1026,31 @@ test("a redacted shell prompt is not a Claude composer", () => {
   assert.equal(isIdleComposer(shell), false);
   // The parser must reject shell text even when a caller marks the truncated frame complete.
   assert.equal(isIdleComposer({ ...shell, complete: true }), false);
+});
+
+test("Claude reads a question with a mod's side pane open beside it once the pane is stripped", () => {
+  const screen = capturedScreen("side-pane-question.screen.json");
+  assert.match(screen.text, /Type something\.\s+│おすすめ$/mu, "the capture must carry the pane on the dialog's rows");
+
+  const prompt = claudeDriver.parseBlockedPane(stripSidePane(screen.text));
+  assert.equal(prompt.kind, "question");
+  if (prompt.kind !== "question") return;
+  assert.equal(prompt.info.header, "テスト方針");
+  assert.equal(
+    prompt.info.question,
+    "Hub の heartbeat 検知（Spoke が無反応になったらスレッドに通知する機能）のテストは、どの方針で書きますか？",
+  );
+  assert.deepEqual(
+    prompt.info.options.map((o) => o.label),
+    ["偽タイマーで単体テスト (Recommended)", "実 Hub と Spoke の統合テスト", "両方（単体＋少数の統合）"],
+  );
+  assert.equal(prompt.info.multiSelect, false);
+});
+
+test("Claude sees the empty composer below a mod's side pane that stayed open after the answer", () => {
+  const screen = capturedScreen("side-pane-after-answer.screen.json");
+  const stripped = stripSidePane(screen.text);
+  assert.doesNotMatch(stripped, /回答済み|偽タイマーで単体テスト \(Recommended\)\s+│/u);
+  assert.match(stripped, /Update available!/u, "full-width rows below the pane must survive");
+  assert.equal(isIdleComposer({ ...screen, text: stripped }), true);
 });

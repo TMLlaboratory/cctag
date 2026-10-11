@@ -2804,3 +2804,18 @@ test("Orca multi-select free text verifies its own answer in the review screen",
   assert.equal(runtime.sendCalls.length, 5);
   assert.equal(runtime.sendCalls[4]!.args[runtime.sendCalls[4]!.args.indexOf("--text") + 1], "1");
 });
+
+test("screen reads drop a Claude Code mod's side pane", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const terminals = backend(runtime);
+  runtime.screen = (
+    JSON.parse(
+      readFileSync(new URL("../agents/claude/__fixtures__/side-pane-question.screen.json", import.meta.url), "utf8"),
+    ) as { terminal: JsonObject }
+  ).terminal;
+
+  const snapshot = await terminals.read(TARGET, 40, "screen");
+  assert.equal(snapshot.complete, true);
+  assert.match(snapshot.text, /^ {2}4\. Type something\.$/mu);
+  assert.doesNotMatch(snapshot.text, /回答待ち/u);
+});
