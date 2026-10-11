@@ -368,6 +368,20 @@ export class BackgroundWatcher {
           settle.markTurnRunning();
           initialStatus = "working";
         }
+      } else if (tPath && !transcriptAppeared) {
+        // herdr's own status drives this watch, but a turn already running at
+        // baseline — a Spoke restarted mid-turn — must still be known to be
+        // running, or the idle grace and the screen check behind it never apply
+        // and one momentary idle posts the turn half-finished. Advisory only: an
+        // unreadable baseline leaves the tracker as it was before, and the offset
+        // stays at the captured end.
+        const baseline = await readLastMatchingRecordBefore(tPath, capturedOffset, (record) =>
+          driver.extractLifecycle([record]).length > 0,
+        );
+        const boundaries = baseline?.record
+          ? transcriptBoundaries(driver.extractLifecycle([baseline.record]))
+          : EMPTY_TRANSCRIPT_BOUNDARIES;
+        if (boundaries.lastBoundary === "started") settle.markTurnRunning();
       }
       this.watches.set(pairing.paneId, {
         pairingKey: pairing.key,

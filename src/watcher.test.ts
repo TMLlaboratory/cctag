@@ -745,6 +745,35 @@ test("a pane herdr reports as working forever still gets its terminal-side respo
   });
 });
 
+test("a herdr watcher started mid-turn does not post on a momentary idle", async () => {
+  // A Spoke restarted while a terminal turn runs baselines on a transcript
+  // whose last boundary is a start. Unless the watch knows that turn is
+  // running, the idle grace (issue #47) never applies and a single idle
+  // flicker posts the turn half-finished.
+  await withRotationFixture(async ({ tDir, replies, setStatus, start }) => {
+    writeStartedTurn(tDir, "session-a.jsonl");
+    start();
+    await sleep(80); // baselined at the end, with the turn already running
+
+    appendFileSync(
+      join(tDir, "session-a.jsonl"),
+      `${JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-09-27T14:48:58.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "途中経過" }] },
+      })}\n`,
+    );
+    await sleep(80);
+    setStatus("idle"); // the flicker
+    await sleep(120);
+    assert.equal(replies.some((r) => r.includes("途中経過")), false, `posted mid-turn: ${JSON.stringify(replies)}`);
+
+    appendTurnCompletion(tDir, "session-a.jsonl");
+    for (let i = 0; i < 30 && !replies.some((r) => r.includes("途中経過")); i++) await sleep(20);
+    assert.equal(replies.filter((r) => r.includes("途中経過")).length, 1, "posted once the turn really ended");
+  });
+});
+
 test("an Orca watcher reports a turn that began before its EOF baseline when it later completes", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "cctag-orca-watch-baseline-"));
   const transcriptDir = transcriptDirFor(cwd);
