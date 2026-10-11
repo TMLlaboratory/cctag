@@ -316,6 +316,20 @@ test("a historical transcript end before waitingSince still blocks", async () =>
   assert.equal(resolved.extendDeadline, true);
 });
 
+test("a turn the transcript ended is not kept alive by a later waiting hint", async () => {
+  // Whether Orca keeps reporting waiting after a turn ends is not captured; if it
+  // does, the hint must not hold the ended turn open as blocked.
+  const settle = new SettleTracker();
+  settle.observe(V2_LIFECYCLE);
+  const resolved = await resolveStatus({
+    evidence: hint("waiting", V2_END_AT + 1),
+    settle,
+    boundaries: transcriptBoundaries(V2_LIFECYCLE),
+    previousStatus: "blocked",
+  });
+  assert.deepEqual(resolved, { status: "idle", extendDeadline: false });
+});
+
 test("an unknown end timestamp cannot release a waiting hint", async () => {
   const boundaries = transcriptBoundaries([
     V2_STARTED,
