@@ -35,6 +35,20 @@ would have to keep. Pin an exact version if that matters to you.
   plan waiting for a typed answer. It used to be refused as busy, because the
   turn is still running while the prompt waits, so the "reply in this thread"
   the prompt offers only worked without the mention.
+- On Orca, a Slack message is no longer refused because Claude Code shows a
+  next-prompt suggestion in the composer: Orca reports the suggestion like typed
+  text, so cctag now tells the two apart with one reversible character. A
+  suggestion is replaced by the message; a typed draft is stashed with Ctrl+S,
+  the message is sent, and Claude Code restores the draft (an earlier stash is
+  overwritten). A new session's empty `Try "…"` composer is now accepted as
+  empty, so sending to it is no longer refused. When cctag cannot confirm the
+  composer's state it sends nothing and says what may be left there. Verified
+  with Claude Code 2.1.287.
+
+## [0.4.0] - 2026-10-11
+
+### Fixed
+
 - The Hub now notices a Spoke that went silent. The Spoke already pinged the
   Hub and reconnected when its pongs stopped, but nothing watched the other
   direction: a Spoke that vanished without closing its connection (sleep, a
@@ -73,15 +87,6 @@ would have to keep. Pin an exact version if that matters to you.
   assistant reply, so the transcript read as a turn that started and never
   ended. herdr's own idle status hid this; a backend that takes the turn's end
   from the transcript waited until the turn timed out.
-- On Orca, a Slack message is no longer refused because Claude Code shows a
-  next-prompt suggestion in the composer: Orca reports the suggestion like typed
-  text, so cctag now tells the two apart with one reversible character. A
-  suggestion is replaced by the message; a typed draft is stashed with Ctrl+S,
-  the message is sent, and Claude Code restores the draft (an earlier stash is
-  overwritten). A new session's empty `Try "…"` composer is now accepted as
-  empty, so sending to it is no longer refused. When cctag cannot confirm the
-  composer's state it sends nothing and says what may be left there. Verified
-  with Claude Code 2.1.287.
 - Bold in an agent's reply now renders as bold in Slack. The italic rule ran
   after the bold one and rewrote its `*x*` as `_x_`, so every `**x**` since the
   first release came out italic — and next to Japanese text, where Slack needs a
@@ -98,11 +103,6 @@ would have to keep. Pin an exact version if that matters to you.
   and never reused within a Spoke process, and the pressing thread's pairing
   must be the one the turn belongs to. The button value keeps its shape, so the
   Hub is unchanged.
-- Interrupting Claude Code now ends the turn. The transcript records an
-  interrupt as a user message beginning `[Request interrupted by user`, which
-  was read as a new turn starting: the transcript never said the interrupted
-  turn had ended. It is now an `aborted` boundary, as Codex's `turn_aborted`
-  already was.
 - The Hub's file cap now bounds what it will read, not just what it will accept.
   `CCTAG_MAX_FILE_MB` was compared only after a frame had been received and
   parsed, so an oversized upload was rejected having already cost the memory —
@@ -118,7 +118,6 @@ would have to keep. Pin an exact version if that matters to you.
 - `assets/cctag-hub.service` sets `MemoryMax`, so a spike kills the Hub at fault
   rather than leaving the choice of victim to the OOM killer — on a box where the
   other victim could be the other workspace's Hub, or sshd.
-
 - A thread whose agent is not known gets its own help text. The Claude variant
   had been doing double duty as the fallback, which is why the same defect was
   reported twice: first the `connect` line told an unpaired reader to connect "a
@@ -315,6 +314,7 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TMLlaboratory/cctag/releases/tag/v0.2.0
