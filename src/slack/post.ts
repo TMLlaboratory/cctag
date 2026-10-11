@@ -26,7 +26,7 @@ function blocksFor(segment: SlackSegment): unknown[] {
  * "a table must be the last block" turned out to exist (verified by posting
  * [section, table, section, table] successfully). Splitting only happens at
  * Slack's real ceilings — MAX_BLOCKS here, and the character caps that
- * chunkForSlack and markdownTableBlock already apply.
+ * segmentForSlack and markdownTableBlock already apply.
  */
 export async function postSegmented(
   notifier: Notifier,
