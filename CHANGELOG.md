@@ -80,6 +80,12 @@ would have to keep. Pin an exact version if that matters to you.
   composer's state it sends nothing and says what may be left there. Verified
   with Claude Code 2.1.287.
 
+### Security
+
+- Dependencies pulled in by `@slack/bolt` are updated past published
+  advisories: axios 1.20.0, proxy-addr 2.0.8 and qs 6.16.0. cctag's own code
+  is unchanged.
+
 ## [0.4.0] - 2026-10-11
 
 ### Fixed
