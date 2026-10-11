@@ -19,9 +19,13 @@ would have to keep. Pin an exact version if that matters to you.
   network change) stayed registered, and every Slack message for its owner was
   dispatched into it and lost without a word until the OS gave up on the TCP
   connection. The Hub pings each Spoke every 30 seconds and drops one that has
-  not answered for 90, and a dispatch that fails now gets a reply in the thread
-  saying the Spoke could not be reached — at most once a minute per thread for
-  ordinary messages, which arrive as a stream. Takes effect when the Hub is
+  not answered for 90. A dispatch that fails now gets a reply in the thread:
+  that the Spoke could not be reached when its connection closed, or that it
+  has not answered when the call timed out — which can also be a mention whose
+  attachment is still downloading, so that reply does not say the message was
+  lost. An exception on the Spoke gets no reply, since the Spoke got the message
+  and is alive. Ordinary messages, which arrive as a stream, get at most one
+  reply a minute per thread. Takes effect when the Hub is
   redeployed; Spokes need no change, and the released Bun-compiled Spoke was
   measured answering the Hub's pings.
 - Long replies no longer lose their tables. Prose was cut into pieces of up

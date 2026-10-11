@@ -7,6 +7,7 @@ import type { IncomingFile } from "../attachments.js";
 import { TokenStore } from "./tokenStore.js";
 import { maxFramePayload } from "./frame.js";
 import { setBounded } from "./bounded.js";
+import { undeliverableNotice } from "./undeliverable.js";
 import { WsRpc } from "../ws/rpc.js";
 import { VERSION } from "../version.js";
 import {
@@ -156,24 +157,23 @@ async function runServer(): Promise<void> {
    * wording — the two describe different failure states that must stay
    * diagnosable from each other. notConnectedReply means no Spoke has ever
    * registered for this owner; this one means a Spoke *was* registered in
-   * spokesByOwner, but a dispatched call to it just failed — almost always
-   * a stale connection the heartbeat above hasn't caught yet (up to ~90s),
-   * or one still fighting a network issue mid-detection. Merging the two
+   * spokesByOwner, but a dispatched call to it just failed. Merging the two
    * messages would make it impossible to tell, from Slack alone, which
-   * situation actually happened.
+   * situation actually happened. What it says depends on how the call
+   * failed — see undeliverableNotice.
    */
-  async function unreachableReply(channel: string, threadTs: string): Promise<void> {
+  async function undeliverableReply(notice: string, channel: string, threadTs: string): Promise<void> {
     await app.client.chat
       .postMessage({
         channel,
         thread_ts: threadTs,
-        text: "⚠️ オーナーの cctag spoke に届きませんでした。接続が切れている可能性があります。少し待ってからもう一度お試しください。",
+        text: notice,
       })
       .catch((err) => {
         // Already reporting one failure (the dispatch that failed) — this
         // must never throw a second one out of a .catch() that's already
         // handling the first.
-        console.error("[hub] unreachableReply itself failed:", err);
+        console.error("[hub] undeliverableReply itself failed:", err);
       });
   }
 
@@ -428,7 +428,8 @@ async function runServer(): Promise<void> {
       .call("app_mention", { channel, threadTs, userId, userName, text, ts: event.ts, files })
       .catch((err) => {
         console.error("[hub] app_mention dispatch failed:", err);
-        return unreachableReply(channel, threadTs);
+        const notice = undeliverableNotice(err);
+        if (notice) return undeliverableReply(notice, channel, threadTs);
       });
   });
 
@@ -457,7 +458,8 @@ async function runServer(): Promise<void> {
         // a reply meant to answer a pending prompt look identical here, so
         // an outage during an active conversation would otherwise post one
         // warning per message instead of one per 60 seconds.
-        if (shouldNotifyUndeliverable(key)) return unreachableReply(msgEvent.channel, msgEvent.thread_ts!);
+        const notice = undeliverableNotice(err);
+        if (notice && shouldNotifyUndeliverable(key)) return undeliverableReply(notice, msgEvent.channel, msgEvent.thread_ts!);
       });
   });
 
@@ -483,7 +485,8 @@ async function runServer(): Promise<void> {
       .call("pair_select", { channel, threadTs, userId: actionBody.user.id, terminalId })
       .catch((err) => {
         console.error("[hub] pair_select dispatch failed:", err);
-        return unreachableReply(channel, threadTs);
+        const notice = undeliverableNotice(err);
+        if (notice) return undeliverableReply(notice, channel, threadTs);
       });
   });
 
@@ -516,7 +519,8 @@ async function runServer(): Promise<void> {
         .call(kind, { channel, threadTs, value: withSelectedIndices(raw, body), actorUserId, actorName })
         .catch((err) => {
           console.error(`[hub] ${kind} dispatch failed:`, err);
-          return unreachableReply(channel, threadTs);
+          const notice = undeliverableNotice(err);
+          if (notice) return undeliverableReply(notice, channel, threadTs);
         });
     };
   app.action(/^aq_answer_/, actionRoute("aq_answer"));
