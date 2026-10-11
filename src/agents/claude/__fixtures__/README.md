@@ -36,3 +36,7 @@ Free-text frames, captured on 2026-10-10 from one live Claude Code 2.1.292 sessi
 - `free-text-before.screen.json` — the dialog as it first appears, cursor on option 1.
 - `free-text-cursor-on-row.screen.json` — after three Down keys, cursor on the empty `4. Type something.` row.
 - `free-text-typed.screen.json` — after one `orca terminal send --text` carrying a two-line answer: the placeholder is replaced by the text, the second line continues indented below it, and nothing is submitted.
+
+Named-session frame, captured on 2026-10-12 from a live Claude Code 2.1.296 session on herdr 0.9.3 (detection manifest 2026.09.11.1):
+
+- `question-named-session-herdr.screen.json` — a single-select question in a session named `cctag`. The dialog's bottom rule carries the session name, and herdr reported the pane `idle` while this was on screen (issue #46). Stores the raw stdout of `herdr pane read <pane> --source visible` as `text`, cut to the dialog's 15 rows; the rows above it were the session's own transcript.

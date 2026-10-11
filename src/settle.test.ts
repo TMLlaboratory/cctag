@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries } from "./settle.js";
+import {
+  EMPTY_TRANSCRIPT_BOUNDARIES,
+  resolveStatus,
+  SettleTracker,
+  transcriptBoundaries,
+  type StatusScreenEvidence,
+} from "./settle.js";
+import { claudeDriver } from "./agents/claude/driver.js";
+import { promptFingerprint } from "./agents/fingerprint.js";
 import { readLastMatchingRecordBefore, readNewRecords, readRecentRecords } from "./agents/transcript.js";
 import { extractLifecycle, type TranscriptRecord } from "./agents/claude/transcript.js";
 
@@ -475,5 +483,67 @@ test("lifecycle baselines join multi-chunk records and leave partial tails reada
     assert.deepEqual(tail.records, [JSON.parse(partial)]);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// Issue #46: herdr reported `idle` with this question on screen, because the
+// dialog's bottom rule carries the session name.
+function namedSessionQuestion(): StatusScreenEvidence {
+  const capture = JSON.parse(
+    readFileSync(new URL("./agents/claude/__fixtures__/question-named-session-herdr.screen.json", import.meta.url), "utf8"),
+  ) as { text: string };
+  const snapshot = { text: capture.text, draft: null, complete: true };
+  return { snapshot, fingerprint: promptFingerprint(claudeDriver.parseBlockedPane(capture.text)) };
+}
+
+test("a question herdr reports as idle is blocked when the screen shows it mid-turn", async () => {
+  const settle = new SettleTracker();
+  settle.markTurnRunning();
+  const screen = namedSessionQuestion();
+  assert.notEqual(screen.fingerprint, null, "cctag reads the question herdr missed");
+  for (const status of ["idle", "done"] as const) {
+    const resolved = await resolveStatus({
+      evidence: { kind: "classified", status },
+      settle,
+      boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+      previousStatus: "working",
+      readScreen: async () => screen,
+    });
+    assert.deepEqual(resolved, { status: "blocked", extendDeadline: true, screen: screen.snapshot });
+  }
+});
+
+test("herdr's idle reads no screen once the transcript has closed the turn", async () => {
+  const settle = new SettleTracker();
+  settle.observe([{ kind: "started", timestamp: 1 }, { kind: "completed", timestamp: 2 }]);
+  const resolved = await resolveStatus({
+    evidence: { kind: "classified", status: "idle" },
+    settle,
+    boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+    previousStatus: "working",
+    readScreen: async () => assert.fail("a closed turn needs no screen"),
+  });
+  assert.deepEqual(resolved, { status: "idle", extendDeadline: false });
+});
+
+test("herdr's idle mid-turn with no prompt on screen, or an unreadable one, is not blocked", async () => {
+  const settle = new SettleTracker();
+  settle.markTurnRunning();
+  const reads: (() => Promise<StatusScreenEvidence | null>)[] = [
+    async () => ({ snapshot: { text: "❯ ", draft: null, complete: true }, fingerprint: null }),
+    async () => ({ ...namedSessionQuestion(), snapshot: { ...namedSessionQuestion().snapshot, complete: false } }),
+    async () => {
+      throw new Error("read failed");
+    },
+  ];
+  for (const readScreen of reads) {
+    const resolved = await resolveStatus({
+      evidence: { kind: "classified", status: "idle" },
+      settle,
+      boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+      previousStatus: "working",
+      readScreen,
+    });
+    assert.notEqual(resolved.status, "blocked");
   }
 });

@@ -146,6 +146,22 @@ export async function resolveStatus(input: {
   readScreen?: () => Promise<StatusScreenEvidence | null>;
 }): Promise<StatusResolution> {
   if (input.evidence.kind === "classified") {
+    // herdr can miss a prompt that cctag reads fine: in a named Claude Code
+    // session the dialog gets a second, labelled bottom rule, and herdr's
+    // blocked-form rule looks only below the last rule — so a question on screen
+    // reported `idle` (issue #46). Only when the transcript says the turn is
+    // still running is the screen worth a read; a prompt found there is blocked.
+    if ((input.evidence.status === "idle" || input.evidence.status === "done") && input.settle.turnRunning) {
+      let screen: StatusScreenEvidence | null;
+      try {
+        screen = (await input.readScreen?.()) ?? null;
+      } catch {
+        screen = null;
+      }
+      if (screen?.snapshot.complete && screen.fingerprint !== null) {
+        return { status: "blocked", extendDeadline: true, screen: screen.snapshot };
+      }
+    }
     const status = input.settle.effectiveStatus(input.evidence.status);
     return { status, extendDeadline: status === "blocked" };
   }
