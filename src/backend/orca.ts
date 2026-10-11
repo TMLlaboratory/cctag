@@ -1186,7 +1186,14 @@ export class OrcaBackend implements Terminals {
         if (attempted) throw new ExpectationLost("The blind confirmation channel has already been used.");
         attempted = true;
         const current = await this.get(ref.target);
-        if (current?.evidence.kind !== "hint" || current.evidence.state !== "waiting") {
+        const evidence = current?.evidence;
+        // Not state === "waiting" alone: no Claude permission prompt is captured on
+        // Orca, and one reported as a null state with agentWait.since would
+        // otherwise refuse every blind answer.
+        const waiting =
+          evidence?.kind === "hint" &&
+          (evidence.state === "waiting" || (evidence.state === null && evidence.waitingSince !== null));
+        if (!waiting) {
           throw new ExpectationLost("Orca no longer reports the agent waiting for the blind confirmation.");
         }
         const handle = await this.writableHandle(ref);

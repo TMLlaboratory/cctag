@@ -2678,6 +2678,13 @@ test("Orca blind permission sends exactly one y-or-n byte without Enter while th
   assert.equal(runtime.sendCalls.length, 1);
   assert.equal(runtime.sendCalls[0]!.args[runtime.sendCalls[0]!.args.indexOf("--text") + 1], "y");
   assert.equal(runtime.sendCalls[0]!.args.includes("--enter"), false);
+
+  // A wait Orca reports only through the terminal's agentWait counts as well.
+  const terminalOnly = new FakeOrcaRuntime();
+  terminalOnly.screen = capturedClaudeScreen("working.screen.json");
+  terminalOnly.worktreeAgentsOverride = [{ ...worktreeQuestionAgent, state: null }];
+  await backend(terminalOnly).openBlind(currentRef(), blindPrompt()).answer("y");
+  assert.equal(terminalOnly.sendCalls.length, 1);
 });
 
 test("Orca blind permission refuses once someone answered at the terminal", async () => {
