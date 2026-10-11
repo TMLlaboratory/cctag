@@ -1,0 +1,48 @@
+{
+  "capture": {
+    "date": "2026-09-29",
+    "claudeVersion": "2.1.283",
+    "command": "orca terminal read --terminal <terminal-C> --screen --json",
+    "readMode": "default unbounded screen read",
+    "state": "ask-user-question-multiselect-before-down",
+    "notes": "Raw live screen before toggling options, with the cursor on the first option; complete terminal result preserved except the listed redactions.",
+    "redactions": {
+      "<plan>": "account-tier plan label",
+      "<scratch>": "task-specific scratch directory and status-line label",
+      "<redacted>": "private usage percentages and reset-time values",
+      "<terminal-C>": "registered-worktree terminal handle"
+    }
+  },
+  "terminal": {
+    "handle": "<terminal-C>",
+    "status": "running",
+    "tail": [
+      " ▐▛███▛█   Claude Code v2.1.283",
+      "▝▜██████▀  Opus 5.5 with medium effort · <plan>",
+      " ▝▝   ▝▝   <scratch> · /rc",
+      "❯ Use the AskUserQuestion tool to ask me exactly one multi-select question: Which colors belong in a harmless sample",
+      "  palette? Give three options: Amber, Cobalt, Jade. Set multiSelect to true. Do nothing else.",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "←  ☐ Palette  ✔ Submit  →",
+      "Which colors belong in a harmless sample palette?",
+      "❯ 1. [ ] Amber",
+      "         Amber",
+      "  2. [ ] Cobalt",
+      "         Cobalt",
+      "  3. [ ] Jade",
+      "         Jade",
+      "  4. [ ] Type something",
+      "     Submit",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "  5. Chat about this",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel"
+    ],
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "21",
+    "latestCursor": "21",
+    "returnedLineCount": 19,
+    "source": "screen"
+  }
+}

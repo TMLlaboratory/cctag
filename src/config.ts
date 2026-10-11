@@ -289,12 +289,43 @@ function loadTimingConfig(): { turnTimeoutMs: number; pollIntervalMs: number } {
   };
 }
 
+/** A backend binary that exists and will be used by this cctag process. */
+export interface BackendExecutable {
+  bin: string;
+}
+
+/** Null disables one backend; startup requires at least one enabled backend. */
+export interface BackendConfig {
+  herdr: BackendExecutable | null;
+  orca: BackendExecutable | null;
+}
+
+/** Resolves configured binaries and keeps filesystem checks injectable in tests. */
+export function resolveBackendConfig(
+  environment: { CCTAG_HERDR_BIN?: string; CCTAG_ORCA_BIN?: string } = process.env,
+  exists: (path: string) => boolean = existsSync,
+): BackendConfig {
+  const resolve = (configured: string | undefined, fallback: string): BackendExecutable | null => {
+    if (configured === "") return null;
+    const bin = configured ?? fallback;
+    return exists(bin) ? { bin } : null;
+  };
+  const backends = {
+    herdr: resolve(environment.CCTAG_HERDR_BIN, "/opt/homebrew/bin/herdr"),
+    orca: resolve(environment.CCTAG_ORCA_BIN, "/opt/homebrew/bin/orca"),
+  };
+  if (!backends.herdr && !backends.orca) {
+    throw new Error("No Herdr or Orca executable is available; enable at least one backend.");
+  }
+  return backends;
+}
+
 /** Config for standalone mode: a single machine talks to Slack directly. */
 export interface Config extends AttachmentLimits {
   slackBotToken: string;
   slackAppToken: string;
   ownerUserId: string;
-  herdrBin: string;
+  backends: BackendConfig;
   turnTimeoutMs: number;
   pollIntervalMs: number;
 }
@@ -304,7 +335,7 @@ export function loadConfig(): Config {
     slackBotToken: required("SLACK_BOT_TOKEN"),
     slackAppToken: required("SLACK_APP_TOKEN"),
     ownerUserId: required("CCTAG_OWNER_USER_ID"),
-    herdrBin: process.env.CCTAG_HERDR_BIN ?? "/opt/homebrew/bin/herdr",
+    backends: resolveBackendConfig(),
     ...loadTimingConfig(),
     ...loadAttachmentConfig(),
   };
@@ -313,7 +344,7 @@ export function loadConfig(): Config {
 /** Config for Spoke mode: runs on a user's machine, connects out to a Hub. Does NOT talk to Slack directly. */
 export interface SpokeConfig extends AttachmentLimits {
   ownerUserId: string;
-  herdrBin: string;
+  backends: BackendConfig;
   turnTimeoutMs: number;
   pollIntervalMs: number;
   hubUrl: string;
@@ -323,7 +354,7 @@ export interface SpokeConfig extends AttachmentLimits {
 export function loadSpokeConfig(): SpokeConfig {
   return {
     ownerUserId: required("CCTAG_OWNER_USER_ID"),
-    herdrBin: process.env.CCTAG_HERDR_BIN ?? "/opt/homebrew/bin/herdr",
+    backends: resolveBackendConfig(),
     ...loadTimingConfig(),
     hubUrl: required("CCTAG_HUB_URL"),
     spokeToken: required("CCTAG_SPOKE_TOKEN"),

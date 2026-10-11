@@ -1,0 +1,30 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "<terminal-C>",
+      "status": "running",
+      "tail": [
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>",
+        "<redacted-shell-line>"
+      ],
+      "truncated": true,
+      "limited": false,
+      "oldestCursor": "0",
+      "nextCursor": "5",
+      "latestCursor": "5",
+      "returnedLineCount": 8,
+      "source": "screen"
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

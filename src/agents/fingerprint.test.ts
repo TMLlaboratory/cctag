@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { promptFingerprint, type BlockedPrompt } from "./driver.js";
+import { promptFingerprint } from "./fingerprint.js";
+import type { PromptFingerprintInput } from "./driver.js";
 
-function permission(snippet: string, choices = ["Yes", "No"]): BlockedPrompt {
+function permission(snippet: string, choices = ["Yes", "No"]): PromptFingerprintInput {
   return {
     kind: "permission",
     menu: { choices: choices.map((label, i) => ({ num: String(i + 1), label })), snippet },
@@ -12,7 +13,7 @@ function permission(snippet: string, choices = ["Yes", "No"]): BlockedPrompt {
 
 function question(
   opts: { question?: string; header?: string; multiSelect?: boolean; options: { label: string; description?: string }[] },
-): BlockedPrompt {
+): PromptFingerprintInput {
   return {
     kind: "question",
     info: {

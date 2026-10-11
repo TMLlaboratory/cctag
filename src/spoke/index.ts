@@ -3,7 +3,9 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import type { AttachmentLimits, IncomingFile } from "../attachments.js";
 import type { SpokeConfig } from "../config.js";
-import { HerdrClient } from "../herdr/client.js";
+import { HerdrBackend } from "../backend/herdr.js";
+import { createOrcaBackend } from "../backend/orca.js";
+import { createTerminals } from "../backend/index.js";
 import { hubSlug, wsUrlFor } from "../hub-url.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
@@ -16,10 +18,9 @@ import { narrowedMaxFileBytes, WsNotifier } from "./notifier.js";
 
 /**
  * One machine can run multiple Spokes (one per Slack workspace/Hub, via
- * CCTAG_ENV_FILE — see config.ts). All of them talk to the same local herdr
- * daemon, so they'd silently clobber each other's pairing state if they
- * shared one `~/.cctag/pairings.json`. Namespace it by Hub URL automatically
- * so no extra config is needed for this to just work.
+ * CCTAG_ENV_FILE — see config.ts). They can use the same local terminal
+ * backends, so sharing one `~/.cctag/pairings.json` would clobber their state.
+ * Namespace pairing state by Hub URL automatically so no extra config is needed.
  */
 function pairingStorePathFor(hubUrl: string): string {
   return join(homedir(), ".cctag", `pairings-${hubSlug(hubUrl)}.json`);
@@ -37,7 +38,12 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const PONG_TIMEOUT_MS = 90_000;
 
 function connectOnce(config: SpokeConfig): Promise<void> {
-  const herdr = new HerdrClient(config.herdrBin);
+  const backends = {
+    herdr: config.backends.herdr ? new HerdrBackend(config.backends.herdr.bin) : null,
+    orca: config.backends.orca ? createOrcaBackend(config.backends.orca.bin) : null,
+  };
+  const enabledBackends = (["herdr", "orca"] as const).filter((backend) => backends[backend] !== null);
+  const terminals = createTerminals(backends);
   const pairingStore = new PairingStore(pairingStorePathFor(config.hubUrl));
 
   return new Promise((resolve, reject) => {
@@ -128,18 +134,18 @@ function connectOnce(config: SpokeConfig): Promise<void> {
         maxFileCount: config.maxFileCount,
       };
       const turnEngine = new TurnEngine(
-        herdr,
+        terminals,
         notifier,
         { turnTimeoutMs: config.turnTimeoutMs, pollIntervalMs: config.pollIntervalMs, limits },
         pairingStore,
       );
-      const commands = new CommandHandler(herdr, pairingStore, turnEngine, notifier, config.ownerUserId);
-      const watcher = new BackgroundWatcher(herdr, pairingStore, turnEngine, notifier);
+      const commands = new CommandHandler(terminals, pairingStore, turnEngine, notifier, config.ownerUserId, enabledBackends);
+      const watchers = enabledBackends.map((backend) => new BackgroundWatcher(backend, terminals, pairingStore, turnEngine, notifier));
       ws.once("close", () => {
         // Both halves have to stop, not just the watcher: this connection's
         // engine holds poll loops whose only way to reach Slack was the notifier
         // wrapping the socket that just closed. See TurnEngine.abortAll.
-        watcher.stop();
+        for (const watcher of watchers) watcher.stop();
         const dropped = turnEngine.abortAll();
         if (dropped > 0) console.log(`[spoke] dropped ${dropped} in-flight turn(s) on disconnect`);
       });
@@ -272,13 +278,13 @@ function connectOnce(config: SpokeConfig): Promise<void> {
         // comes back as `{ msgId: "" }`, not an error. A watcher started earlier
         // could therefore adopt a blocked pane, believe it had posted the prompt,
         // and hold that pane while Slack showed nothing at all.
-        watcher.start();
+        for (const watcher of watchers) watcher.start();
       } catch (err) {
         // Closing the socket is the point. Rejecting alone left it open with the
         // watcher and engine of this attempt still live, while the reconnect loop
         // built a second set against a new connection — two engines polling the
         // same panes, which is exactly what abortAll() exists to prevent.
-        watcher.stop();
+        for (const watcher of watchers) watcher.stop();
         turnEngine.abortAll();
         if (heartbeatTimer) clearTimeout(heartbeatTimer);
         try {

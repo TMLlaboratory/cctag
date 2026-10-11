@@ -1,0 +1,33 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "<terminal-B>",
+      "ptyId": "<redacted>",
+      "incarnationId": "<redacted>",
+      "orphaned": false,
+      "worktreeId": "<redacted>",
+      "worktreePath": "<redacted>",
+      "branch": "<redacted>",
+      "tabId": "<redacted>",
+      "leafId": "<redacted>",
+      "title": "<redacted>",
+      "connected": true,
+      "writable": true,
+      "lastOutputAt": 0,
+      "preview": "<redacted>",
+      "executionHostId": "local",
+      "agentIdentity": "claude",
+      "paneRuntimeId": 0,
+      "rendererGraphEpoch": 0,
+      "agentWait": {
+        "source": "hook",
+        "since": 1790519217704
+      }
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

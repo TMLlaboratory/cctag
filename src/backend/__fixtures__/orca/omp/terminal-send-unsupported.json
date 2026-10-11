@@ -1,0 +1,32 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "send": {
+      "handle": "<terminal-D>",
+      "accepted": true,
+      "bytesWritten": 189,
+      "prompt": {
+        "requestId": "<request-id>",
+        "stages": [
+          "input_accepted"
+        ],
+        "provider": "unsupported",
+        "observation": "unsupported",
+        "processIncarnation": "<incarnation-D>",
+        "generation": 115,
+        "baselineWorkingSequence": 0
+      }
+    },
+    "mutation": {
+      "requestId": "<request-id>",
+      "replayed": false
+    },
+    "warnings": [
+      "input was accepted, but this provider cannot report delivery. Inspect the terminal before retrying."
+    ]
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

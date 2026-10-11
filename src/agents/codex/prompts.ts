@@ -75,6 +75,12 @@ export function findCursorRowNum(paneText: string): number | null {
   }
   return null;
 }
+/** Label on the selected numbered row, or null when the menu cannot be read. */
+export function parseCursorLabel(paneText: string): string | null {
+  const current = findCursorRowNum(paneText);
+  if (current === null) return null;
+  return parseCodexMenu(paneText)?.choices.find((choice) => choice.num === String(current))?.label ?? null;
+}
 
 /** True while the pane is showing the model-name list ("Select Model and Effort"). */
 export function isModelListScreen(paneText: string): boolean {

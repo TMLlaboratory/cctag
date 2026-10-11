@@ -1,6 +1,9 @@
-import type { HerdrClient } from "../herdr/client.js";
+import type { BlindPermissionPrompt, VerifiedPrompt } from "../backend/prompt.js";
+import type { AnswerChannel, ComposerChannel, SubmitOutcome, Terminals } from "../backend/index.js";
+import type { AgentInfo, AgentRef, ScreenSnapshot, TranscriptIdentity } from "../backend/types.js";
 import { claudeDriver } from "./claude/driver.js";
 import { codexDriver } from "./codex/driver.js";
+import { ompDriver } from "./omp/driver.js";
 
 export interface PermissionChoice {
   num: string;
@@ -24,11 +27,27 @@ export interface AskUserQuestionPaneInfo {
   multiSelect: boolean;
 }
 
-/** What a `blocked` pane parses into — the shape TurnEngine's poll loop branches on. */
-export type BlockedPrompt =
+export type PromptFingerprintInput =
   | { kind: "question"; info: AskUserQuestionPaneInfo }
   | { kind: "permission"; menu: PermissionMenu | null; isPlanPrompt: boolean; planFeedbackOptionNum?: number };
 
+/** Parsed blocked screen. Only parsed menus carry a verified write capability. */
+export type BlockedPrompt =
+  | { kind: "question"; info: AskUserQuestionPaneInfo; verified: VerifiedPrompt }
+  | {
+      kind: "permission";
+      menu: PermissionMenu;
+      isPlanPrompt: boolean;
+      planFeedbackOptionNum?: number;
+      verified: VerifiedPrompt;
+    }
+  | { kind: "blind-permission"; blind: BlindPermissionPrompt }
+  | { kind: "unreadable-question" };
+
+export interface ModelCommandResult {
+  reply: string;
+  submitOutcome: SubmitOutcome | null;
+}
 /**
  * Files the agent explicitly asked to hand to the user (Claude Code's
  * `SendUserFile`), not yet known to have succeeded.
@@ -92,42 +111,91 @@ export interface ModeSupport {
   ring: readonly string[];
   aliases: Record<string, string>;
   parseCurrent(paneText: string): string | null;
-  cycle(herdr: HerdrClient, paneId: string): Promise<void>;
+  cycle(channel: ComposerChannel): Promise<void>;
 }
 
 /**
- * Everything that differs between coding-agent CLIs cctag drives through
- * herdr: how to locate/parse the session transcript, how to read and answer a
- * blocked pane's prompt, and how to run agent-specific slash-command-style
- * operations (`@cctag model`, `@cctag mode`). Selected per-pane from herdr's
- * live-reported `agent` field via `driverFor()` — never persisted, so a pane
- * that changes which CLI is running in it picks up the right driver on the
- * very next interaction.
+ * Agent-specific transcript, prompt, and slash-command behavior. Claude Code
+ * and Codex CLI are driven through herdr; OMP is discovered by Orca and is
+ * read-only. Each backend selects the matching driver from its live agent or
+ * process identity rather than persisting that choice.
  */
+export interface OrcaProcessIdentity {
+  readonly pid: number;
+  readonly command: string;
+  readonly cwd: string | null;
+  readonly piCodingAgentDirSet: boolean;
+}
+
+export interface OrcaProcessSession {
+  readonly sessionId: string;
+  readonly transcriptIdentity?: TranscriptIdentity;
+}
+
+export interface OrcaProcessAccess {
+  homeDir: string;
+  readFile(path: string): Promise<string>;
+  readTranscriptHead(path: string): Promise<string>;
+  runSystem(file: string, args: string[]): Promise<string>;
+}
+
+/** OS-process identity hooks used only by the Orca backend. */
+export interface OrcaProcessDriver {
+  /** Whether processes for this driver may be listed by Orca. */
+  readonly listable: boolean;
+  /** Hook-status mapping and notices owned by this agent's driver. */
+  readonly hooks?: {
+    readonly agent: string;
+    readonly missingNotice: string;
+    readonly unavailableNotice: string;
+  };
+  /** Notice included when a recognized driver is not supported by Orca. */
+  readonly unsupportedNotice?: string;
+  /** Notice included when a recognized process has no verifiable session. */
+  readonly sessionUnavailableNotice?: string;
+  matchesCommand(command: string): boolean;
+  /** Missing session identity makes the process ineligible for listing. */
+  session?(process: OrcaProcessIdentity, access: OrcaProcessAccess): Promise<OrcaProcessSession | null>;
+}
+
 export interface AgentDriver {
   readonly kind: string;
   readonly displayName: string;
+  /** Optional process identity support for Orca; Herdr reports its own kind. */
+  readonly orcaProcess?: OrcaProcessDriver;
+
 
   /**
-   * Which `herdr pane read --source` mode reliably captures this agent's TUI.
-   * Verified empirically: herdr's `recent`/`recent-unwrapped` (scrollback-based)
-   * sources return empty for Codex CLI's TUI — it appears to render in the
-   * terminal's alternate-screen buffer, which scrollback capture doesn't see —
-   * so it needs `visible` (current screen contents) instead. Claude Code's TUI
-   * works fine with `recent`, which is what production has always used.
+   * Which `Terminals.read` region captures this agent's TUI. Herdr maps
+   * `history` to scrollback and `screen` to the visible pane. Codex renders in
+   * the alternate-screen buffer, so it needs `screen`; Claude works with
+   * `history`.
    */
-  readonly paneReadSource: "visible" | "recent";
+  readonly readRegion: "screen" | "history";
 
   /** Absolute path to the session transcript, or null if it can't be located
-   *  (yet, or at all). `sessionId` may be null — some agents/setups don't
-   *  report one via herdr, in which case the driver may still be able to
-   *  locate the transcript some other way (e.g. by cwd). */
+   *  (yet, or at all). `sessionId` may be null — some backends/setups don't
+   *  report one, in which case the driver may still locate the transcript by cwd. */
   locateTranscript(cwd: string, sessionId: string | null): string | null;
   /** Assistant text + tool-call names from freshly-tailed transcript records. */
   extractTurnOutput(records: unknown[]): TurnOutput;
+  /** Turn boundaries from transcript records, without extracting their output. */
+  extractLifecycle(records: unknown[]): TurnLifecycleEvent[];
 
   /** Classifies what a `blocked` pane is currently showing. */
   parseBlockedPane(paneText: string): BlockedPrompt;
+  /** Parses a complete post-submit review and, when supplied, verifies this answer's visible selection. */
+  parseAnswerReview?(
+    snap: ScreenSnapshot,
+    expected?: { question: string; answers: readonly string[]; deadlineAt?: number },
+  ): VerifiedPrompt | null;
+  parseCursorLabel(snap: ScreenSnapshot): string | null;
+  /** Drivers that can positively identify the idle composer; Orca fails closed when absent. */
+  isIdleComposer?(snap: ScreenSnapshot): boolean;
+  /** Moves composer text the backend left on screen into `draft`; returns the snapshot unchanged otherwise. */
+  recoverComposerDraft?(snap: ScreenSnapshot): ScreenSnapshot;
+  /** Whether this driver can distinguish a Claude prompt suggestion from a typed draft via a one-character probe. */
+  composerProbe?: true;
   /**
    * A startup dialog waiting on a human before any prompt can land, or null.
    * Returns a short description for quoting back to the user.
@@ -156,8 +224,8 @@ export interface AgentDriver {
    * stays as it was.
    */
   looksLikeQuestionScreen?(paneText: string): boolean;
-  /** Confirms a numbered option (by digit, or a fallback key like "y"/"n"). */
-  answerOption(herdr: HerdrClient, paneId: string, value: string): Promise<void>;
+  /** Confirms a numbered option with its digit; yes/no fallback uses a blind channel. */
+  answerOption(channel: AnswerChannel, value: string, expectedLabel: string): Promise<void>;
   /**
    * Answers a *question* option, which is not the same keystroke as confirming a
    * permission menu even though both are numbered lists.
@@ -170,8 +238,9 @@ export interface AgentDriver {
    * at the pane in between. Absent = the plain answerOption is enough.
    */
   answerQuestionOption?(
-    herdr: HerdrClient,
-    paneId: string,
+    terminals: Terminals,
+    channel: AnswerChannel,
+    target: string,
     optionNum: number,
     answered: AskUserQuestionPaneInfo,
     /** Aborted when the pane's owner has been asked to stop. Checked before the
@@ -193,8 +262,9 @@ export interface AgentDriver {
    * one in Slack.
    */
   answerQuestionMultiSelect?(
-    herdr: HerdrClient,
-    paneId: string,
+    terminals: Terminals,
+    channel: AnswerChannel,
+    ref: AgentRef,
     /** 1-based option numbers, in the order they should be toggled. */
     optionNums: number[],
     info: AskUserQuestionPaneInfo,
@@ -203,15 +273,16 @@ export interface AgentDriver {
   ): Promise<void>;
   /** Free-text answer to a pending AskUserQuestion-style prompt. Absent = unsupported. */
   answerQuestionFreeText?(
-    herdr: HerdrClient,
-    paneId: string,
+    terminals: Terminals,
+    channel: AnswerChannel,
+    ref: AgentRef,
     info: AskUserQuestionPaneInfo,
     text: string,
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Free-text refinement of a pending plan-approval prompt. Absent = unsupported. */
   answerPlanFeedback?(
-    herdr: HerdrClient,
-    paneId: string,
+    channel: AnswerChannel,
     optionNum: number,
     text: string,
   ): Promise<void>;
@@ -220,68 +291,8 @@ export interface AgentDriver {
 
   /** Shift+Tab-style mode ring, or null if this agent has no equivalent. */
   readonly modes: ModeSupport | null;
-  /** Handles `@cctag model <argsText>` end-to-end; returns the Slack reply text to post. */
-  runModelCommand(herdr: HerdrClient, agent: { paneId: string }, argsText: string): Promise<string>;
-}
-
-/**
- * Identity of the prompt currently on a pane, or null if nothing recognizable
- * is showing.
- *
- * Exists because herdr reports one `blocked` for every prompt: answering one at
- * the terminal and landing on the next never passes through a non-blocked
- * status, so "is this still the prompt we posted?" cannot be answered from
- * status alone. Comparing this across polls is what catches the substitution.
- *
- * Everything the user can change *without* resolving the prompt is deliberately
- * excluded, since a false difference would re-post a prompt that is still
- * pending — the very repetition this was untangled from. That means the cursor
- * marker (moved by arrow keys) and multi-select checkbox state (toggled with
- * space) are normalized away; the option text and the command being asked about
- * are what remain. Returns null rather than a fingerprint of nothing when the
- * pane doesn't parse, so an empty or garbled read is never mistaken for a
- * change.
- */
-/** Drops every space, so a value rebuilt from wrapped lines compares equal
- *  however the terminal happened to break it. */
-function squash(value: string): string {
-  return value.replace(/\s+/g, "");
-}
-
-export function promptFingerprint(prompt: BlockedPrompt): string | null {
-  if (prompt.kind === "question") {
-    const info = prompt.info;
-    // Descriptions and the multi-select flag are part of the question's identity:
-    // without them, two consecutive prompts sharing a question and its labels but
-    // differing in their explanations read as the same prompt. The checkbox
-    // *state* stays excluded — that is the part a person toggles with space — but
-    // whether the question is multi-select at all cannot change under them.
-    return [
-      "q",
-      info.header,
-      info.question,
-      info.multiSelect ? "multi" : "single",
-      // Whitespace stripped, not just collapsed: a description is rebuilt from
-      // however many lines the column wrapped it into, joined with spaces, so
-      // resizing the terminal changes where those spaces fall. Comparing with
-      // them in would have re-posted a prompt that was still pending — the
-      // false-positive direction this fingerprint exists to avoid.
-      ...info.options.map((o) => `${squash(o.label)}\u0000${squash(o.description ?? "")}`),
-    ].join("\u0001");
-  }
-  if (!prompt.menu) return null;
-  const choices = prompt.menu.choices.map((c) => `${c.num}.${c.label}`).join(" ");
-  // The cursor glyph sits at the start of whichever option is selected, and the
-  // indentation shifts with it, so both are normalized away — but only there.
-  // Stripping those characters everywhere collapsed real differences in the text
-  // being asked about: `echo x > out` and `echo x out` produced one fingerprint.
-  const context = prompt.menu.snippet
-    .split("\n")
-    .map((line) => line.replace(/^\s*[›❯>]\s?/, "").trim())
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return ["p", choices, context].join("\u0001");
+  /** Handles `@cctag model <argsText>` end-to-end, including its submit outcome. */
+  runModelCommand(terminals: Terminals, agent: AgentInfo, argsText: string): Promise<ModelCommandResult>;
 }
 
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;
@@ -298,7 +309,10 @@ export function isRefusalLabel(label: string): boolean {
 const REGISTRY: Record<string, AgentDriver> = {
   claude: claudeDriver,
   codex: codexDriver,
+  omp: ompDriver,
 };
+export const ORCA_AGENT_DRIVERS: readonly AgentDriver[] = Object.freeze(Object.values(REGISTRY));
+
 
 /** Unknown/missing agent kinds fall back to claude — preserves today's
  *  behavior for stale pairings and any herdr output this build doesn't

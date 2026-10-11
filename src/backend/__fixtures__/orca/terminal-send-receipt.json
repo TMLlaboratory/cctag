@@ -1,0 +1,32 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "send": {
+      "handle": "<terminal-B>",
+      "accepted": true,
+      "bytesWritten": 247,
+      "prompt": {
+        "requestId": "<request-id>",
+        "stages": [
+          "input_accepted",
+          "turn_started"
+        ],
+        "provider": "claude",
+        "observation": "supported",
+        "processIncarnation": "<incarnation-B>",
+        "generation": 23,
+        "baselineWorkingSequence": 0,
+        "baselineExplicitWorkingStartedAt": null,
+        "baselinePermissionSequence": 2
+      }
+    },
+    "mutation": {
+      "requestId": "<request-id>",
+      "replayed": false
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

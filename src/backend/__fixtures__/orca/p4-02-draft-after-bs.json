@@ -1,0 +1,37 @@
+{
+  "id": "<request-id>",
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "<terminal>",
+      "status": "running",
+      "tail": [
+        " ▐▛███▛█   Claude Code v2.1.287",
+        "▝▜██████▀  Sonnet 5.5 · Claude Team",
+        " ▝▝   ▝▝   ~/workspace/github.com/TMLlaboratory/cctag · /rc",
+        "❯ Reply with exactly: OK. No tools.",
+        "⏺ OK",
+        "  ⎿  Stop says: <redacted Stop-hook warning>",
+        "✻ Cooked for 3s · done 7:08 PM",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "   Sonnet 5.5  │  effort:medium │  ctx ▌▒▒▒▒▒▒▒▒▒ 6%",
+        "   5h  ▒▒▒▒▒▒▒▒▒ 1% ↻04:51:50 │ 7d ████▎▒▒▒▒▒ 43% ↻55:51:50",
+        "   cctag │  main",
+        "  ⏵⏵ auto mode on (shift+tab to cycle)"
+      ],
+      "truncated": false,
+      "limited": false,
+      "oldestCursor": "0",
+      "nextCursor": "1",
+      "latestCursor": "1",
+      "returnedLineCount": 14,
+      "source": "screen",
+      "draft": "stashed before submit"
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

@@ -6,10 +6,13 @@
 
 <img src="assets/icon.png" alt="cctag icon" width="120" />
 
-Slackのスレッドを、**自分のPCでローカルに動いているコーディングエージェントのTUIセッション**
-（Claude CodeまたはCodex CLI）に橋渡しするツール。
+Slackのスレッドを、**ローカルで動いているコーディングエージェントのTUIセッション**
+（Claude Code、Codex CLI、またはoh-my-piの`omp`）に橋渡しするツール。
 [Claude Tag](https://www.anthropic.com/news/introducing-claude-tag)がSlackをクラウド上のセッションに
 橋渡しするのと同じ発想だが、cctagは*自分自身のターミナル*を動かす点が異なる。
+利用できるエージェントとバックエンドの組み合わせは、後述の表を参照。
+
+以下はherdrを使う構成の例。Orcaを使う場合、cctagはOrca CLI経由でターミナルに接続する。
 
 ```
 Slackスレッド (@cctag)
@@ -25,13 +28,18 @@ cctagデーモン (Node/TS, 自分のマシン上で動作)
    └─ ペアリング: スレッド (channel, thread_ts) ⇔ herdrのpane_id
 ```
 
-cctagは[herdr](https://herdr.dev)（ターミナルワークスペースマネージャー）経由でペアリング中の
-エージェントを操作しており、tmuxの画面をスクレイピングしているわけではない。エージェントの発見、
-キー入力の注入、状態検知はすべて`herdr` CLI経由で行う。ターン出力もエージェント自身の構造化された
-JSONLトランスクリプトから読み取っており、画面表示をパースしているわけではない。herdrは各paneで
-どちらのCLI（`claude`か`codex`）が動いているかを報告してくれるので、cctagは対応するドライバを
-自動的に選択する — 1つの`@cctag` botでどちらの種類のセッションともペアリングできる。両者の違いは
-[対応エージェント](#対応エージェント)を参照。
+herdrバックエンドを使う構成では、cctagは[herdr](https://herdr.dev)（ターミナルワークスペースマネージャー）
+経由でペアリング中のエージェントを操作しており、tmuxの画面をスクレイピングしているわけではない。
+エージェントの発見、キー入力の注入、状態検知はHerdr経由で行い、ターン出力はエージェント自身の
+構造化されたJSONLトランスクリプトから読み取る。Herdrは各paneで動いている`claude`か`codex`を報告し、
+cctagは対応ドライバを選ぶ。HerdrではClaude CodeとCodex CLIを利用できる。Orcaでの組み合わせは
+[ターミナルバックエンド](#ターミナルバックエンド-herdrとorca)の表を参照。
+
+cctagはherdrに加えて[Orca](https://github.com/stablyai/orca)のターミナルで動くエージェントも、
+同じSpokeから操作できる。`@cctag connect`では、Orca上のClaude Codeと`omp`は
+同じ`orca · <ディレクトリ名>`グループに表示され、`omp`の行には`[omp]`が付く。
+herdrのpane IDと既存のペアリング形式は変わらない。
+詳細は[ターミナルバックエンド](#ターミナルバックエンド-herdrとorca)を参照。
 
 ## 実際の使われ方
 
@@ -70,18 +78,20 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 場つなぎの表示ではなく意図的な宣言で、インターフェースはまだ動く。それが問題になるなら
 バージョンを固定して使うこと。
 
-テキスト入出力のターンは**Claude Code**・**Codex CLI**の両方でend-to-endで動作する。
-複数選択肢のプロンプトにも対応しており、ペアリング中のエージェントがツール権限確認（またはCodexの
-コマンド承認）メニューを表示すると、cctagはそれをSlackのボタンとして表示し、回答はターミナルに
-送り返される。誰かがキーボードから直接答えた場合は、Slackメッセージがその旨を示すように更新される。
+テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeはherdrまたはOrca、Codex CLIはherdr、
+`omp`はOrca。Claude CodeとCodex CLIの対応する権限確認・コマンド承認プロンプトはSlackのボタンにでき、
+Slack上または端末から人が回答できる。`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
+回答できない。
 
-仕組みについての補足: どちらのエージェントも、保留中の権限確認・質問プロンプトを、回答され*た後*にしか
-セッショントランスクリプトに書き込まない（Claude Codeの`AskUserQuestion`ツール呼び出しは結果と
-アトミックに書き込まれる）。そのため保留中のプロンプトはトランスクリプトからではなく、
-`herdr pane read`でターミナル画面から直接読み取っている。`src/agents/claude/prompts.ts`と
-`src/agents/codex/prompts.ts`参照。
+Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを回答後にしかセッショントランスクリプトへ
+書き込まない（Claude Codeの`AskUserQuestion`は結果とアトミックに書き込まれる）。そのためcctagは、
+選択中のバックエンド（herdrまたはOrca）経由でターミナル画面から読む。`omp`は別経路で端末回答専用の
+通知を出す。`src/agents/claude/prompts.ts`、`src/agents/codex/prompts.ts`、
+`src/agents/omp/prompts.ts`参照。
 
 ### 対応エージェント
+
+この表はClaude CodeとCodex CLIの機能比較。`omp`の対応範囲は下のターミナルバックエンド表に記載。
 
 | 機能 | Claude Code | Codex CLI |
 |---|:---:|:---:|
@@ -96,8 +106,33 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 | エージェント→Slackへのファイル送信（`.cctag/outbox`） | ✅ | ✅ |
 | transcriptからの送信ファイル自動検出 | ✅ `SendUserFile` | — *(対応するツールが存在しない)* |
 
-対応していない機能については、黙って失敗するのではなく、cctagがその旨を返信する
-（例: Codexとペアリングされたスレッドでの`@cctag mode plan`）。
+未対応機能は黙って失敗せず、その旨を返信する（例: Codexの`@cctag mode plan`、`omp`の`@cctag model`）。
+
+### ターミナルバックエンド: herdrとOrca
+
+1つのSpokeで両方のバックエンドを同時に使える。各バックエンドは、設定したパスにCLIがあれば有効になる。
+変数を設定していない場合は`CCTAG_HERDR_BIN`が`/opt/homebrew/bin/herdr`、
+`CCTAG_ORCA_BIN`が`/opt/homebrew/bin/orca`を参照する。変数を空文字にすると、そのバックエンドは無効になる。
+少なくとも1つのバックエンドが有効でなければ起動できない。
+
+| | herdr | Orca |
+|---|:---:|:---:|
+| Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて |
+| Codex CLI | ✅ | — *(一覧に出さない: Orcaの共有Codex app-serverは状態を別のペインに付けることがあるため — [stablyai/orca#23643](https://github.com/stablyai/orca/issues/23643))* |
+| oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） |
+
+Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
+`omp`では、プロセスが書き込みで開いているtranscriptも検証する。端末に書き込む直前にも本人性を確認し直す。
+エージェントやセッションを特定できないペインは、推測せず一覧から外す。検証できるtranscriptが無い
+`--resume`済みの`omp`セッションには接続できない。接続可能なエージェントが1つもない場合は、
+`@cctag connect`の空一覧メッセージで新しいセッションの起動を案内する。
+
+OrcaはClaude Codeの灰色の「次のプロンプトの提案」を、人が打った文字と同じ形で報告する。そこで、空でない
+入力欄にSlackのメッセージを送る前に、cctagは1文字打って両者を見分け、その文字を消す。提案ならメッセージで
+置き換わる。人の書きかけならCtrl+Sで退避してから送り、送信の後にClaude Codeが書きかけを戻す。Claude Codeの
+退避は1つだけなので、前に退避していたものは上書きされる。何が起きたかを確かめられないときは何も送らず、
+入力欄に何が残っているかもしれないかをスレッドに書く。Claude Code 2.1.287で確かめた。ほかの版では、
+提案が出ているときに送信を断ることがある。
 
 仕組みについてのより詳しい解説 — Hub/Spokeの役割分担、herdrのエージェント登録が生のペイン
 アクセスとどう違うか、ターンの終わりをなぜトランスクリプトで判定するのか、AskUserQuestion検知の癖、
@@ -112,9 +147,9 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
   1つのappの複数の接続のうち*どれか1つ*にしかイベントを配送しない。そのため同じSlack appトークンに
   対して各自がフルのデーモンを動かすと、お互いのイベントを奪い合うだけで共有はできない。Hubは
   唯一のSocket Mode接続を保持し、イベントのルーティングだけを行う — 誰のコーディングエージェント
-  セッションも実行しないし、見ることもない。各Spokeは認証済みのWebSocketでHubに接続しに行き、
-  スタンドアロンモードと全く同じように、その人自身のローカルなherdr管理下のインスタンス
-  （Claude Code、Codex CLI、あるいはその両方）を操作する。
+  セッションも実行しないし、見ることもない。各Spokeは認証済みWebSocketでHubに接続し、
+  有効にしたターミナルバックエンド経由でローカルのエージェントを操作する。対応する組み合わせは、
+  Claude CodeがherdrまたはOrca、Codex CLIがherdr、`omp`がOrca。
 
 **すでに誰かが運用しているHubに参加できる場合**は、下記の
 [Spoke利用者向け](#spoke利用者向け)だけで十分 — そこまで読み飛ばして構わない。Slack app関連の
@@ -123,9 +158,10 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 ## 必要なもの
 
 - **Node.js 20以上** — Hub・Spoke・スタンドアロンいずれの場合もマシン全てで必要。
-- **[herdr](https://herdr.dev)** をインストールして起動し、自分のClaude Code・Codex CLIインスタンスを
-  herdrのAgentとして登録しておくこと — 実際にこれらのCLIが動くマシン（スタンドアロン、および各Spoke）
-  でのみ必要。Hub専用マシンはどちらも一切実行しないため、herdrは不要。
+- **[herdr](https://herdr.dev) と [Orca](https://github.com/stablyai/orca) のどちらか、または両方**。
+  Claude Codeはどちらでも、Codex CLIはherdrで、`omp`はOrcaで使える。これらのセッションを実行する
+  マシン（スタンドアロン、または各Spoke）でのみ必要。Hub専用マシンはエージェントを実行しないため、
+  どちらのバックエンドも不要。
 - **Slack appを作成できるワークスペース**（Socket Mode使用、公開サーバーやポート開放は不要）
   — 自分でSlack appを作る場合（スタンドアロン、またはHub運用者）にのみ必要。Spoke利用者はSlack app
   の認証情報には一切触れない。
@@ -187,17 +223,18 @@ Codex CLIのセッションIDをherdrに完全に報告させるには、`herdr-
 | Hubを自分で立てる（またはスタンドアロン） | [docs/running-a-hub.md](docs/running-a-hub.md)（英語） |
 | すでにペアリング済みで、何ができるか知りたい | [docs/usage.md](docs/usage.md)（英語） |
 
-大まかには、Spoke利用者に必要なのはherdrと、Hub運用者から受け取るトークンと、設定ファイル4項目。
-Hubを立てる人はそれに加えてSlack appの作成とトークンの発行を行う。スタンドアロンはHubとSpokeを
-1台のマシンの1プロセスにまとめた形。
+大まかには、Spokeには必須設定値が3つ（`CCTAG_OWNER_USER_ID`、`CCTAG_HUB_URL`、
+`CCTAG_SPOKE_TOKEN`）あり、HerdrまたはOrcaのバックエンド実行ファイルを少なくとも
+1つ利用できる必要がある。Hubを立てる人はSlack appを作成し、Spoke接続用の認証情報を
+発行する。スタンドアロンではHubとSpokeを1台のマシン上の1プロセスで動かす。
 
 
 ## セキュリティに関する注意
 
 ペアリング済みのスレッドに投稿できる人は誰でも、フル権限のローカルコーディングエージェントに任意の
-テキストを送り込める。ペアリングはスレッドごとにownerのopt-inで行われ、ownerはいつでも切断でき、
-ツールの権限確認プロンプトもSlackのボタンによる人間の承認を必要とする — 何も無人では実行されない。
-信頼できる人がいるチャンネルのスレッドでのみペアリングすること。
+テキストを送り込める。ペアリングはスレッドごとにownerが許可し、ownerはいつでも切断できる。
+Claude CodeとCodex CLIの対応するプロンプトは、Slackのボタンまたは端末から人が回答できる。`omp`の質問や承認は
+Slackに端末で答えるよう通知され、Slackからは回答できない。信頼できる人がいるチャンネルのスレッドだけをペアリングすること。
 
 ## 開発に参加する
 

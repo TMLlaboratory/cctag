@@ -1,0 +1,63 @@
+{
+  "capture": {
+    "date": "2026-09-29",
+    "ompVersion": "18.3.4",
+    "orcaCliVersion": "1.4.215",
+    "orcaAppVersion": "1.4.215",
+    "command": "orca terminal read --terminal <terminal-A> --screen --json",
+    "readMode": "default unbounded screen read",
+    "state": "resumed-session",
+    "notes": "Raw V7 resumed-session screen; all tail rows and terminal fields are preserved except listed redactions.",
+    "sourceCapture": "design/capture/V7/3-resume-existing-screen.json",
+    "redactions": {
+      "<terminal-A>": "V7 main OMP terminal handle",
+      "<terminal-B>": "V7 --session-dir OMP terminal handle",
+      "<terminal-C>": "V7 approval-prompt terminal handle",
+      "<scratch-A>": "V7 main-session scratch path",
+      "<scratch-B>": "V7 --session-dir scratch path",
+      "<scratch-C>": "V7 approval scratch path",
+      "<profile-A>": "OMP profile name",
+      "<task-content>": "private task prompt, response, tool text, and status-line title",
+      "<question-id-A>": "ask form title derived from task content",
+      "<choice-A>": "first ask option label",
+      "<choice-B>": "second ask option label",
+      "<choice-C>": "third ask option label",
+      "<redacted>": "private spend, quota percentage, and context-usage values"
+    }
+  },
+  "terminal": {
+    "handle": "<terminal-A>",
+    "status": "running",
+    "tail": [
+      " <task-content>",
+      " <task-content>",
+      " <task-content>",
+      " <task-content>",
+      "╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮",
+      "│ $ <task-content>                                                                                                     │",
+      "├─── Output ───────────────────────────────────────────────────────────────────────────────────────────────────────────┤",
+      "│ (no output)                                                                                                          │",
+      "│ ⟦Wall: 20.02s | Timeout: 300s⟧                                                                                       │",
+      "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
+      " <task-content>",
+      " <task-content>",
+      " <task-content>",
+      " <task-content>",
+      "Ask tool was cancelled by the user",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      " Update Available",
+      " New version 18.4.2 is available. Run: omp update",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      " ↻ F5 to Retry",
+      "╭── π > ◉ GPT-6-Luna > 📁 …team/cctag/scratch/<scratch-A> > S<redacted> ▶─<redacted>─┃<redacted>─◀ <task-content>                 ╮",
+      "╰─                                                                                                                    ─╯"
+    ],
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "587",
+    "latestCursor": "587",
+    "returnedLineCount": 22,
+    "source": "screen"
+  }
+}

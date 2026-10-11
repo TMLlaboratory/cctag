@@ -1,26 +1,61 @@
-import type { HerdrClient } from "./herdr/client.js";
+import type { AgentKind, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
+import type { Terminals } from "./backend/index.js";
+import { backendForTarget } from "./backend/target.js";
 import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { snapshotOutbox, WrittenFileTracker, type DirSnapshot } from "./attachments.js";
 import { postSegmented } from "./slack/post.js";
-import { readNewRecords, transcriptCreatedAfter, transcriptSizeSafe } from "./agents/transcript.js";
+import {
+  readLastMatchingRecordBefore,
+  readNewRecords,
+  readRecentRecords,
+  transcriptCreatedAfter,
+  transcriptSizeIfAvailable,
+  transcriptSizeSafe,
+} from "./agents/transcript.js";
 import { driverFor } from "./agents/driver.js";
-import { SettleTracker } from "./settle.js";
+import {
+  classifiedStatus,
+  EMPTY_TRANSCRIPT_BOUNDARIES,
+  resolveStatus,
+  SettleTracker,
+  transcriptBoundaries,
+  type StatusResolution,
+} from "./settle.js";
+import { promptFingerprint } from "./agents/fingerprint.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
+import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
+import { createOmpStatusMemory, resolveOmpStatus, type OmpStatusResolution } from "./agents/omp/status.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+function sameTranscriptIdentity(
+  left: TranscriptIdentity | undefined,
+  right: TranscriptIdentity | undefined,
+): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.path === right.path &&
+    left.device === right.device &&
+    left.inode === right.inode
+  );
+}
 
 interface WatchState {
+  pairingKey: string;
   sessionId: string;
   transcriptPath: string;
+  transcriptIdentity?: TranscriptIdentity;
+  agentKind: AgentKind;
   offset: number;
   /** When this watch was (re)baselined. A transcript created after it holds
    *  nothing this watcher could already have reported. */
   startedAt: number;
-  lastStatus: string;
+  /** Last resolved status for this pairing, including incomplete-screen retention. */
+  lastStatus: AgentStatus;
   collected: string[];
   /** `<cwd>/.cctag/outbox` as of the last report, so terminal-initiated work
    *  gets its files attached too — see TurnEngine.uploadOutboxAdditions. */
@@ -34,6 +69,12 @@ interface WatchState {
    * turn): each `started` it sees re-arms it for the next terminal-side turn.
    */
   settle: SettleTracker;
+  /** A start observed beyond this watch's baseline, retained across unknown screens. */
+  startedSinceBaseline: boolean;
+  ompStatus: ReturnType<typeof createOmpStatusMemory> | null;
+  /** OMP binding loss is terminal for this session; a fresh session rebaselines. */
+  ompBindingLost: boolean;
+  ompNoticePosted: boolean;
 }
 
 /**
@@ -45,12 +86,9 @@ interface WatchState {
  * the thread when the instance settles (working -> idle/done) with new
  * assistant output.
  *
- * If it instead finds the instance `blocked` — an AskUserQuestion or
- * permission prompt is on screen, waiting on a decision — it doesn't just
- * wait for that to resolve on its own (it might never, if no one's at the
- * keyboard): it hands the terminal off to TurnEngine.adoptBlockedTerminal(),
- * which runs the same pollLoop() a Slack-initiated turn uses, so the prompt
- * gets posted as Slack buttons and can be answered remotely.
+ * For OMP, the handoff carries a terminal-only screen notice and never exposes
+ * answer buttons. Other drivers hand blocked prompts to TurnEngine so they can
+ * be answered remotely.
  *
  * It deliberately does not replay history: the first time it sees a pairing
  * (including right after an active turn just finished, when it resumes
@@ -81,21 +119,23 @@ export class BackgroundWatcher {
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
-  /** Panes seen alive but without an agent -> when that was first seen. Both
-   *  throttles the log to once per spell and bounds how long the wait lasts
-   *  (AGENTLESS_GRACE_MS). */
+  /** Panes missing an agent, or temporarily absent from Orca during restart ->
+   *  when first observed; bounds the same restart grace for both cases. */
   private agentlessPanes = new Map<string, number>();
 
   private running = false;
 
   constructor(
-    private readonly herdr: HerdrClient,
+    private readonly backend: BackendName,
+    private readonly terminals: Terminals,
     private readonly pairingStore: PairingStore,
     private readonly turnEngine: TurnEngine,
     private readonly notifier: Notifier,
     private readonly intervalMs = 7_000,
     /** Overridable for tests only — production always wants AGENTLESS_GRACE_MS. */
     private readonly agentlessGraceMs = AGENTLESS_GRACE_MS,
+    /** Test barrier for appends between the captured EOF and its lifecycle read. */
+    private readonly beforeBaselineRead?: (path: string, offset: number) => Promise<void>,
   ) {}
 
   start(): void {
@@ -119,7 +159,7 @@ export class BackgroundWatcher {
   }
 
   private async tick(): Promise<void> {
-    const pairings = this.pairingStore.list();
+    const pairings = this.pairingStore.list().filter((pairing) => backendForTarget(pairing.paneId) === this.backend);
     const liveKeys = new Set(pairings.map((p) => p.paneId));
     for (const key of this.watches.keys()) {
       if (!liveKeys.has(key)) {
@@ -162,12 +202,10 @@ export class BackgroundWatcher {
   }
 
   private async checkPairing(pairing: Pairing, forceRebaseline: boolean): Promise<void> {
-    // Pairings written before cctag addressed panes by pane_id have no paneId at
-    // all, so every herdr call for them resolves nothing and the thread has been
+    // Pairings written before cctag addressed targets by paneId have no target
+    // at all, so every backend call resolves nothing and the thread has been
     // inert since the upgrade. Same outcome as a closed terminal — unpair and
-    // say so — but diagnosed separately, because "the terminal was closed" is
-    // both wrong and unactionable here, and because it keeps the reason out of
-    // the log line as a literal `undefined`.
+    // report it separately, because "the terminal was closed" is inaccurate.
     if (!pairing.paneId) {
       this.pairingStore.remove(pairing.key);
       console.log(`[watcher] pairing ${pairing.key} predates pane-id addressing — unpaired`);
@@ -182,15 +220,17 @@ export class BackgroundWatcher {
       return;
     }
 
-    const agent = await this.herdr.agentGet(pairing.paneId);
+    const agent = await this.terminals.get(pairing.paneId);
     if (!agent) {
       // "No agent" is not "no pane". Quitting the CLI to restart it in the same
-      // pane leaves that pane at a shell prompt, and agent get then answers
-      // agent_not_found — so unpairing on that alone tore down a pairing during
-      // the very restart pane-id addressing exists to survive (pairing.ts).
-      // Verified on a live pane: agent get failed while pane get still returned
-      // it. A throw propagates, since a herdr timeout is not a missing pane.
-      if (await this.herdr.paneExists(pairing.paneId)) {
+      // pane leaves a shell prompt: get returns null while exists still returns
+      // true. BackendUnavailable throws into tick() and is never treated as absence.
+      if (await this.terminals.exists(pairing.paneId)) {
+        const existing = this.watches.get(pairing.paneId);
+        if (existing?.agentKind === "omp") {
+          await this.noteOmpBindingLoss(pairing, existing);
+          return;
+        }
         // Waited on, but not indefinitely. The grace period is what makes a
         // restart survivable; letting it run forever is what left threads
         // paired to panes whose agent was exited hours earlier.
@@ -214,20 +254,21 @@ export class BackgroundWatcher {
         return;
       }
 
-      // Closing the terminal used to be invisible from Slack: the thread stayed
-      // paired and this returned quietly every 7s forever, so the only way to
-      // discover it was to send a message and get startTurn's agent-not-found.
-      // Reported once, from the same place that would have found the work.
-      //
-      // `null` specifically, never a thrown error: agentGet() returns null only
-      // for herdr's own no-such-pane answer, and a herdr timeout must not be
-      // reported as a closed terminal (tick() logs those). Same distinction the
-      // poll loop makes.
-      //
-      // The pairing is dropped rather than kept, matching what a message to a
-      // dead pane already does (commands.ts) — and a paneId is only unique
-      // within a herdr run, so a kept pairing could later attach this thread to
-      // whatever unrelated pane inherits the id.
+      // Only an explicit false result reaches this path. A backend error,
+      // including BackendUnavailable, throws into tick() and keeps the pairing.
+      // Orca can transiently miss an open pane during restart. Use the same
+      // bounded grace as the agentless path; Herdr's confirmed pane miss is
+      // still removed immediately.
+      if (backendForTarget(pairing.paneId) === "orca") {
+        const since = this.agentlessPanes.get(pairing.paneId);
+        this.watches.delete(pairing.paneId);
+        if (since === undefined) {
+          this.agentlessPanes.set(pairing.paneId, Date.now());
+          console.log(`[watcher:${backendForTarget(pairing.paneId)}] pane ${pairing.paneId} is temporarily unavailable — keeping ${pairing.key}`);
+          return;
+        }
+        if (Date.now() - since < this.agentlessGraceMs) return;
+      }
       await this.unpair(
         pairing,
         `pane ${pairing.paneId} is gone — unpaired ${pairing.key}`,
@@ -241,7 +282,20 @@ export class BackgroundWatcher {
 
     const existing = this.watches.get(pairing.paneId);
     const sessionId = agent.sessionId ?? "";
-    let sessionRotated = existing !== undefined && sessionId !== "" && sessionId !== existing.sessionId;
+    if (
+      existing?.ompBindingLost &&
+      existing.agentKind === "omp" &&
+      agent.agent === "omp" &&
+      sessionId === existing.sessionId &&
+      sameTranscriptIdentity(existing.transcriptIdentity, agent.transcriptIdentity)
+    ) {
+      return;
+    }
+    let sessionRotated =
+      existing !== undefined &&
+      ((sessionId !== "" && sessionId !== existing.sessionId) ||
+        existing.agentKind !== agent.agent ||
+        (agent.agent === "omp" && !sameTranscriptIdentity(existing.transcriptIdentity, agent.transcriptIdentity)));
 
     // A session id is the cheap way to notice the CLI restarted, but not every
     // agent reports one — Codex routinely doesn't, which is exactly why both
@@ -259,7 +313,7 @@ export class BackgroundWatcher {
     // every record therefore postdates it — see the offset choice below.
     let transcriptAppeared = false;
     if (existing !== undefined && !sessionRotated && (sessionId === "" || existing.transcriptPath === "")) {
-      const resolved = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      const resolved = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       if (resolved !== existing.transcriptPath) {
         sessionRotated = true;
         // Two guards on reading a newly-resolved transcript from the start.
@@ -281,15 +335,49 @@ export class BackgroundWatcher {
       }
     }
 
-    if (!existing || sessionRotated || forceRebaseline) {
-      const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+    if (!existing || existing.pairingKey !== pairing.key || sessionRotated || forceRebaseline) {
+      const tPath = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      const capturedOffset =
+        tPath && !transcriptAppeared
+          ? agent.evidence.kind === "hint"
+            ? transcriptSizeIfAvailable(tPath)
+            : transcriptSizeSafe(tPath)
+          : 0;
+      // A failed stat is not an empty baseline. Keep an existing hint watch intact and retry next tick.
+      if (capturedOffset === null) return;
+      let offset = capturedOffset;
+      const settle = new SettleTracker();
+      let initialStatus = classifiedStatus(agent.evidence);
+      if (agent.evidence.kind === "hint" && tPath && !transcriptAppeared) {
+        if (this.beforeBaselineRead) await this.beforeBaselineRead(tPath, capturedOffset);
+        // Scan only complete records at the captured EOF. A partial trailing
+        // record stays at the output offset so it is parsed in full on completion.
+        const baseline = await readLastMatchingRecordBefore(tPath, capturedOffset, (record) =>
+          driver.extractLifecycle([record]).length > 0,
+        );
+        if (!baseline) {
+          const currentSize = transcriptSizeIfAvailable(tPath);
+          if (currentSize !== null && currentSize < capturedOffset) this.watches.delete(pairing.paneId);
+          return;
+        }
+        offset = baseline.completeOffset;
+        const boundaries = baseline.record
+          ? transcriptBoundaries(driver.extractLifecycle([baseline.record]))
+          : EMPTY_TRANSCRIPT_BOUNDARIES;
+        if (boundaries.lastBoundary === "started") {
+          settle.markTurnRunning();
+          initialStatus = "working";
+        }
+      }
       this.watches.set(pairing.paneId, {
+        pairingKey: pairing.key,
         sessionId,
         transcriptPath: tPath,
-        // Normally the end of the file: on first sight, on resuming after a turn,
-        // and on a restart, whatever is already written either predates watching
-        // or was already reported, and replaying it would dump an old session
-        // into the thread.
+        transcriptIdentity: agent.transcriptIdentity,
+        agentKind: agent.agent,
+        // Normally the captured end of the file (the last complete record for
+        // hint evidence): existing output either predates watching or was already
+        // reported, and replaying it would dump an old session into the thread.
         //
         // The exception is a transcript that only just came into existence. Codex
         // creates its rollout file lazily — not at launch, but when a turn first
@@ -297,20 +385,42 @@ export class BackgroundWatcher {
         // would silently drop that entire first turn rather than a few seconds of
         // it. Nothing in the file can predate watching, so reading it whole is
         // both safe and the only way that turn reaches Slack.
-        offset: tPath && !transcriptAppeared ? transcriptSizeSafe(tPath) : 0,
+        offset,
         startedAt: Date.now(),
-        lastStatus: agent.agentStatus,
+        lastStatus: initialStatus,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
         writes: new WrittenFileTracker(),
-        settle: new SettleTracker(),
+        settle,
+        ompStatus: agent.agent === "omp" ? createOmpStatusMemory() : null,
+        startedSinceBaseline: false,
+        ompBindingLost: false,
+        ompNoticePosted: false,
       });
       return;
     }
 
     const state = existing;
+    let sawStartThisTick = false;
+    let sawCompletionThisTick = false;
     if (state.transcriptPath) {
-      const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
+      const previousOffset = state.offset;
+      if (agent.evidence.kind === "hint") {
+        const currentSize = transcriptSizeIfAvailable(state.transcriptPath);
+        if (currentSize !== null && currentSize < previousOffset) {
+          this.watches.delete(pairing.paneId);
+          return;
+        }
+      }
+      const { records, newOffset } = await readNewRecords(state.transcriptPath, previousOffset);
+      if (agent.evidence.kind === "hint") {
+        const currentSize = transcriptSizeIfAvailable(state.transcriptPath);
+        if (currentSize !== null && currentSize < newOffset) {
+          this.watches.delete(pairing.paneId);
+          return;
+        }
+      }
+      if (state.agentKind === "omp" && !(await this.revalidateOmpTranscript(pairing, state, agent))) return;
       state.offset = newOffset;
       const output = driver.extractTurnOutput(records);
       state.collected.push(...output.texts);
@@ -318,16 +428,61 @@ export class BackgroundWatcher {
       // is only ever seen by this loop, and if it later blocks, the write it
       // already completed has to survive into the adopted turn.
       state.writes.ingest(output);
-      state.settle.observe(output.lifecycle ?? []);
+      const lifecycle = output.lifecycle ?? [];
+      sawStartThisTick = lifecycle.some((event) => event.kind === "started");
+      sawCompletionThisTick = lifecycle.some((event) => event.kind !== "started");
+      state.settle.observe(lifecycle);
+      if (agent.evidence.kind === "hint" && sawStartThisTick) state.startedSinceBaseline = true;
     }
 
-    // herdr's status, corrected where the transcript contradicts a `working`
-    // that will never clear (settle.ts). A pane stuck that way never reached
-    // the settle check below, so terminal-side output was collected here and
-    // then never posted.
-    const status = state.settle.effectiveStatus(agent.agentStatus);
+    // Herdr keeps the shared settle correction. OMP requires a complete screen
+    // and two matching waiting fingerprints before it can become blocked.
+    let boundaries = EMPTY_TRANSCRIPT_BOUNDARIES;
+    if (agent.evidence.kind === "hint" && state.transcriptPath) {
+      const recentRecords = await readRecentRecords(state.transcriptPath);
+      if (state.agentKind === "omp" && !(await this.revalidateOmpTranscript(pairing, state, agent))) return;
+      boundaries = transcriptBoundaries(driver.extractLifecycle(recentRecords));
+    }
+
+    let resolution: StatusResolution;
+    let ompResolution: OmpStatusResolution | null = null;
+    if (state.agentKind === "omp") {
+      let snapshot: ScreenSnapshot | null = null;
+      try {
+        snapshot = await this.terminals.read(agent.ref.target, 200, "screen");
+      } catch {
+        // Unreadable screens retain the prior state and notice fingerprint.
+      }
+      if (state.transcriptPath && !(await this.revalidateOmpTranscript(pairing, state, agent))) return;
+      ompResolution = resolveOmpStatus({
+        settle: state.settle,
+        boundaries,
+        previousStatus: state.lastStatus,
+        memory: state.ompStatus ?? createOmpStatusMemory(),
+        snapshot,
+      });
+      state.ompStatus = ompResolution.memory;
+      resolution = ompResolution;
+    } else {
+      resolution = await resolveStatus({
+        evidence: agent.evidence,
+        settle: state.settle,
+        boundaries,
+        previousStatus: state.lastStatus,
+        readScreen: async () => {
+          const snapshot = await this.terminals.read(agent.ref.target, 40, "screen");
+          return {
+            snapshot,
+            fingerprint: snapshot.complete ? promptFingerprint(driver.parseBlockedPane(snapshot.text)) : null,
+          };
+        },
+      });
+    }
+    const status = resolution.status;
+    const previousStatus = state.lastStatus;
 
     if (status === "blocked") {
+      state.lastStatus = status;
       // The watch is dropped only if the engine actually took the handoff. It
       // used to be deleted first, so an adoption refused because a Slack turn
       // claimed the pane in the meantime threw away this state — the assistant
@@ -337,18 +492,33 @@ export class BackgroundWatcher {
         driver,
         sessionId: state.sessionId,
         transcriptPath: state.transcriptPath,
+        transcriptIdentity: state.transcriptIdentity,
         offset: state.offset,
         collected: state.collected,
-        paneId: agent.paneId,
+        backend: backendForTarget(agent.ref.target),
+        paneId: agent.ref.target,
+        ref: agent.ref,
         cwd: agent.cwd,
         outboxBaseline: state.outboxBaseline,
         writes: state.writes,
+        ompStatus: ompResolution?.memory,
+        ompNotice: ompResolution?.notice ?? undefined,
+        ompFingerprint: ompResolution?.fingerprint ?? undefined,
       });
       if (adopted) this.watches.delete(pairing.paneId);
       return;
     }
 
-    const wasActive = state.lastStatus === "working" || state.lastStatus === "blocked";
+    const completedInOnePoll =
+      agent.evidence.kind === "hint" &&
+      sawStartThisTick &&
+      sawCompletionThisTick &&
+      state.settle.settledByTranscript;
+    const wasActive =
+      previousStatus === "working" ||
+      previousStatus === "blocked" ||
+      state.startedSinceBaseline ||
+      completedInOnePoll;
     const nowSettled = status === "idle" || status === "done";
 
     if (wasActive && nowSettled) {
@@ -386,6 +556,7 @@ export class BackgroundWatcher {
         handedOver,
       );
       state.writes.forget(handedOver);
+      state.startedSinceBaseline = false;
     }
 
     // The corrected status, not herdr's: storing `working` for a pane the
@@ -404,6 +575,44 @@ export class BackgroundWatcher {
    * has a pairing. The Slack post is best-effort: the local state must end up
    * consistent whether or not the thread can be reached.
    */
+  private async noteOmpBindingLoss(pairing: Pairing, state: WatchState): Promise<void> {
+    this.agentlessPanes.delete(pairing.paneId);
+    state.ompBindingLost = true;
+    state.collected = [];
+    state.writes = new WrittenFileTracker();
+    if (state.ompNoticePosted) return;
+    state.ompNoticePosted = true;
+    await this.notifier
+      .postReply(pairing.channel, pairing.threadTs ?? "", OMP_RESUME_NOTICE)
+      .catch((error) => console.error(`[watcher] could not report OMP transcript loss for ${pairing.paneId}:`, error));
+  }
+
+  private async revalidateOmpTranscript(
+    pairing: Pairing,
+    state: WatchState,
+    beforeRead: { ref: { target: string }; sessionId: string | null; transcriptIdentity?: TranscriptIdentity },
+  ): Promise<boolean> {
+    const current = await this.terminals.get(beforeRead.ref.target);
+    if (!current) {
+      state.ompBindingLost = true;
+      state.collected = [];
+      state.writes = new WrittenFileTracker();
+      if (await this.terminals.exists(beforeRead.ref.target)) await this.noteOmpBindingLoss(pairing, state);
+      return false;
+    }
+    if (
+      current.agent !== "omp" ||
+      current.sessionId !== beforeRead.sessionId ||
+      !sameTranscriptIdentity(current.transcriptIdentity, beforeRead.transcriptIdentity)
+    ) {
+      state.ompBindingLost = true;
+      state.collected = [];
+      state.writes = new WrittenFileTracker();
+      return false;
+    }
+    return true;
+  }
+
   private async unpair(pairing: Pairing, logLine: string, message: string): Promise<void> {
     this.pairingStore.remove(pairing.key);
     this.watches.delete(pairing.paneId);

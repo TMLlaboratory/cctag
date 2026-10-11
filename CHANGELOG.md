@@ -11,6 +11,36 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Added
+
+- One Spoke can now use herdr and Orca at once: Claude Code works on either
+  backend, Codex CLI on herdr, and `omp` on Orca. Orca's shared Codex app server
+  can attribute status to the wrong pane, so its Codex panes are not listed.
+  OMP questions and approvals show “answer in the terminal” with no Slack
+  answer buttons; Slack answers to those prompts and `mode`/`plan`/`model`
+  commands are unavailable.
+  Orca writes revalidate the foreground process identity; `omp` writes also
+  revalidate the transcript. Herdr target IDs and existing pairings keep their
+  format. The Hub is unchanged.
+
+### Changed
+
+- The README and guides distinguish supported Herdr/Orca agent combinations,
+  terminal-only OMP prompt handling, and Claude Code/Codex answers from Slack
+  or the terminal.
+
+### Fixed
+
+- On Orca, a Slack message is no longer refused because Claude Code shows a
+  next-prompt suggestion in the composer: Orca reports the suggestion like typed
+  text, so cctag now tells the two apart with one reversible character. A
+  suggestion is replaced by the message; a typed draft is stashed with Ctrl+S,
+  the message is sent, and Claude Code restores the draft (an earlier stash is
+  overwritten). A new session's empty `Try "…"` composer is now accepted as
+  empty, so sending to it is no longer refused. When cctag cannot confirm the
+  composer's state it sends nothing and says what may be left there. Verified
+  with Claude Code 2.1.287.
+
 ## [0.4.0] - 2026-10-11
 
 ### Fixed

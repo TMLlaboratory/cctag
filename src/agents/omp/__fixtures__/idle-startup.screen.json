@@ -1,0 +1,63 @@
+{
+  "capture": {
+    "date": "2026-09-29",
+    "ompVersion": "18.3.4",
+    "orcaCliVersion": "1.4.215",
+    "orcaAppVersion": "1.4.215",
+    "command": "orca terminal read --terminal <terminal-A> --screen --json",
+    "readMode": "default unbounded screen read",
+    "state": "startup-idle",
+    "notes": "Raw V7 startup idle screen; all tail rows and terminal fields are preserved except listed redactions.",
+    "sourceCapture": "design/capture/V7/1-idle-a.json",
+    "redactions": {
+      "<terminal-A>": "V7 main OMP terminal handle",
+      "<terminal-B>": "V7 --session-dir OMP terminal handle",
+      "<terminal-C>": "V7 approval-prompt terminal handle",
+      "<scratch-A>": "V7 main-session scratch path",
+      "<scratch-B>": "V7 --session-dir scratch path",
+      "<scratch-C>": "V7 approval scratch path",
+      "<redacted>": "private spend, quota percentage, and context-usage values"
+    }
+  },
+  "terminal": {
+    "handle": "<terminal-A>",
+    "status": "running",
+    "tail": [
+      " Warning: Fallback chain for role 'web' does not resolve to a compatible model: google-gemini-cli/gemini-2.5-flash",
+      "╭─── omp v18.3.4 ──────────────────────────────────────────────────────────────────────────────────╮",
+      "│                          │ Tips                                                                  │",
+      "│      Welcome back!       │ # for prompt actions                                                  │",
+      "│                          │ / for commands                                                        │",
+      "│       ████████████       │ ! to run bash                                                         │",
+      "│          ██  ██          │ $ to run python                                                       │",
+      "│          ██  ██          │ ───────────────────────────────────────────────────────────────────── │",
+      "│          ▒▒  ██          │ LSP Servers                                                           │",
+      "│              ██          │ No LSP servers                                                        │",
+      "│                          │                                                                       │",
+      "│        GPT-6-Luna        │                                                                       │",
+      "│       openai-codex       │                                                                       │",
+      "│                          │ ───────────────────────────────────────────────────────────────────── │",
+      "│                          │ Recent sessions                                                       │",
+      "│                          │ No recent sessions                                                    │",
+      "│                          │                                                                       │",
+      "│                          │                                                                       │",
+      "│                          │                                                                       │",
+      "│                          │                                                                       │",
+      "╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯",
+      " Tip: Press ←← to drill into a running or finished agent and inspect its tool calls and transcript",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      " Update Available",
+      " New version 18.4.2 is available. Run: omp update",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "╭── π > ◉ GPT-6-Luna > 📁 …team/cctag/scratch/<scratch-A> > (sub) ▶─<redacted>────────────────────────╎───┃────<redacted>───╮",
+      "╰─                                                                                       ⇧⇥ to change thinking effort ─╯"
+    ],
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "53",
+    "latestCursor": "53",
+    "returnedLineCount": 28,
+    "source": "screen"
+  }
+}

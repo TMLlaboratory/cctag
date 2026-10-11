@@ -8,51 +8,54 @@ bot:
 
 | Command | Who | What it does |
 |---|---|---|
-| `@cctag connect` | owner | Lists running herdr agents (Claude Code and Codex CLI); pick one to pair with this thread |
+| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca), Codex CLI (Herdr), `omp` (Orca) |
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
-| `@cctag model <name> [level]` | anyone (in a paired thread) | Switches the paired session's model — Claude Code: runs `/model <name>` (e.g. `model opus`); Codex CLI: drives its model + reasoning-level picker (e.g. `model gpt-5.6-sol high`) |
-| `@cctag mode <name>` | anyone (in a paired thread) | Claude Code only — switches the Shift+Tab mode: `manual` / `accept-edits` / `plan` / `auto` |
-| `@cctag plan` | anyone (in a paired thread) | Claude Code only — enables Plan Mode (same as `mode plan`) |
+| `@cctag model <name> [level]` | anyone (in a paired thread) | Switches the paired session's model — Claude Code: `/model <name>`; Codex CLI: model + reasoning-level picker; `omp`: unsupported |
+| `@cctag mode <name>` | anyone (in a paired thread) | Claude Code only — switches the Shift+Tab mode: `manual` / `accept-edits` / `plan` / `auto`; unsupported on Codex CLI and `omp` |
+| `@cctag plan` | anyone (in a paired thread) | Claude Code only — enables Plan Mode (same as `mode plan`); unsupported on Codex CLI and `omp` |
 | `@cctag log [instruction]` | anyone (in a paired thread) | Feeds thread messages since cctag's last post (not just @cctag mentions) into the paired session, optionally with an instruction |
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired session; its reply is posted back in the thread |
 
-`mode`/`plan` reply with a "not supported" message rather than erroring when
-the paired thread is on a Codex CLI instance.
+`mode`/`plan` reply with a "not supported" message on Codex CLI and `omp`;
+`model` is unavailable on `omp`. Orca does not list Codex CLI.
 
 Only one thread can be paired to a given terminal at a time. Only single-word
 messages (`connect`, `status`, ...) are treated as commands — anything with a
 space, including a message that merely *starts* with a command word, is
 sent to the paired agent as a turn.
 
-When the paired agent is waiting on a decision, cctag posts buttons in the
-thread:
+For supported Claude Code and Codex CLI prompts, cctag posts buttons in the
+thread; a person can answer by clicking one or by responding at the terminal.
+If someone answers at the keyboard, cctag updates the Slack message to say so.
+`omp` prompts appear as terminal-only notices: answer at the terminal; Slack
+buttons and thread replies cannot answer them.
 
 - **AskUserQuestion** (Claude Code only): one button per option; click one,
-  or just reply in the thread with free text for a custom answer.
+  or reply in the thread with free text for a custom answer.
   Multi-select questions aren't rendered as buttons (toggling checkboxes
   reliably over a terminal isn't robust yet) — reply in the thread listing
   what you'd pick instead.
-- **Permission / command-approval prompts** (e.g. "Do you want to run `rm
-  -rf ...`?" on Claude Code, or Codex CLI's "Would you like to run the
-  following command?"): one button per choice, first option styled primary,
-  anything that looks like a refusal ("No", "Cancel", "拒否") styled as a
-  danger button.
+- **Permission / command-approval prompts** (Claude Code or Codex CLI; e.g.
+  "Do you want to run `rm -rf ...`?" or Codex's command approval): one button
+  per choice, first option styled primary, anything that looks like a refusal
+  ("No", "Cancel", "拒否") styled as a danger button.
 
 ## Sending files and images to the agent
 
-Attach a file (or just paste an image) to an `@cctag` message and the paired
-session receives it. cctag downloads it to `~/.cctag/inbox/` and puts the path
-in the prompt; Claude Code turns an image path into a real image attachment —
-what the TUI shows as `[Image #1]` — so the model actually *sees* the
-screenshot. A message that's nothing but an image works too.
+Attach a file (or paste an image) to an `@cctag` message. cctag downloads it
+to `~/.cctag/inbox/` and appends its local path to the prompt. Claude Code
+turns an image path into a real image attachment — what the TUI shows as
+`[Image #1]` — so the model sees the screenshot. Other agents receive the path;
+whether they can read an image depends on their own tools. A message that's
+nothing but an image still starts a turn and supplies its path.
 
 The path is deliberate, not incidental: base64 pasted into the prompt as text
 would cost roughly 50x the tokens (measured: a 2.8MB PNG is ~3.6k tokens
 attached this way, vs ~170k as text) and wouldn't be an image to the model at
-all. Non-image files (PDF, CSV, ...) arrive as paths for the agent to open with
-its own file-reading tool.
+all. Non-image files arrive as paths for the agent to open with its own
+file-reading tool.
 
 Two things to know:
 
@@ -94,8 +97,8 @@ Two ways, both automatic — no command to remember:
   changed" — so it posted artifacts nobody asked for, needed an extension
   allowlist that dropped legitimate `.csv` and `.md` files, and missed the
   common case anyway, since a chart written by a shell command leaves no path in
-  the transcript. Codex CLI has no equivalent tool, which is why the outbox
-  stays its only route.
+  the transcript. Codex CLI and `omp` have no equivalent tool, so `.cctag/outbox`
+  is their only automatic outbound file route.
 
 ## Switching model
 
@@ -119,8 +122,8 @@ rather than starting a conversational turn — mechanics differ by agent:
 
 ## Switching mode
 
-*(Claude Code only — Codex CLI has no equivalent mode ring; `mode`/`plan`
-reply with a not-supported message on a Codex-paired thread.)*
+*(Claude Code only — Codex CLI and `omp` have no equivalent mode ring;
+`mode`/`plan` reply with a not-supported message on both.)*
 
 `@cctag mode <name>` selects one of Claude Code's four Shift+Tab modes —
 `manual`, `accept-edits`, `plan`, `auto`. There's no slash command for
@@ -173,12 +176,11 @@ background watcher (polling every ~7s) notices once it settles
 prefixed with 🖥️. It never replays old history, so pairing mid-task only
 reports what happens *after* pairing.
 
-If that terminal-driven work instead hits an `AskUserQuestion`, permission,
-or (Codex CLI) command-approval prompt, the watcher doesn't just wait for
-it to resolve on its own — it hands the terminal off to the same turn
-machinery a Slack-initiated message uses, so the prompt gets posted as
-Slack buttons (and can be answered from the thread) even though nothing was
-ever sent via `@cctag`.
+If terminal-driven work hits a Claude Code or Codex CLI prompt, the watcher
+hands the terminal to the same prompt flow: supported prompts are posted as
+Slack buttons and can be answered in the thread or at the terminal. For `omp`,
+Slack gets a terminal-only notice; answer in the terminal, since Slack buttons
+and thread replies cannot answer OMP prompts.
 
 Multi-question `AskUserQuestion` prompts (Claude Code only) are answered
 one question at a time — after you answer, cctag reads the next one off

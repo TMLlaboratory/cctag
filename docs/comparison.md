@@ -14,10 +14,11 @@ for others, and it is worth being precise about which you are.
 
 ## The one requirement that separates them
 
-**cctag attaches to a session that is already running.** You start `claude` (or
-`codex`) in your terminal, work in it for however long, and *then* pair a thread
-to that session — with everything already loaded: the files you opened, the
-half-finished working tree, the context accumulated over hours.
+**cctag attaches to a session that is already running.** You start `claude`,
+`codex`, or `omp` in a supported terminal, work in it for however long, and
+*then* pair a thread to that session — with everything already loaded: the
+files you opened, the half-finished working tree, the context accumulated over
+hours.
 
 Every comparable tool surveyed instead **starts a new session per mention.**
 Some reuse an idle session per channel, but that is a managed session the tool
@@ -29,8 +30,10 @@ owns and can discard, not the one you have been working in.
 | Session | New per invocation | New per invocation | **Attaches to an existing pane** |
 | Accumulated context | None (partly recoverable via a repo) | None | **Used as it stands** |
 | More than one person driving one session | — | — | **Anyone in the thread** |
-| Agents | Vendor's own | Varies | Claude Code and Codex CLI |
+| Agents | Vendor's own | Varies | Claude Code, Codex CLI, and oh-my-pi (`omp`) |
 | Externally-shared channels | **Does not work** | Varies | **Works** |
+
+The supported agent/backend combinations differ; see [the support matrix](../README.md#terminal-backends-herdr-and-orca).
 
 ## Buzz: closest in spirit, opposite on exactly this point
 

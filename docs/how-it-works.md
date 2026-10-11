@@ -7,11 +7,13 @@ This document explains how cctag works internally (for setup steps, see the [REA
 **cctag bridges a Slack thread to a coding-agent terminal session running on
 your own machine.**
 
-It remote-controls **a coding-agent session you are actually running on your
-own PC right now**. Start `claude` (or `codex`) in your terminal, and you can
-talk to that exact session from Slack — send it instructions and get its
-replies back. Nothing is copied to a sandbox, so your local files and network
-(internal servers, GPUs, local model endpoints) are reachable as they are.
+The Herdr backend supports Claude Code and Codex CLI. Orca supports Claude Code
+with the same cctag features as Herdr, plus `omp` text turns, output, status,
+and `.cctag/outbox` uploads. Incoming attachments are passed as local paths;
+Claude Code converts image paths into native image attachments. OMP questions
+and approvals are reported to Slack but must be answered in the terminal.
+Both backends keep the agent and local files on your machine; nothing is copied
+to a sandbox.
 
 How that compares to tools that start a fresh session instead — and where
 those are the better choice — is [comparison.md](comparison.md). This document
@@ -19,16 +21,20 @@ only explains the mechanism.
 
 This walkthrough uses Claude Code throughout, because the details that are
 worth explaining — transcript layout, how a pending question is detected,
-Plan Mode — are its own. Codex CLI is supported the same way, via a
-per-pane driver chosen from what herdr reports is running; see the agent
-support table in the [README](../README.md) for what differs.
+Plan Mode — are its own. Herdr supports Claude Code and Codex CLI through
+per-pane drivers; Orca supports the same cctag feature set for Claude Code,
+plus `omp` text turns, output, status, and `.cctag/outbox` uploads. Incoming
+files are passed as paths, and only Claude Code turns image paths into native
+image attachments. Codex on Orca is not listed; OMP questions and approvals
+must be answered in the terminal. See the agent support table in the
+[README](../README.md) for what differs.
 
 ```
 Slack thread (@cctag)
         ↕
    cctag (Hub / Spoke)
         ↕
-      herdr
+   Herdr or Orca (local)
         ↕
    Claude Code (on your PC)
 ```
@@ -40,8 +46,8 @@ roles.
 
 | | Role | Runs on | Can do |
 |---|---|---|---|
-| **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or herdr itself** |
-| **Spoke** | The thing that actually drives Claude Code | **Your own PC** | Sends keystrokes into your local Claude Code via herdr, reads its output, and relays it back to Slack through the Hub |
+| **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or the local terminal backends** |
+| **Spoke** | The local terminal connection | **Your own PC** | Lists, reads, and sends input to supported agents through enabled backends: Claude Code on either; Codex CLI on Herdr; `omp` on Orca |
 
 The important part: **the Hub has no way to reach your terminal.** Even if
 the Hub's server were compromised, it has no ability to control the Claude
@@ -51,9 +57,10 @@ from Slack needs to have **their own Spoke running on their own PC**.
 
 ## 3. How this relates to herdr: why only "running agents" show up
 
-cctag doesn't drive the terminal directly — it goes through
-[herdr](https://herdr.dev). There are two layers to how that scopes things
-down.
+cctag's Herdr backend talks to
+[herdr](https://herdr.dev), whose agent registry narrows the available
+panes. Orca is a separate backend with process-based discovery and write
+identity checks, described below.
 
 ### herdr itself can write to any pane
 
@@ -64,23 +71,26 @@ just a plain shell. The in-house bridge that used raw tmux before herdr
 (cc-slack-bridge v4) used exactly this raw power — it could send anything
 to a hardcoded pane number, for better or worse.
 
-### Only self-reported panes show up in the "agent list"
+### Herdr's agent list is one source for the picker
 
-On the other hand, what shows up in `herdr agent list` (the command cctag
-uses to build the `@cctag connect` picker) is **only panes where Claude
-Code itself has told herdr "I'm running here."** Claude Code has a
-`SessionStart` hook that fires on startup and reports to herdr's socket:
-"session ID xxx is running in this pane." Only once that report arrives
-does the pane get listed as an "agent."
+Herdr's `agent list` contributes supported, registered agents to cctag's
+`@cctag connect` picker; it does not represent every terminal backend. What
+appears there depends on Herdr's supported agent integrations, not on every
+managed pane. Start Claude Code or Codex CLI with `herdr agent start` and
+install its matching `herdr integration`; the integration supplies
+agent-specific session reporting. Claude Code's `SessionStart` hook reports
+its session ID. Codex CLI can appear in the list without one; trusting its
+`herdr-agent-state.sh` `SessionStart` hook adds full session-ID reporting, and
+cctag otherwise falls back to the paired terminal's working directory.
 
-So even when herdr is managing many panes, `herdr agent list` shows only
-the ones where Claude Code is running and self-reporting. The rest (plain
-shells, etc.) show up in `herdr pane list` but never in `herdr agent list`.
+Plain shells and processes not registered as Herdr agents remain visible in
+`herdr pane list` but do not appear in `herdr agent list`. Orca candidates are
+discovered by Orca's own process-based backend, not by Herdr.
 
-### What actually makes cctag safe is choosing not to use that raw power
+### What makes the Herdr path safe is choosing not to use that raw power
 
-herdr is just as capable as tmux underneath, but **cctag's code imposes its
-own rule: only ever operate on a `pane_id` that came from `herdr agent
+Herdr is just as capable as tmux underneath, but **cctag's Herdr path imposes
+its own rule: only ever operate on a `pane_id` that came from `herdr agent
 list`/`agent get`.** There's no Slack command that lets you target an
 arbitrary pane.
 
@@ -90,21 +100,40 @@ pairing survives quitting the CLI and restarting it in the same pane.)
 
 Put together:
 
-- **herdr's self-reported registry** narrows down what's even a *candidate*
-  (only panes running Claude Code)
+- **Herdr's agent registry** limits candidates to supported, registered CLI
+  agents (Claude Code and Codex CLI), not every managed pane
 - **cctag's implementation choice** narrows down what it will actually
   *operate on* (only things discovered via the agent list)
 
-Both together are what produce the safe behavior of "only touches running
-Claude Code agents, can't freely drive an arbitrary terminal." herdr the
-tool doesn't forbid this on its own — it's a restriction that comes from
-how cctag chooses to use it.
+Together, these rules let cctag operate only on supported agents in registered
+panes; Herdr's raw pane commands remain capable of addressing arbitrary panes.
+
+### Orca: process-based discovery and writes
+
+When the Orca CLI is available (`CCTAG_ORCA_BIN`, default
+`/opt/homebrew/bin/orca`), cctag combines Orca's terminal and worktree metadata
+with the local agent process tree. It joins a process to an Orca terminal by an
+exact `tabId:leafId` pane-key match. Only if no direct match exists may it use
+the process's `ORCA_TERMINAL_HANDLE`, and only when that handle names an
+explicitly orphaned terminal whose `tabId:leafId` pair is not another pane's
+ordinary key.
+
+Claude Code on Orca supports the same cctag features as Claude Code on Herdr.
+Orca also supports `omp` text turns, output, and status. Codex is recognized
+but not listed by this backend. When `omp` waits for input, cctag posts the
+visible prompt when available and a notice to answer in the terminal; Slack
+answers are not supported.
+
+Before every Orca terminal write, cctag rechecks the foreground process
+identity. For `omp`, it also verifies the identity of the transcript open for
+writing. A pane whose agent or session cannot be verified is omitted rather
+than guessed.
 
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
-   whatever `herdr agent list` finds — Claude Code and Codex CLI instances
-   alike
+   the enabled backends: Herdr's Claude Code/Codex agents and Orca's
+   Claude Code/`omp` agents
 
    "Owner only" is not simply a narrowed permission. **The Spoke runs on the
    owner's own machine, so `connect` is choosing which of your own panes to
@@ -113,9 +142,15 @@ how cctag chooses to use it.
    paired, anyone in the thread can talk to it (see "What this actually looks
    like in use" in the [README](../README.md)) — so what is restricted is
    *deciding what to attach*, not *using it*.
-2. Pick one → that thread (channel + thread_ts) and the chosen pane_id
-   are recorded as a "pairing" (one thread per pane at a time)
-3. In a paired thread, sending **`@cctag <message>`**:
+2. Pick one → that thread (channel + thread_ts) and the backend-qualified
+   target (a Herdr pane or `orca:<paneKey>`) are recorded as a pairing
+
+   Orca supports the same cctag features for Claude Code as Herdr, plus `omp`
+   text turns, output, and status. OMP questions and approvals are reported to
+   Slack but must be answered in the terminal; Codex is not listed on Orca.
+   Before each Orca write, cctag rechecks the foreground process identity and,
+   for `omp`, the open transcript identity.
+3. For a Herdr-backed pairing, sending **`@cctag <message>`**:
    - Submits the text via herdr's `agent prompt`, which sends the text *and*
      the Enter in **one call**. Sending them separately raced Claude Code's
      paste handling: an Enter arriving before the injected text settled got
@@ -137,26 +172,24 @@ how cctag chooses to use it.
 
 This is where a real gotcha turned up during development.
 
-**Claude Code does not write an `AskUserQuestion` (multiple-choice
-question) to its transcript until after it's answered.** The question and
-its answer land together, as a single record, the moment it's answered.
-While the question is still on screen, the transcript shows nothing about
-it at all.
+Claude Code and Codex CLI do not write pending questions or permission prompts
+to their transcripts until after they're answered. Claude Code's
+`AskUserQuestion` question and answer land together as a single record, so
+while the question is on screen the transcript shows nothing about it.
 
-So detecting a pending question or a pending permission prompt (e.g. "Do
-you want to run this tool?") can't use the transcript — it has to **read
-the screen itself via `herdr pane read`** and parse the menu with a regex.
-A line that reads `N. Type something.` means it's an AskUserQuestion menu;
-its absence means it's a permission menu.
+For these supported prompts, cctag reads the terminal screen through the
+selected backend: Herdr pairings use `herdr pane read`, while Orca pairings use
+Orca's terminal reader. A line reading `N. Type something.` identifies a
+Claude Code `AskUserQuestion` menu; its absence means a permission menu.
+`omp` follows a separate path: cctag posts a terminal-only notice, and the
+prompt must be answered at the terminal.
 
-There are two ways to answer:
+For Slack-answerable Claude Code and Codex CLI prompts:
 
-- **Click a button** → sends the matching digit key straight through herdr
-  (confirmed on real hardware: a single digit both selects *and* confirms
-  — no Enter needed)
-- **Reply in the thread with free text** → moves the on-screen cursor down
-  to the "Type something" row with the Down arrow key, types the text, and
-  presses Enter
+- **Click a button** → sends the chosen option through the selected backend.
+- **Reply in the thread with free text** → supported when the prompt has a
+  free-text row, such as Claude Code's "Type something"; cctag moves the
+  on-screen cursor there, types the text, and presses Enter.
 
 ## 5.5 Work started without going through Slack
 
@@ -187,26 +220,33 @@ what the following fix closes).
 
 So instead of waiting, the moment the watcher sees `blocked` it hands that
 terminal off to `TurnEngine.adoptBlockedTerminal()` — putting it on the
-**exact same `pollLoop()`** a Slack-initiated turn uses, sending no new
-input (the prompt is already on screen). That means the AskUserQuestion/
-permission parsing, Slack button posting, button-click and free-text
-answering, and "answered directly at the terminal" detection are all the
-same existing code, whether the turn started from Slack or was discovered
-mid-flight at the terminal. Once handed off, `watcher.ts` stops tracking it
-(removed from `this.watches`); when it finishes, `TurnEngine` removes it
-from `turns`, and the next poll cycle re-baselines it as a fresh pairing.
+**same poll loop** a Slack-initiated turn uses and sending no new input (the
+prompt is already on screen). Supported Claude Code and Codex CLI prompts then
+use their existing Slack-button and terminal-answer paths, whether discovered
+by the watcher or started from Slack.
+
+`omp` is different: its prompt goes through the terminal-only notice path.
+Slack receives a notice that tells the user to answer at the terminal; it
+cannot be answered by button or thread reply. Once handed off, `watcher.ts`
+stops tracking the terminal (`this.watches`); when it finishes, `TurnEngine`
+removes it from `turns`, and the next poll cycle re-baselines it as a fresh
+pairing.
 
 ## 5.6 Switching model
 
-`@cctag model <name>` (e.g. `model opus`) is handled by a separate path
-from a normal conversational turn. It just forwards Claude Code's own slash
-command (`/model <name>`) as-is, and isn't treated as a `TurnEngine` turn
-(its output doesn't reliably land in the session transcript the way an LLM
-reply does).
+For Claude Code, `@cctag model <name>` (e.g. `model opus`) forwards Claude's
+own `/model <name>` command rather than starting a normal conversational turn;
+the command's output doesn't reliably land in the session transcript. Claude
+Code model switching is supported on Herdr and Orca. `omp` has no model
+command; Codex CLI uses its separate model and reasoning-level picker, covered
+in [usage.md](usage.md).
 
-Instead, `commands.ts`'s `runTuiCommand()`:
+The steps below describe the Herdr command path. Orca uses its guarded composer
+channel for Claude Code.
 
-1. Sends the slash command via herdr, then confirms it with Enter
+`commands.ts`'s `runTuiCommand()`:
+
+1. Sends the slash command via Herdr, then confirms it with Enter
 2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
    confirmation that appears when switching models mid-conversation), the
    existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
@@ -232,10 +272,13 @@ trying to watch the same instance a TUI command is currently driving.
 `@cctag mode <name>` (`manual` / `accept-edits` / `plan` / `auto`) works
 differently from switching model. These four modes have **no slash
 command** — the only way to change them in Claude Code is cycling with
-Shift+Tab. And herdr's `pane send-keys shift+tab`, though accepted,
+Shift+Tab. On Herdr, `pane send-keys shift+tab` is accepted but
 **delivers nothing Claude Code reacts to**. Empirically, sending the raw
 CSI Z sequence (`\x1b[Z`, backtab) via `pane send-text` does work — exposed
 as `HerdrClient.paneSendText()`.
+
+Claude Code mode switching is also supported on Orca; that backend sends the
+backtab through its guarded composer channel.
 
 `runModeCommand()` matches the mode with a closed loop: read the current
 mode off the footer status line (`⏸ manual mode on` / `⏵⏵ accept edits on` /
@@ -251,9 +294,9 @@ plan`.
 
 ## 5.6.2 Plan Mode over Slack
 
-When a plan-mode turn finishes, Claude Code shows a "Here is Claude's plan /
-ready to execute?" approval prompt (a kind of permission menu). On detecting
-it, cctag:
+Claude Code Plan Mode works on Herdr and Orca. When a plan-mode turn finishes,
+Claude Code shows a "Here is Claude's plan / ready to execute?" approval prompt
+(a kind of permission menu). On detecting it, cctag:
 
 - **attaches the full plan as a `.md` file**. The plan is written to
   `~/.claude/plans/<slug>.md`, and its path shows in the footer — but a
@@ -312,12 +355,11 @@ and is shared by both paths.
 ### Inbound: why handing over a path is enough
 
 An image pasted into Slack arrives in the message's `files[]`, never in its
-`text`. cctag downloads it to `~/.cctag/inbox/<file_id>-<name>` and simply
-appends the paths to the prompt, one per line
-(`buildPromptWithAttachments()`).
+`text`. cctag downloads it to `~/.cctag/inbox/<file_id>-<name>` and appends
+the paths to the prompt, one per line (`buildPromptWithAttachments()`).
 
-That works because **Claude Code converts an image path in a prompt into a real
-image attachment.** Measured behavior:
+Claude Code converts an image path in a prompt into a real image attachment.
+This behavior is specific to Claude Code:
 
 - the path text is removed and replaced by an `[Image #N]` placeholder (which
   moves to the front of the text)
@@ -334,8 +376,8 @@ Base64-in-the-prompt was rejected on token grounds. Measured on a 2.8MB PNG:
 versus ~170k as text — ~50x — and the text version isn't an image to the model
 at all.
 
-Non-image files (PDF, CSV, ...) stay plain paths for the agent to open with its
-own `Read` tool.
+Other agents receive paths, not a cctag-created image block; their own file
+tools determine how those files are read.
 
 ### The inbound catch: an image path swallows the Enter
 
@@ -366,23 +408,25 @@ What gets sent is decided by two routes:
   untouched file from being re-sent.
 
   Per-cwd still leaves an ambiguity when **two panes share one cwd**. So
-  whenever the outbox has additions, cctag asks `herdr agent list` for every
-  pane's live cwd and checks whether another pairing points at the same one. If
-  one does — or if the listing can't be fetched — it skips the outbox, says why
-  in the thread, and leaves the files alone. Transcript detection is unaffected:
+  whenever the outbox has additions, cctag asks its live terminal list for every
+  pane's cwd and checks whether another pairing points at the same one. If one
+  does — or if the listing can't be fetched — it skips the outbox, says why in
+  the thread, and leaves the files alone. Transcript detection is unaffected:
   those paths come from this turn's own transcript.
-- **Transcript detection** — `SendUserFile`'s `input.files`. The agent stating
-  outright that it wants a file delivered, so nothing is filtered by type, and
-  its `caption` becomes the upload comment. Paths come from `input.files`,
-  resolved against the pane's cwd (`tool_result` carries absolute paths but in
-  an undocumented human-readable format, so it is used only for its success bit).
+- **Transcript detection** — Claude Code's `SendUserFile` `input.files`. The
+  agent states outright that it wants a file delivered, so nothing is filtered
+  by type, and its `caption` becomes the upload comment. Paths come from
+  `input.files`, resolved against the pane's cwd (`tool_result` carries
+  absolute paths but in an undocumented human-readable format, so it is used
+  only for its success bit).
 
   This replaced detecting `Write` `file_path`s narrowed to images/SVG/PDF, which
   inferred "send this" from "a file changed": it posted artifacts nobody asked
   for, needed an extension allowlist that dropped legitimate `.csv` and `.md`
   files, and still missed the common case, since files produced by Bash (a
-  matplotlib PNG) leave no recoverable path in the transcript. Codex CLI has no
-  equivalent tool, so the outbox stays its only route.
+  matplotlib PNG) leave no recoverable path in the transcript. Codex CLI and
+  `omp` have no equivalent tool, so `.cctag/outbox` is their only automatic
+  outbound file route.
 
   Crucially, **the `tool_use` alone must not be trusted.** A request and its
   result are separate records that routinely arrive in different poll batches,
@@ -417,18 +461,19 @@ A Hub is tied to exactly one workspace (by its Slack app token). To reach a
 second workspace, you run a second Hub (it can live on the same server)
 and a second Spoke on your own PC.
 
-In that case, **both Spokes are looking at the same herdr daemon**, so a
-terminal paired in one workspace also shows up in the other workspace's
-`connect` picker. Avoid pairing the same terminal from both at once — the
-keystrokes would collide.
+In that case, **both Spokes use the same local terminal backends** (Herdr
+daemon and/or Orca runtime), so a terminal paired in one workspace can also
+show up in the other workspace's `connect` picker. Avoid pairing the same
+terminal from both at once — the keystrokes would collide.
 
 ## 7. Security notes
 
 - Anyone who can post in a paired thread can send text into a
   full-permission local agent. Only pair threads in channels with people
   you trust
-- Permission prompts (e.g. confirming a dangerous command) still require a
-  human's approval via Slack buttons — nothing runs unattended
+- Supported Claude Code and Codex CLI permission prompts can be answered with
+  Slack buttons or at the terminal. OMP prompts are reported in Slack as
+  terminal-only notices and cannot be answered there.
 - A Hub token (`token issue <name> <ownerUserId>`) is bound to the Slack
   user ID it was issued for and can't register as anyone else — but it can
   still act on that owner's own paired threads, so only hand tokens to

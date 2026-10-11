@@ -1,0 +1,186 @@
+{
+  "captureDate": "2026-09-28",
+  "claudeVersion": "2.1.283",
+  "orcaCliVersion": "1.4.215",
+  "orcaAppVersion": "1.4.215",
+  "redactions": {
+    "<terminal-A>": "first orphaned terminal handle",
+    "<terminal-B>": "registered-worktree terminal handle",
+    "<pty-A>": "first terminal PTY identifier",
+    "<pty-B>": "registered-worktree terminal PTY identifier",
+    "<incarnation-A>": "first terminal process incarnation identifier",
+    "<incarnation-B>": "registered-worktree process incarnation identifier",
+    "<pane-A>": "first process pane key",
+    "<orphaned-pane-A>": "first orphaned terminal tab and leaf identifiers",
+    "<tab-B>": "registered-worktree terminal tab identifier",
+    "<leaf-B>": "registered-worktree terminal leaf identifier",
+    "<tab-B>:<leaf-B>": "registered-worktree composite pane key",
+    "<worktree-A>": "task worktree identifier",
+    "<worktree-B>": "registered main worktree identifier and path",
+    "<session-A>": "resumed Claude session identifier",
+    "<session-B>": "new Claude session identifier after /clear",
+    "<bridge-session-A>": "Claude bridge session identifier",
+    "<task-worktree>": "task-specific workspace path",
+    "<task-branch>": "task-specific branch name",
+    "<scratch>": "scratch directory and status labels",
+    "<plan>": "account-tier plan label",
+    "<redacted>": "private usage meter values and reset times"
+  },
+  "snapshots": [
+    {
+      "state": "before-resume",
+      "sourceCommand": "orca terminal list --worktree path:<task-worktree> --json",
+      "terminalList": {
+        "totalCount": 1,
+        "truncated": false,
+        "terminals": [
+          {
+            "handle": "<terminal-A>",
+            "ptyId": "<pty-A>",
+            "incarnationId": "<incarnation-A>",
+            "orphaned": true,
+            "worktreeId": "<worktree-A>",
+            "worktreePath": "<task-worktree>",
+            "branch": "<task-branch>",
+            "tabId": "<orphaned-pane-A>",
+            "leafId": "<orphaned-pane-A>",
+            "title": "✳ Claude Code",
+            "connected": true,
+            "writable": true,
+            "executionHostId": "local",
+            "agentIdentity": "claude"
+          }
+        ]
+      },
+      "process": {
+        "pid": 23428,
+        "ppid": 23280,
+        "pgid": 23428,
+        "tpgid": 23428,
+        "tty": "ttys016",
+        "lstart": "Mon Sep 28 17:05:36 2026",
+        "command": "claude",
+        "environment": {
+          "ORCA_PANE_KEY": "<pane-A>",
+          "ORCA_TERMINAL_HANDLE": "<terminal-A>"
+        }
+      },
+      "sessionFile": {
+        "pid": 23428,
+        "sessionId": "<session-A>",
+        "cwd": "<scratch>",
+        "startedAt": 1790582781976,
+        "procStart": "Mon Sep 28 08:05:36 2026",
+        "version": "2.1.283"
+      }
+    },
+    {
+      "state": "after-resume-same-session",
+      "sourceCommand": "orca terminal list --worktree path:<task-worktree> --json",
+      "terminalList": {
+        "totalCount": 1,
+        "truncated": false,
+        "terminals": [
+          {
+            "handle": "<terminal-A>",
+            "ptyId": "<pty-A>",
+            "incarnationId": "<incarnation-A>",
+            "orphaned": true,
+            "worktreeId": "<worktree-A>",
+            "worktreePath": "<task-worktree>",
+            "branch": "<task-branch>",
+            "tabId": "<orphaned-pane-A>",
+            "leafId": "<orphaned-pane-A>",
+            "title": "✳ Claude Code",
+            "connected": true,
+            "writable": true,
+            "executionHostId": "local",
+            "agentIdentity": "claude"
+          }
+        ]
+      },
+      "process": {
+        "pid": 47894,
+        "ppid": 23280,
+        "pgid": 47894,
+        "tpgid": 47894,
+        "tty": "ttys016",
+        "lstart": "Mon Sep 28 17:16:17 2026",
+        "command": "claude --resume <session-A>",
+        "environment": {
+          "ORCA_PANE_KEY": "<pane-A>",
+          "ORCA_TERMINAL_HANDLE": "<terminal-A>"
+        }
+      },
+      "sessionFile": {
+        "pid": 47894,
+        "sessionId": "<session-A>",
+        "cwd": "<scratch>",
+        "startedAt": 1790583378322,
+        "procStart": "Mon Sep 28 08:16:17 2026",
+        "version": "2.1.283",
+        "kind": "interactive",
+        "entrypoint": "cli",
+        "pidDomain": "darwin",
+        "updatedAt": 1790583378436,
+        "status": "idle",
+        "statusUpdatedAt": 1790583378436,
+        "bridgeSessionId": "<bridge-session-A>"
+      }
+    },
+    {
+      "state": "after-clear-new-session",
+      "sourceCommand": "orca terminal list --worktree path:<task-worktree> --json",
+      "terminalList": {
+        "totalCount": 1,
+        "truncated": false,
+        "terminals": [
+          {
+            "handle": "<terminal-A>",
+            "ptyId": "<pty-A>",
+            "incarnationId": "<incarnation-A>",
+            "orphaned": true,
+            "worktreeId": "<worktree-A>",
+            "worktreePath": "<task-worktree>",
+            "branch": "<task-branch>",
+            "tabId": "<orphaned-pane-A>",
+            "leafId": "<orphaned-pane-A>",
+            "title": "✳ Claude Code",
+            "connected": true,
+            "writable": true,
+            "executionHostId": "local",
+            "agentIdentity": "claude"
+          }
+        ]
+      },
+      "process": {
+        "pid": 47894,
+        "ppid": 23280,
+        "pgid": 47894,
+        "tpgid": 47894,
+        "tty": "ttys016",
+        "lstart": "Mon Sep 28 17:16:17 2026",
+        "command": "claude --resume <session-A>",
+        "environment": {
+          "ORCA_PANE_KEY": "<pane-A>",
+          "ORCA_TERMINAL_HANDLE": "<terminal-A>"
+        }
+      },
+      "sessionFile": {
+        "pid": 47894,
+        "sessionId": "<session-B>",
+        "cwd": "<scratch>",
+        "startedAt": 1790583378322,
+        "procStart": "Mon Sep 28 08:16:17 2026",
+        "version": "2.1.283",
+        "kind": "interactive",
+        "entrypoint": "cli",
+        "pidDomain": "darwin",
+        "updatedAt": 1790583461904,
+        "status": "idle",
+        "statusUpdatedAt": 1790583461904,
+        "bridgeSessionId": "<bridge-session-A>"
+      }
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  agentPickerBlocks,
   AQ_MULTI_CHECKBOX_ACTION_ID,
   AQ_MULTI_SUBMIT_ACTION_ID,
   askUserQuestionBlocks,
@@ -8,6 +9,7 @@ import {
   withSelectedIndices,
 } from "./blocks.js";
 import type { AskUserQuestionPaneInfo } from "../agents/driver.js";
+import type { AgentInfo, AgentStatus, BackendName, ListResult } from "../backend/types.js";
 
 /** Every element of a given type anywhere in the blocks, flattened. */
 function elementsOfType(blocks: unknown[], type: string): Array<Record<string, unknown>> {
@@ -138,4 +140,123 @@ test("anything that is not the multi-select submit passes through untouched", ()
   const single = JSON.stringify({ k: "aq", t: "w:p1", p: 1, o: 2 });
   assert.equal(withSelectedIndices(single, bodyWithSelections(["0"])), single);
   assert.equal(withSelectedIndices("not json at all", {}), "not json at all");
+});
+
+test("the agent picker groups by backend and cwd with readable title-less Orca labels", () => {
+  const agent = (
+    target: string,
+    backend: BackendName,
+    cwd: string,
+    agentKind: AgentInfo["agent"],
+    status: AgentStatus,
+    terminalTitle: string | null,
+    displayId: string,
+    pickerState: string | null = null,
+  ): AgentInfo => ({
+    ref: { target, pid: null, processStartedAt: null },
+    backend,
+    agent: agentKind,
+    sessionId: null,
+    cwd,
+    evidence: { kind: "classified", status },
+    terminalTitle,
+    terminalId: "herdr-terminal-id",
+    displayId,
+    pickerState,
+  });
+  const paneKey = "e89f6036-1062-4bbf-9a11-86aab4cc3f47";
+  const orcaTarget = `orca:${paneKey}`;
+  const result: ListResult = {
+    agents: [
+      agent("wT:p1", "herdr", "/work/project", "claude", "idle", "Claude session", "pane-1"),
+      agent("wT:p2", "herdr", "/work/project", "codex", "working", null, "pane-2"),
+      agent(orcaTarget, "orca", "/work/project", "claude", "working", null, orcaTarget, "waiting"),
+      agent("orca:omp-pane", "orca", "/work/project", "omp", "working", "OMP session", "omp-pane"),
+    ],
+    failures: [],
+    complete: true,
+    notices: [],
+  };
+  const blocks = agentPickerBlocks(result, ["herdr", "orca"]) as unknown as Array<{
+    accessory: {
+      option_groups: Array<{
+        label: { text: string };
+        options: Array<{ text: { text: string }; value: string }>;
+      }>;
+    };
+  }>;
+  const groups = blocks[0]!.accessory.option_groups;
+  assert.deepEqual(groups.map((group) => group.label.text), ["herdr · project", "orca · project"]);
+  assert.deepEqual(groups[0]!.options.map((option) => option.value), ["wT:p1", "wT:p2"]);
+  assert.deepEqual(groups[0]!.options.map((option) => option.text.text), [
+    "🟢 Claude session",
+    "🟡 [codex] pane-2",
+  ]);
+  assert.deepEqual(groups[1]!.options.map((option) => option.value), [orcaTarget, "orca:omp-pane"]);
+  assert.deepEqual(groups[1]!.options.map((option) => option.text.text), [
+    "🔴 Claude Code · e89f6036",
+    "⚪ [omp] OMP session",
+  ]);
+});
+
+test("Orca picker icons use only recognized worktree states", () => {
+  const states = [
+    ["working", "🟡"],
+    ["waiting", "🔴"],
+    ["blocked", "🔴"],
+    ["done", "🟢"],
+    ["idle", "🟢"],
+    ["unrecognized", "⚪"],
+    [null, "⚪"],
+  ] as const;
+  const result: ListResult = {
+    agents: states.map(([pickerState], index) => ({
+      ref: { target: `orca:pane-${index}`, pid: null, processStartedAt: null },
+      backend: "orca",
+      agent: "claude",
+      sessionId: null,
+      cwd: "/work/project",
+      evidence: { kind: "classified", status: "blocked" },
+      terminalTitle: `Agent ${index}`,
+      terminalId: "",
+      displayId: `pane-${index}`,
+      pickerState,
+    })),
+    failures: [],
+    complete: true,
+    notices: [],
+  };
+  const blocks = agentPickerBlocks(result, ["orca"]) as unknown as Array<{
+    accessory: {
+      option_groups: Array<{
+        options: Array<{ text: { text: string }; value: string }>;
+      }>;
+    };
+  }>;
+  const options = blocks[0]!.accessory.option_groups[0]!.options;
+  assert.deepEqual(
+    options.map((option) => option.text.text.split(" ")[0]),
+    states.map(([, icon]) => icon),
+  );
+});
+
+test("an incomplete empty agent list explains backend failures and notices", () => {
+  const result: ListResult = {
+    agents: [],
+    failures: [{ backend: "herdr", reason: "CLI unavailable" }],
+    complete: false,
+    notices: [
+      "Orca 上の Codex は未対応です",
+      "orca:tab:leaf: セッションを特定できないため接続できません",
+      "Some entries were filtered.",
+    ],
+  };
+  const text = JSON.stringify(agentPickerBlocks(result, ["herdr", "orca"]));
+  assert.match(text, /herdr/);
+  assert.match(text, /現在 herdr \/ orca 上/, "enabled healthy backends belong in the empty-state message");
+  assert.match(text, /CLI unavailable/);
+  assert.match(text, /Orca 上の Codex は未対応です/);
+  assert.match(text, /不完全/);
+  assert.match(text, /セッションを特定できないため接続できません/);
+  assert.match(text, /Some entries were filtered/);
 });

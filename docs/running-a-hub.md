@@ -37,7 +37,7 @@ use](../README.md#what-this-actually-looks-like-in-use).
 
 ```bash
 cp .env.example .env
-$EDITOR .env   # SLACK_BOT_TOKEN, SLACK_APP_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN
+$EDITOR .env   # Slack credentials, owner ID, and optional terminal backend paths
 npm install
 npm run dev   # or: npm run build && npm start
 ```
@@ -57,7 +57,7 @@ having zero config files present is the normal, correct state there.
 without a live Slack workspace — attachment limits, the outbound-file rules,
 denied-write correlation, and the download size guard. The parts that need a
 real terminal (prompt submission, permission prompts) are verified by hand
-against a disposable herdr pane.
+against a disposable Herdr or Orca pane.
 
 ## Running a Hub (for more than one person)
 
@@ -65,8 +65,7 @@ The Hub needs the same `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN` as standalone
 mode, plus a public `wss://` endpoint (a domain + TLS in front of it —
 [Caddy](https://caddyserver.com) gets you automatic HTTPS with almost no
 config). A single Oracle Cloud "Always Free" `VM.Standard.E2.1.Micro`
-instance is plenty. This machine does **not** need herdr, Claude Code, or
-Codex CLI.
+instance is plenty. The Hub needs no terminal backend or coding-agent CLI.
 
 ```bash
 git clone https://github.com/TMLlaboratory/cctag.git /opt/cctag

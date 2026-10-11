@@ -1,5 +1,9 @@
-import type { AgentStatus } from "./herdr/types.js";
+import type { AgentStatus, ScreenSnapshot, StatusEvidence } from "./backend/types.js";
 import type { TurnLifecycleEvent } from "./agents/driver.js";
+
+export function classifiedStatus(evidence: StatusEvidence): AgentStatus {
+  return evidence.kind === "classified" ? evidence.status : "unknown";
+}
 
 /**
  * Whether the agent has finished its turn, decided from the agent's own
@@ -36,16 +40,12 @@ export class SettleTracker {
    */
   private phase: "unknown" | "running" | "finished" = "unknown";
 
-  /**
-   * Declares a turn already in progress, for a pane adopted mid-turn.
+  /** Declares a turn already in progress when its start predates this offset.
    *
-   * Needed only there. A Slack-initiated turn gets a fresh tracker and its own
-   * `user` record supplies the start, but adopting a blocked terminal joins a
-   * turn whose start was written before the handoff's offset — so waiting for
-   * one would mean the completion that eventually arrives is ignored, and an
-   * adopted turn on a stuck-`working` pane would never finalize. Safe here
-   * because the prompt on screen is itself proof the turn is live, and the
-   * handoff's offset rules out reading a completion from an earlier turn.
+   * Used when adopting a blocked terminal, whose screen proves the turn is live,
+   * and when BackgroundWatcher baselines a transcript whose latest boundary is
+   * `started`. Slack-initiated turns do not call this: their own `user` record
+   * must arm a fresh tracker before a completion can settle it.
    */
   markTurnRunning(): void {
     this.phase = "running";
@@ -62,6 +62,10 @@ export class SettleTracker {
   /** Whether the transcript itself says the turn that was running has ended. */
   get settledByTranscript(): boolean {
     return this.phase === "finished";
+  }
+  /** Whether a start has been observed and no completion has followed it. */
+  get turnRunning(): boolean {
+    return this.phase === "running";
   }
 
   /**
@@ -81,4 +85,107 @@ export class SettleTracker {
     if (status === "working" && this.settledByTranscript) return "idle";
     return status;
   }
+}
+
+export interface TranscriptBoundaries {
+  lastStartAt: number | null;
+  lastEndAt: number | null;
+  lastBoundary: "started" | "ended" | null;
+}
+
+export const EMPTY_TRANSCRIPT_BOUNDARIES: TranscriptBoundaries = Object.freeze({
+  lastStartAt: null,
+  lastEndAt: null,
+  lastBoundary: null,
+});
+
+/** Most recent lifecycle event, plus the most recent timestamp for each side. */
+export function transcriptBoundaries(events: readonly TurnLifecycleEvent[]): TranscriptBoundaries {
+  let lastStartAt: number | null = null;
+  let lastEndAt: number | null = null;
+  let foundStart = false;
+  let foundEnd = false;
+  let lastBoundary: TranscriptBoundaries["lastBoundary"] = null;
+
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]!;
+    const started = event.kind === "started";
+    if (lastBoundary === null) lastBoundary = started ? "started" : "ended";
+    if (started && !foundStart) {
+      foundStart = true;
+      lastStartAt = event.timestamp;
+    } else if (!started && !foundEnd) {
+      foundEnd = true;
+      lastEndAt = event.timestamp;
+    }
+    if (foundStart && foundEnd) break;
+  }
+
+  if (lastBoundary === null) return EMPTY_TRANSCRIPT_BOUNDARIES;
+  return { lastStartAt, lastEndAt, lastBoundary };
+}
+
+export interface StatusScreenEvidence {
+  snapshot: ScreenSnapshot;
+  fingerprint: string | null;
+}
+
+export interface StatusResolution {
+  status: AgentStatus;
+  /** TurnEngine extends its deadline only when this is true. */
+  extendDeadline: boolean;
+  /** Complete screen retained so TurnEngine can reuse it if this resolution blocks. */
+  screen?: ScreenSnapshot;
+}
+
+export async function resolveStatus(input: {
+  evidence: StatusEvidence;
+  settle: SettleTracker;
+  boundaries: TranscriptBoundaries;
+  previousStatus: AgentStatus;
+  readScreen?: () => Promise<StatusScreenEvidence | null>;
+}): Promise<StatusResolution> {
+  if (input.evidence.kind === "classified") {
+    const status = input.settle.effectiveStatus(input.evidence.status);
+    return { status, extendDeadline: status === "blocked" };
+  }
+
+  if (input.settle.settledByTranscript) return { status: "idle", extendDeadline: false };
+
+  const { waitingSince, state } = input.evidence;
+  if (waitingSince !== null && (input.boundaries.lastEndAt === null || input.boundaries.lastEndAt < waitingSince)) {
+    // A null end timestamp cannot prove that the turn ended after waiting began;
+    // treat it like no timed end so an existing blocked state is never released.
+    return { status: "blocked", extendDeadline: true };
+  }
+
+  if (input.boundaries.lastBoundary === "started") {
+    let screen: StatusScreenEvidence | null;
+    try {
+      screen = (await input.readScreen?.()) ?? null;
+    } catch {
+      screen = null;
+    }
+    if (!screen?.snapshot.complete) {
+      // Do not extend: repeated unreadable screens must not keep a turn alive forever; no key is sent while unreadable.
+      return { status: input.previousStatus, extendDeadline: false };
+    }
+    const blocked = screen.fingerprint !== null;
+    return {
+      status: blocked ? "blocked" : "working",
+      extendDeadline: blocked,
+      screen: screen.snapshot,
+    };
+  }
+
+  if (input.boundaries.lastBoundary === "ended") {
+    // A bounded suffix may contain a completion from before this turn/watch's
+    // offset. Only lifecycle events observed by the tracker may settle it.
+    const status =
+      input.previousStatus === "blocked" || input.previousStatus === "working" ? input.previousStatus : "unknown";
+    return { status, extendDeadline: false };
+  }
+  if (state === "working") return { status: "working", extendDeadline: false };
+  if (state === "done") return { status: "idle", extendDeadline: false };
+  return { status: "unknown", extendDeadline: false };
 }

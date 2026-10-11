@@ -1,0 +1,45 @@
+{
+  "capture": {
+    "date": "2026-09-29",
+    "claudeVersion": "2.1.283",
+    "command": "orca terminal read --terminal <terminal-C> --screen --json",
+    "readMode": "default unbounded screen read",
+    "state": "ask-user-question-multiselect-cancelled",
+    "notes": "Raw live screen after selecting the visible 2. Cancel row without sending 1; Claude reports User declined to answer questions; complete terminal result preserved except the listed redactions.",
+    "redactions": {
+      "<plan>": "account-tier plan label",
+      "<scratch>": "task-specific scratch directory and status-line label",
+      "<redacted>": "private usage percentages and reset-time values",
+      "<terminal-C>": "registered-worktree terminal handle"
+    }
+  },
+  "terminal": {
+    "handle": "<terminal-C>",
+    "status": "running",
+    "tail": [
+      " ▐▛███▛█   Claude Code v2.1.283",
+      "▝▜██████▀  Opus 5.5 with medium effort · <plan>",
+      " ▝▝   ▝▝   <scratch> · /rc",
+      "❯ Use the AskUserQuestion tool to ask me exactly one multi-select question: Which colors belong in a harmless sample",
+      "  palette? Give three options: Amber, Cobalt, Jade. Set multiSelect to true. Do nothing else.",
+      "⏺ User declined to answer questions",
+      "  ⎿  · Which colors belong in a harmless sample palette? (Amber / Cobalt / Jade)",
+      "✻ Sautéed for 6s · done <redacted>",
+      "                                                                Update available! Run: brew upgrade claude-code@latest",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "❯",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "   Opus 5.5  │  effort:medium │  ctx ▌▒▒▒▒▒▒▒▒▒ <redacted>",
+      "   5h █▎▒▒▒▒▒▒▒▒ <redacted> ↻<redacted> │ 7d █▏▒▒▒▒▒▒▒▒ <redacted> ↻<redacted>",
+      "   <scratch>",
+      "  ⏵⏵ auto mode on (shift+tab to cycle)"
+    ],
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "21",
+    "latestCursor": "21",
+    "returnedLineCount": 16,
+    "source": "screen"
+  }
+}

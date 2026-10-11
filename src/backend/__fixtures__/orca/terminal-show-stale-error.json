@@ -1,0 +1,11 @@
+{
+  "id": "<capture-id>",
+  "ok": false,
+  "error": {
+    "code": "terminal_handle_stale",
+    "message": "terminal_handle_stale"
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

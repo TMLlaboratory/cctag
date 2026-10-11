@@ -2,11 +2,18 @@ import { randomInt } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CommandHandler } from "./commands.js";
-import type { HerdrClient } from "./herdr/client.js";
+import type { Terminals } from "./backend/index.js";
 import type { Notifier } from "./notifier.js";
 import type { Pairing, PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
+import {
+  ExpectationLost,
+  SubmitRefused,
+  WriteOutcomeUnknown,
+  type AgentInfo,
+} from "./backend/types.js";
 
+const NO_TERMINALS = {} as Terminals;
 const OWNER = "U_OWNER";
 
 const BUTTON_PAIRING: Pairing = {
@@ -19,6 +26,141 @@ const BUTTON_PAIRING: Pairing = {
   pairedBy: OWNER,
   pairedAt: "2026-01-01T00:00:00.000Z",
 };
+
+test("connect stores Herdr's raw terminal_id, not the pane or picker name", async () => {
+  const stored: Pairing[] = [];
+  const agent: AgentInfo = {
+    ref: { target: "pane-id", pid: null, processStartedAt: null },
+    backend: "herdr",
+    agent: "claude",
+    sessionId: null,
+    cwd: "/tmp/project",
+    evidence: { kind: "classified", status: "idle" },
+    terminalTitle: null,
+    terminalId: "herdr-terminal-id",
+    displayId: "picker-name",
+  };
+  const terminals = {
+    async get(target: string) {
+      assert.equal(target, "pane-id");
+      return agent;
+    },
+  } as unknown as Terminals;
+  const pairingStore = {
+    byPane() {
+      return undefined;
+    },
+    add(pairing: Pairing) {
+      stored.push(pairing);
+    },
+  } as unknown as PairingStore;
+  const replies: string[] = [];
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler(terminals, pairingStore, {} as TurnEngine, notifier, OWNER);
+
+  await handler.handlePairSelect({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    terminalId: "pane-id",
+  });
+
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].paneId, "pane-id");
+  assert.equal(stored[0].terminalId, "herdr-terminal-id");
+});
+
+test("connect stores Orca's namespaced target and backend without its PID", async () => {
+  const stored: Pairing[] = [];
+  const target = "orca:tab-7:leaf-2";
+  const agent: AgentInfo = {
+    ref: { target, pid: 420, processStartedAt: 123 },
+    backend: "orca",
+    agent: "codex",
+    sessionId: null,
+    cwd: "/tmp/orca-project",
+    evidence: { kind: "hint", state: null, waitingSince: null },
+    terminalTitle: null,
+    terminalId: "orca-tab-7",
+    displayId: target,
+  };
+  const terminals = {
+    async get(received: string) {
+      assert.equal(received, target);
+      return agent;
+    },
+  } as unknown as Terminals;
+  const pairingStore = {
+    byPane() {
+      return undefined;
+    },
+    add(pairing: Pairing) {
+      stored.push(pairing);
+    },
+  } as unknown as PairingStore;
+  const notifier = {
+    async postReply() {},
+  } as unknown as Notifier;
+  const handler = new CommandHandler(terminals, pairingStore, {} as TurnEngine, notifier, OWNER);
+
+  await handler.handlePairSelect({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    terminalId: target,
+  });
+
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].paneId, target);
+  assert.equal(stored[0].backend, "orca");
+  assert.equal("pid" in stored[0], false);
+});
+
+test("connect's empty picker lists enabled backends and Orca diagnostics", async () => {
+  const result = {
+    agents: [],
+    failures: [{ backend: "herdr" as const, reason: "CLI unavailable" }],
+    complete: false,
+    notices: [
+      "Orca 上の Codex は未対応です",
+      "orca:tab-7:leaf-2: セッションを特定できないため接続できません",
+    ],
+  };
+  const terminals = { async list() { return result; } } as unknown as Terminals;
+  let postedBlocks: unknown[] = [];
+  const notifier = {
+    async postMessage(_channel: string, _threadTs: string, _text: string, blocks: unknown[]) {
+      postedBlocks = blocks;
+      return { async update() {} };
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler(
+    terminals,
+    {} as PairingStore,
+    {} as TurnEngine,
+    notifier,
+    OWNER,
+    ["herdr", "orca"],
+  );
+
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "connect",
+    ts: "1.2",
+  });
+
+  const text = JSON.stringify(postedBlocks);
+  assert.match(text, /現在 herdr \/ orca 上/);
+  assert.match(text, /CLI unavailable/);
+  assert.match(text, /Orca 上の Codex は未対応です/);
+  assert.match(text, /セッションを特定できないため接続できません/);
+});
 
 /** Posts a simulated permission button and reads back its prompt ID as Slack does. */
 async function postedButtonPromptId(): Promise<number> {
@@ -94,7 +236,7 @@ function handlerRecording(
   const notifier = { async postReply() {}, async postMessage() {
     return { async update() {} };
   } } as unknown as Notifier;
-  return new CommandHandler({} as HerdrClient, pairingStore, engine, notifier, OWNER);
+  return new CommandHandler(NO_TERMINALS, pairingStore, engine, notifier, OWNER);
 }
 
 test("somebody other than the owner is named", async () => {
@@ -245,7 +387,7 @@ function logHandler(historyLines: string[]) {
       return historyLines;
     },
   } as unknown as Notifier;
-  const handler = new CommandHandler({} as HerdrClient, pairingStore, engine, notifier, OWNER);
+  const handler = new CommandHandler(NO_TERMINALS, pairingStore, engine, notifier, OWNER);
   return { handler, startTurnCalls, replies };
 }
 
@@ -395,4 +537,522 @@ test("only the Codex variant says mode and plan are unavailable", async () => {
   assert.ok(codex.includes("Codex CLI では利用できません"));
   assert.ok(!claude.includes("Codex CLI では利用できません"));
   assert.ok(!unpaired.includes("Codex CLI では利用できません"));
+});
+
+test("ExpectationLost from Slack answers tells the user to inspect the terminal", async () => {
+  const replies: string[] = [];
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  const pairingStore = { get: () => BUTTON_PAIRING } as unknown as PairingStore;
+  const makeHandler = (engine: Partial<TurnEngine>): CommandHandler =>
+    new CommandHandler(NO_TERMINALS, pairingStore, engine as TurnEngine, notifier, OWNER);
+  const lost = new ExpectationLost("prompt changed");
+  const message = "画面が変わったため、回答を途中で止めました。端末で確かめてください";
+
+  await makeHandler({
+    async answerQuestionButton() {
+      throw lost;
+    },
+  }).handleAskUserQuestionButton({
+    channel: "C1",
+    threadTs: "1.1",
+    terminalId: BUTTON_PAIRING.paneId,
+    promptId: 1,
+    optionIndex: 0,
+  });
+  assert.deepEqual(replies.splice(0), [message]);
+
+  await makeHandler({
+    async answerQuestionMultiSelect() {
+      throw lost;
+    },
+  }).handleAskUserQuestionMultiSelect({
+    channel: "C1",
+    threadTs: "1.1",
+    terminalId: BUTTON_PAIRING.paneId,
+    promptId: 1,
+    optionIndices: [0],
+  });
+  assert.deepEqual(replies.splice(0), [message]);
+  const reviewMessage = "確認画面を確かめられなかったので送信していません。端末で確かめてください";
+  await makeHandler({
+    async answerQuestionMultiSelect() {
+      throw new ExpectationLost(reviewMessage, reviewMessage);
+    },
+  }).handleAskUserQuestionMultiSelect({
+    channel: "C1",
+    threadTs: "1.1",
+    terminalId: BUTTON_PAIRING.paneId,
+    promptId: 1,
+    optionIndices: [0],
+  });
+  assert.deepEqual(replies.splice(0), [reviewMessage]);
+
+  await makeHandler({
+    async answerPermissionButton() {
+      throw lost;
+    },
+  }).handlePermissionButton({
+    channel: "C1",
+    threadTs: "1.1",
+    terminalId: BUTTON_PAIRING.paneId,
+    promptId: 1,
+    num: "1",
+  });
+  assert.deepEqual(replies.splice(0), [message]);
+
+  await makeHandler({
+    async answerQuestionFreeText() {
+      throw lost;
+    },
+  }).handleFreeTextMessage({ channel: "C1", threadTs: "1.1", text: "answer" });
+  assert.deepEqual(replies.splice(0), [message]);
+
+  await makeHandler({
+    async answerQuestionFreeText() {
+      return { ok: false, reason: "not-pending" };
+    },
+    async answerPlanFeedback() {
+      throw lost;
+    },
+  }).handleFreeTextMessage({ channel: "C1", threadTs: "1.1", text: "feedback" });
+  assert.deepEqual(replies.splice(0), [message]);
+
+  await assert.rejects(
+    makeHandler({
+      async answerPermissionButton() {
+        throw new Error("unexpected");
+      },
+    }).handlePermissionButton({
+      channel: "C1",
+      threadTs: "1.1",
+      terminalId: BUTTON_PAIRING.paneId,
+      promptId: 1,
+      num: "1",
+    }),
+    /unexpected/,
+  );
+});
+
+test("an Orca message-path miss keeps the pairing for watcher grace", async () => {
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: "orca:tab-7:leaf-2" };
+  let existsCalls = 0;
+  let removed = 0;
+  const replies: string[] = [];
+  const terminals = {
+    async exists(target: string) {
+      assert.equal(target, pairing.paneId);
+      existsCalls++;
+      return false;
+    },
+  } as unknown as Terminals;
+  const engine = {
+    isBusy: () => false,
+    async startTurn() {
+      throw new Error("agent-not-found");
+    },
+  } as unknown as TurnEngine;
+  const pairingStore = {
+    get: () => pairing,
+    remove(key: string) {
+      assert.equal(key, pairing.key);
+      removed++;
+      return true;
+    },
+  } as unknown as PairingStore;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+
+  await new CommandHandler(terminals, pairingStore, engine, notifier, OWNER).handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "do the task",
+    ts: "1.2",
+  });
+
+  assert.equal(existsCalls, 1);
+  assert.equal(removed, 0, "the watcher, not one command-path miss, owns Orca unpairing");
+  assert.equal(replies.length, 1);
+  assert.match(replies[0]!, /ターミナル.*現在.*到達できません/);
+  assert.match(replies[0]!, /復帰しない場合/);
+  assert.match(replies[0]!, /自動.*解除/);
+  assert.doesNotMatch(replies[0]!, /ペアリングを解除しました/);
+});
+
+test("Herdr command-path confirmed absence still unpairs despite a stale Orca tag", async () => {
+  const pairing: Pairing = { ...BUTTON_PAIRING, backend: "orca" };
+  let removed = 0;
+  const replies: string[] = [];
+  const terminals = { async exists() { return false; } } as unknown as Terminals;
+  const engine = {
+    isBusy: () => false,
+    async startTurn() {
+      throw new Error("agent-not-found");
+    },
+  } as unknown as TurnEngine;
+  const pairingStore = {
+    get: () => pairing,
+    remove(key: string) {
+      assert.equal(key, pairing.key);
+      removed++;
+      return true;
+    },
+  } as unknown as PairingStore;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+
+  await new CommandHandler(terminals, pairingStore, engine, notifier, OWNER).handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "do the task",
+    ts: "1.2",
+  });
+
+  assert.equal(removed, 1);
+  assert.deepEqual(replies, ["⚠️ インスタンスが見つかりません。ペアリングを解除しました。"]);
+});
+
+function ompAgentForCommands(target = "orca:tab-7:leaf-2"): AgentInfo {
+  const sessionId = "9a51b84e-610c-4d9e-bb20-28d7c850c552";
+  const transcriptIdentity = { path: "/tmp/omp-session.jsonl", device: "1", inode: "2" };
+  return {
+    ref: { target, pid: 42, processStartedAt: 1, agentKind: "omp", sessionId, transcriptIdentity },
+    backend: "orca",
+    agent: "omp",
+    sessionId,
+    transcriptIdentity,
+    cwd: "/tmp/project",
+    evidence: { kind: "hint", state: "working", waitingSince: null },
+    terminalTitle: null,
+    terminalId: "orca-tab-7",
+    displayId: target,
+  };
+}
+
+test("blocked OMP thread replies are terminal-only for mentions and free text", async () => {
+  const replies: string[] = [];
+  let writes = 0;
+  const engine = {
+    isBusy: () => true,
+    isOmpWaiting: () => true,
+    async startTurn() {
+      writes++;
+    },
+    async answerQuestionFreeText() {
+      writes++;
+      return { ok: true };
+    },
+    async answerPlanFeedback() {
+      writes++;
+      return { ok: true };
+    },
+  } as unknown as TurnEngine;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler(
+    NO_TERMINALS,
+    { get: () => BUTTON_PAIRING } as unknown as PairingStore,
+    engine,
+    notifier,
+    OWNER,
+  );
+
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "answer from Slack",
+    ts: "1.2",
+  });
+  await handler.handleMention({
+    channel: "C1",
+    threadTs: "1.1",
+    userId: OWNER,
+    text: "log",
+    ts: "1.3",
+  });
+  await handler.handleFreeTextMessage({ channel: "C1", threadTs: "1.1", text: "answer from Slack" });
+
+  assert.deepEqual(replies, [
+    "omp の質問・確認には、端末で答えてください",
+    "omp の質問・確認には、端末で答えてください",
+    "omp の質問・確認には、端末で答えてください",
+  ]);
+  assert.equal(writes, 0);
+});
+
+test("OMP mode plan and model commands use the exact unsupported reply without terminal writes", async () => {
+  const target = "orca:tab-7:leaf-2";
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "orca" };
+  const agent = ompAgentForCommands(target);
+  const replies: string[] = [];
+  let reads = 0;
+  let writes = 0;
+  let releases = 0;
+  const terminals = {
+    async get() {
+      return agent;
+    },
+    async read() {
+      reads++;
+      return { text: "", draft: null, complete: true };
+    },
+    async submit() {
+      writes++;
+      return { status: "accepted", draftStashed: false };
+    },
+    openComposer() {
+      writes++;
+      return { async backTab() {} };
+    },
+  } as unknown as Terminals;
+  const engine = {
+    isBusy: () => false,
+    isOmpWaiting: () => false,
+    acquire() {
+      return { cancelled: false, release() { releases++; }, signal: new AbortController().signal };
+    },
+  } as unknown as TurnEngine;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler(
+    terminals,
+    { get: () => pairing } as unknown as PairingStore,
+    engine,
+    notifier,
+    OWNER,
+  );
+  for (const text of ["mode plan", "plan", "model gpt-test"]) {
+    await handler.handleMention({ channel: "C1", threadTs: "1.1", userId: OWNER, text, ts: "1.2" });
+  }
+
+  assert.deepEqual(replies, ["omp では使えません", "omp では使えません", "omp では使えません"]);
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+  assert.equal(releases, 1, "the model lease is released after its read-only OMP refusal");
+});
+
+test("/model reports when Claude stashed the composer draft", async () => {
+  const target = "orca:tab-7:leaf-2";
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "orca" };
+  const agent: AgentInfo = {
+    ...ompAgentForCommands(target),
+    agent: "claude",
+    sessionId: null,
+    ref: { target, pid: 42, processStartedAt: 1 },
+    evidence: { kind: "classified", status: "idle" },
+  };
+  const replies: string[] = [];
+  const submitted: string[] = [];
+  const terminals = {
+    async get() {
+      return agent;
+    },
+    async read() {
+      return { text: "", draft: null, complete: true };
+    },
+    async submit(_ref: unknown, text: string) {
+      submitted.push(text);
+      return { status: "accepted", draftStashed: true };
+    },
+  } as unknown as Terminals;
+  const engine = {
+    isBusy: () => false,
+    acquire() {
+      return { cancelled: false, release() {}, signal: new AbortController().signal };
+    },
+  } as unknown as TurnEngine;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+
+  await new CommandHandler(
+    terminals,
+    { get: () => pairing } as unknown as PairingStore,
+    engine,
+    notifier,
+    OWNER,
+  ).handleMention({ channel: "C1", threadTs: "1.1", userId: OWNER, text: "model sonnet", ts: "1.2" });
+
+  assert.deepEqual(submitted, ["/model sonnet"]);
+  assert.equal(replies.length, 1);
+  assert.ok(replies[0].endsWith(
+    "\n📥 orca の入力欄の書きかけを一時退避して送りました。Claude Code 2.1.287 では送信の後に入力欄へ戻ります。戻っていなければ、入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。",
+  ));
+});
+test("/model posts state-aware submit failures with the composer state", async () => {
+  const target = "orca:tab-7:leaf-2";
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "orca" };
+  const agent: AgentInfo = {
+    ...ompAgentForCommands(target),
+    agent: "claude",
+    sessionId: null,
+    ref: { target, pid: 42, processStartedAt: 1 },
+    evidence: { kind: "classified", status: "idle" },
+  };
+  const stashed = { probe: null, stash: "stashed", submitUncertain: false } as const;
+  const scenarios = [
+    {
+      name: "refusal after a confirmed stash",
+      error: new SubmitRefused("stash-unverified", "internal refusal", stashed),
+      expected:
+        "⚠️ orca の入力欄の書きかけを Ctrl+S で退避しようとしましたが、送れる状態か確かめられなかったため、送信していません。 送信の前に、入力欄の書きかけを Ctrl+S で退避しました。入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。文字があるときに押すと、退避した書きかけは消えます。 端末で確かめてください。",
+    },
+    {
+      name: "unknown final write after a confirmed stash",
+      error: new WriteOutcomeUnknown(new Error("transport failed"), { ...stashed, submitUncertain: true }),
+      expected:
+        "送信できたか確認できません。端末を確かめてください 送信の前に、入力欄の書きかけを Ctrl+S で退避しました。送信されていれば、Claude Code が入力欄に戻していることがあります（2.1.287）。まず端末で入力欄を見て、書きかけが戻っておらず入力欄が空（打った文字も灰色の提案も無い）のときだけ Ctrl+S を押してください。",
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const replies: string[] = [];
+    let releases = 0;
+    const terminals = {
+      async get() {
+        return agent;
+      },
+      async submit() {
+        throw scenario.error;
+      },
+    } as unknown as Terminals;
+    const engine = {
+      acquire() {
+        return { cancelled: false, release() { releases++; }, signal: new AbortController().signal };
+      },
+    } as unknown as TurnEngine;
+    const notifier = {
+      async postReply(_channel: string, _threadTs: string, text: string) {
+        replies.push(text);
+      },
+    } as unknown as Notifier;
+
+    await new CommandHandler(
+      terminals,
+      { get: () => pairing } as unknown as PairingStore,
+      engine,
+      notifier,
+      OWNER,
+    ).handleMention({
+      channel: "C1",
+      threadTs: "1.1",
+      userId: OWNER,
+      text: "model sonnet",
+      ts: "1.2",
+    });
+
+    assert.deepEqual(replies, [scenario.expected], scenario.name);
+    assert.equal(releases, 1, scenario.name);
+  }
+});
+
+
+test("OMP and stale Claude buttons refuse before invoking any answer channel", async () => {
+  const target = "orca:tab-7:leaf-2";
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "orca" };
+  const agent = ompAgentForCommands(target);
+  const replies: string[] = [];
+  let answers = 0;
+  let reads = 0;
+  const terminals = {
+    async get() {
+      return agent;
+    },
+    async read() {
+      reads++;
+      return { text: "", draft: null, complete: true };
+    },
+  } as unknown as Terminals;
+  const engine = {
+    isOmpWaiting: () => false,
+    async answerQuestionButton() {
+      answers++;
+      return { ok: true };
+    },
+    async answerQuestionMultiSelect() {
+      answers++;
+      return { ok: true };
+    },
+    async answerPermissionButton() {
+      answers++;
+      return { ok: true };
+    },
+  } as unknown as TurnEngine;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  const handler = new CommandHandler(
+    terminals,
+    { get: () => pairing } as unknown as PairingStore,
+    engine,
+    notifier,
+    OWNER,
+  );
+
+  await handler.handleAskUserQuestionButton({
+    channel: "C1", threadTs: "1.1", terminalId: target, promptId: 1, optionIndex: 0,
+  });
+  await handler.handleAskUserQuestionMultiSelect({
+    channel: "C1", threadTs: "1.1", terminalId: target, promptId: 1, optionIndices: null,
+  });
+  await handler.handlePermissionButton({
+    channel: "C1", threadTs: "1.1", terminalId: target, promptId: 1, num: "1",
+  });
+
+  assert.deepEqual(replies, ["もう回答できません", "もう回答できません", "もう回答できません"]);
+  assert.equal(answers, 0);
+  assert.equal(reads, 0);
+});
+
+test("disconnect cancels an OMP lease without sending terminal input", async () => {
+  let cancelled = 0;
+  let removed = 0;
+  const replies: string[] = [];
+  const engine = {
+    cancelPane() {
+      cancelled++;
+    },
+  } as unknown as TurnEngine;
+  const ompPairing: Pairing = { ...BUTTON_PAIRING, paneId: "orca:tab-7:leaf-2", backend: "orca" };
+  const pairingStore = {
+    get: () => ompPairing,
+    remove() {
+      removed++;
+      return true;
+    },
+  } as unknown as PairingStore;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) {
+      replies.push(text);
+    },
+  } as unknown as Notifier;
+  await new CommandHandler(NO_TERMINALS, pairingStore, engine, notifier, OWNER).handleMention({
+    channel: "C1", threadTs: "1.1", userId: OWNER, text: "disconnect", ts: "1.2",
+  });
+
+  assert.equal(cancelled, 1);
+  assert.equal(removed, 1);
+  assert.deepEqual(replies, ["🔌 接続を解除しました。"]);
 });

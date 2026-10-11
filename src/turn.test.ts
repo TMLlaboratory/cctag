@@ -1,15 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TurnEngine } from "./turn.js";
-import type { HerdrClient } from "./herdr/client.js";
-import type { MessageHandle, Notifier } from "./notifier.js";
+import { HerdrBackend } from "./backend/herdr.js";
+import type { AnswerChannel, Terminals } from "./backend/index.js";
+import {
+  ExpectationLost,
+  SubmitRefused,
+  UNSENDABLE_TEXT_MESSAGE,
+  WriteOutcomeUnknown,
+  type AgentInfo,
+  type AgentStatus,
+  type BackendName,
+  type ScreenSnapshot,
+} from "./backend/types.js";
 import type { Pairing } from "./pairing.js";
-import type { AgentInfo } from "./herdr/types.js";
+import type { MessageHandle, Notifier } from "./notifier.js";
 import { claudeDriver } from "./agents/claude/driver.js";
+import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
+import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const PANE = "wT:p1";
 
@@ -27,16 +39,37 @@ function permissionPane(command: string, cursorOn = 1): string {
 
 const PERMISSION_PANE = permissionPane("rm -rf build/");
 
-function fakeAgent(agentStatus: AgentInfo["agentStatus"]): AgentInfo {
+function fakeAgent(status: AgentStatus, backend: BackendName = "herdr"): AgentInfo {
   return {
+    ref: { target: PANE, pid: null, processStartedAt: null },
+    backend,
     agent: "claude",
     sessionId: "s1",
-    agentStatus,
     cwd: "/tmp/nonexistent-cctag-test",
+    evidence: { kind: "classified", status },
+    terminalId: "herdr-terminal-id",
     terminalTitle: null,
-    paneId: PANE,
-    terminalId: "term_test",
-    workspaceId: "wT",
+    displayId: PANE,
+  };
+}
+
+function capturedOmpScreen(filename: string): ScreenSnapshot {
+  const capture = JSON.parse(
+    readFileSync(new URL(`./agents/omp/__fixtures__/${filename}`, import.meta.url), "utf8"),
+  ) as { terminal: Record<string, unknown> };
+  const terminal = capture.terminal;
+  const tail = terminal.tail;
+  const validTail = Array.isArray(tail) && tail.every((row) => typeof row === "string");
+  const rows = Array.isArray(tail) ? tail.filter((row): row is string => typeof row === "string") : [];
+  return {
+    text: rows.join("\n"),
+    draft: typeof terminal.draft === "string" ? terminal.draft : null,
+    complete:
+      validTail &&
+      terminal.source === "screen" &&
+      terminal.status === "running" &&
+      terminal.limited === false &&
+      terminal.truncated === false,
   };
 }
 
@@ -53,10 +86,20 @@ function fakePairing(): Pairing {
 }
 
 /** Records posted messages and button blocks so tests use the issued prompt ID. */
-function fakeNotifier(): { notifier: Notifier; posts: string[]; postedBlocks: unknown[][] } {
+function fakeNotifier(): {
+  notifier: Notifier;
+  posts: string[];
+  postedBlocks: unknown[][];
+  updates: Array<{ text: string; blocks: unknown[] }>;
+} {
   const posts: string[] = [];
   const postedBlocks: unknown[][] = [];
-  const handle: MessageHandle = { async update() {} };
+  const updates: Array<{ text: string; blocks: unknown[] }> = [];
+  const handle: MessageHandle = {
+    async update(text, blocks) {
+      updates.push({ text, blocks: blocks ?? [] });
+    },
+  };
   const notifier: Notifier = {
     async postReply(_c, _t, text) {
       posts.push(text);
@@ -67,7 +110,7 @@ function fakeNotifier(): { notifier: Notifier; posts: string[]; postedBlocks: un
       return handle;
     },
   };
-  return { notifier, posts, postedBlocks };
+  return { notifier, posts, postedBlocks, updates };
 }
 
 function promptIdInButtonBlock(value: unknown): number | undefined {
@@ -111,22 +154,79 @@ function promptIdFromPostedBlocks(postedBlocks: unknown[][]): number {
   throw new Error("no prompt button was posted");
 }
 
-function fakeHerdr(
-  status: () => AgentInfo["agentStatus"],
-  pane: () => string = () => PERMISSION_PANE,
-): HerdrClient {
+type FakeBackend = Terminals;
+
+function fakeAnswerChannel(overrides: Partial<AnswerChannel> = {}): AnswerChannel {
   return {
-    async agentGet() {
-      return fakeAgent(status());
+    async digit(n, terminal) {
+      await overrides.digit?.(n, terminal);
     },
-    async paneRead() {
-      return pane();
+    async text(value) {
+      await overrides.text?.(value);
     },
-    async agentSend() {},
-  } as unknown as HerdrClient;
+    async move(direction, count) {
+      await overrides.move?.(direction, count);
+    },
+    async confirm(expectedLabel, terminal) {
+      await overrides.confirm?.(expectedLabel, terminal);
+    },
+    complete() {
+      overrides.complete?.();
+    },
+  };
 }
 
-function engineFor(herdr: HerdrClient, notifier: Notifier, turnTimeoutMs: number): TurnEngine {
+function fakeBackend(
+  status: () => AgentStatus,
+  pane: () => string = () => PERMISSION_PANE,
+  overrides: Partial<FakeBackend> = {},
+  backendName: BackendName = "herdr",
+): FakeBackend {
+  return {
+    async list() {
+      return {
+        agents: [],
+        failures: [{ backend: "herdr", reason: "not implemented by test fake" }],
+        complete: false,
+        notices: [],
+      };
+    },
+    async get() {
+      return fakeAgent(status(), backendName);
+    },
+    async exists() {
+      return true;
+    },
+    async read() {
+      return { text: pane(), draft: null, complete: true };
+    },
+    async submit() {
+      return { status: "accepted", draftStashed: false };
+    },
+    openAnswer() {
+      return fakeAnswerChannel();
+    },
+    openModelAnswer() {
+      return {
+        ...fakeAnswerChannel(),
+        async escape() {},
+      };
+    },
+    openBlind() {
+      return { async answer() {} };
+    },
+    openComposer() {
+      return { async backTab() {} };
+    },
+    ...overrides,
+  };
+}
+
+function fakeHerdr(status: () => AgentStatus, pane: () => string = () => PERMISSION_PANE): FakeBackend {
+  return fakeBackend(status, pane);
+}
+
+function engineFor(herdr: FakeBackend, notifier: Notifier, turnTimeoutMs: number): TurnEngine {
   return new TurnEngine(
     herdr,
     notifier,
@@ -135,14 +235,16 @@ function engineFor(herdr: HerdrClient, notifier: Notifier, turnTimeoutMs: number
   );
 }
 
-function adopt(engine: TurnEngine, pairing: Pairing): Promise<boolean> {
+function adopt(engine: TurnEngine, pairing: Pairing, backend: BackendName = "herdr"): Promise<boolean> {
   return engine.adoptBlockedTerminal(pairing, {
+    backend,
     driver: claudeDriver,
     sessionId: "s1",
     transcriptPath: "",
     offset: 0,
     collected: [],
     paneId: PANE,
+    ref: fakeAgent("blocked", backend).ref,
     cwd: "/tmp/nonexistent-cctag-test",
     outboxBaseline: {},
     writes: new WrittenFileTracker(),
@@ -152,6 +254,241 @@ function adopt(engine: TurnEngine, pairing: Pairing): Promise<boolean> {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// Synthetic Claude transcript records for lifecycle tests; no CLI is invoked.
+function completedClaudeTurn(startedAt: string, text: string): Array<Record<string, unknown>> {
+  const start = Date.parse(startedAt);
+  return [
+    {
+      type: "user",
+      timestamp: new Date(start).toISOString(),
+      message: { role: "user", content: "continue" },
+    },
+    {
+      type: "assistant",
+      timestamp: new Date(start + 1_000).toISOString(),
+      message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+    },
+    {
+      type: "system",
+      subtype: "turn_duration",
+      timestamp: new Date(start + 2_000).toISOString(),
+      durationMs: 1_000,
+    },
+  ];
+}
+
+function writeClaudeTurn(path: string, startedAt: string, text: string, append = false): void {
+  const data = `${completedClaudeTurn(startedAt, text).map((record) => JSON.stringify(record)).join("\n")}\n`;
+  if (append) appendFileSync(path, data);
+  else writeFileSync(path, data);
+}
+
+test("a stashed Orca draft is reported in the thread after submission", async () => {
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  const { notifier, posts } = fakeNotifier();
+  const terminals = fakeBackend(
+    () => "working",
+    () => "",
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("working", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+        };
+      },
+      async submit() {
+        return { status: "accepted", draftStashed: true };
+      },
+    },
+    "orca",
+  );
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", "send this");
+    assert.ok(posts.includes(
+      "📥 orca の入力欄の書きかけを一時退避して送りました。Claude Code 2.1.287 では送信の後に入力欄へ戻ります。戻っていなければ、入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。",
+    ));
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("turn refusal is reported once, in its status message, with probe and stash uncertainty", async () => {
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  const { notifier, posts, updates } = fakeNotifier();
+  const composer = { probe: "x", stash: "uncertain", submitUncertain: false } as const;
+  const terminals = fakeBackend(
+    () => "working",
+    () => "",
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("working", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+        };
+      },
+      async submit() {
+        throw new SubmitRefused("stash-unverified", "internal refusal", composer);
+      },
+    },
+    "orca",
+  );
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", "send this");
+    assert.deepEqual(posts, ["⚙️ 実行中…"]);
+    assert.equal(engine.isBusy(target), false);
+    assert.deepEqual(updates.map(({ text }) => text), [
+      "⚠️ orca の入力欄の書きかけを Ctrl+S で退避しようとしましたが、送れる状態か確かめられなかったため、送信していません。 確かめのために打った `x` が入力欄に1文字残っているかもしれません。 書きかけが Ctrl+S で退避されたかどうかを確かめられませんでした。端末で入力欄を見てください。入力欄に文字があるときに Ctrl+S を押すと、その文字が退避され、前に退避したものは消えます。",
+    ]);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("an accepted Orca turn ignores a historical completion until its own transcript boundary", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-orca-stale-end-"));
+  const sessionId = "session-stale-end";
+  const transcriptPath = claudeDriver.locateTranscript(cwd, sessionId);
+  assert.ok(transcriptPath);
+  const transcriptDir = dirname(transcriptPath);
+  mkdirSync(transcriptDir, { recursive: true });
+  writeClaudeTurn(transcriptPath, "2026-09-28T10:00:00.000Z", "old transcript output");
+
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  const { notifier, posts, updates } = fakeNotifier();
+  let submitted = false;
+  let pollCount = 0;
+  let seeFirstPoll!: () => void;
+  const firstPoll = new Promise<void>((resolve) => (seeFirstPoll = resolve));
+  const terminals = fakeBackend(
+    () => "working",
+    () => "",
+    {
+      async get(receivedTarget) {
+        if (submitted && pollCount++ === 0) seeFirstPoll();
+        return {
+          ...fakeAgent(submitted ? "working" : "idle", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+          sessionId,
+          cwd,
+          evidence: { kind: "hint", state: "done", waitingSince: null },
+        };
+      },
+      async submit() {
+        submitted = true;
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const engine = new TurnEngine(
+    terminals,
+    notifier,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 100, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [pairing] },
+  );
+
+  try {
+    await engine.startTurn(pairing, "U1", "new prompt");
+    await firstPoll;
+    await sleep(20); // Let that poll resolve, but stay before the next interval.
+
+    assert.ok(updates.some(({ text }) => text.includes("orca は入力を受け付けました")));
+    assert.equal(engine.isBusy(target), true, "a historical completion and done hint must not release a fresh turn");
+    assert.equal(
+      updates.some(({ text }) => text.startsWith("✅")),
+      false,
+      "no completed status is posted before this turn writes a boundary",
+    );
+    assert.equal(posts.some((post) => post.includes("old transcript output")), false);
+
+    writeClaudeTurn(transcriptPath, "2026-09-28T10:00:05.000Z", "new turn response", true);
+    for (let i = 0; i < 50; i++) {
+      if (!engine.isBusy(target) && posts.join("\n").includes("new turn response")) break;
+      await sleep(20);
+    }
+
+    assert.equal(engine.isBusy(target), false, "the newly observed completion should release the turn");
+    assert.ok(posts.some((post) => post.includes("new turn response")), JSON.stringify(posts));
+  } finally {
+    engine.abortAll();
+    rmSync(transcriptDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a new session does not inherit a blocked status on an incomplete screen", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-session-reset-"));
+  let transcriptDir = "";
+  let engine: TurnEngine | undefined;
+  let reads = 0;
+  const { notifier } = fakeNotifier();
+  try {
+    const transcriptPath = claudeDriver.locateTranscript(cwd, "session-new");
+    assert.ok(transcriptPath);
+    transcriptDir = dirname(transcriptPath);
+    mkdirSync(transcriptDir, { recursive: true });
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "user",
+        timestamp: "2026-09-27T14:48:48.520Z",
+        message: { role: "user", content: "new session" },
+      })}\n`,
+    );
+
+    const terminals = fakeBackend(() => "working", () => "", {
+      async get(): Promise<AgentInfo> {
+        return {
+          ...fakeAgent("working"),
+          backend: "orca",
+          sessionId: "session-new",
+          cwd,
+          evidence: { kind: "hint", state: "working", waitingSince: null },
+        };
+      },
+      async read() {
+        reads++;
+        return { text: "partial screen", draft: null, complete: false };
+      },
+    });
+    engine = new TurnEngine(
+      terminals,
+      notifier,
+      { turnTimeoutMs: 600_000, pollIntervalMs: 200, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+      { list: () => [fakePairing()] },
+    );
+
+    const adopted = await engine.adoptBlockedTerminal(fakePairing(), {
+      backend: "herdr",
+      driver: claudeDriver,
+      sessionId: "session-old",
+      transcriptPath: "",
+      offset: 0,
+      collected: [],
+      paneId: PANE,
+      ref: fakeAgent("blocked").ref,
+      cwd,
+      outboxBaseline: {},
+      writes: new WrittenFileTracker(),
+    });
+    assert.equal(adopted, true);
+    for (let i = 0; i < 30 && reads === 0; i++) await sleep(20);
+    await sleep(20); // let a stale blocked status enter its prompt-read path
+    assert.equal(reads, 1, "the new session must not reuse the old session's blocked status");
+  } finally {
+    engine?.abortAll();
+    if (transcriptDir) rmSync(transcriptDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("an unanswered prompt is posted once and does not time out, however long it sits", async () => {
   // The reported failure: leaving a permission request alone produced repeated
@@ -270,24 +607,20 @@ test("moving the cursor within the same prompt is not mistaken for a new one", a
 });
 
 test("a transient herdr failure does not end a live turn", async () => {
-  // Codex review, Critical 5. agentGet() returns null only for herdr's own "no
+  // Codex review, Critical 5. Herdr's `Terminals.get()` returns null only for its own "no
   // such pane"; a timeout or spawn failure throws. Treating the two alike killed
   // turns whose agent was still working, and released the pane to a watcher that
   // rebaselines — losing the rest of the output. Uses a `working` pane so the
   // loop keeps its fast interval and the failures actually get reached.
   const { notifier, posts } = fakeNotifier();
   let calls = 0;
-  const herdr = {
-    async agentGet() {
+  const herdr = fakeBackend(() => "working", () => PERMISSION_PANE, {
+    async get() {
       calls += 1;
       if (calls === 2 || calls === 3) throw new Error("herdr command timed out");
       return fakeAgent("working");
     },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
-    async agentSend() {},
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   try {
@@ -308,15 +641,11 @@ test("a transient herdr failure does not end a live turn", async () => {
 
 test("herdr failing persistently does eventually end the turn, with its own message", async () => {
   const { notifier, posts } = fakeNotifier();
-  const herdr = {
-    async agentGet(): Promise<AgentInfo | null> {
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
+    async get(): Promise<AgentInfo | null> {
       throw new Error("herdr command timed out");
     },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
-    async agentSend() {},
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   await adopt(engine, fakePairing());
@@ -359,20 +688,18 @@ test("a prompt answered twice drives the TUI once", async () => {
   // whose second copy can land on whatever menu appeared next and confirm it.
   const { notifier, postedBlocks } = fakeNotifier();
   const sent: string[] = [];
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
-    },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
     // Slow enough that the second click arrives while the first is in
     // flight — the real race, rather than a simulated one.
-    async agentSend(_paneId: string, text: string) {
-      await sleep(40);
-      sent.push(text);
+    openAnswer() {
+      return fakeAnswerChannel({
+        async digit(n) {
+          await sleep(40);
+          sent.push(String(n));
+        },
+      });
     },
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   try {
@@ -398,18 +725,16 @@ test("a failed answer is not left claimed, so it can be retried", async () => {
   // pending rather than wedging the turn with nothing able to answer it.
   const { notifier, postedBlocks } = fakeNotifier();
   let attempts = 0;
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
+    openAnswer() {
+      return fakeAnswerChannel({
+        async digit() {
+          attempts += 1;
+          if (attempts === 1) throw new Error("send-text failed");
+        },
+      });
     },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
-    async agentSend() {
-      attempts += 1;
-      if (attempts === 1) throw new Error("send-text failed");
-    },
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   try {
@@ -426,6 +751,607 @@ test("a failed answer is not left claimed, so it can be retried", async () => {
     engine.abortAll();
   }
 });
+test("Orca unknown answer outcome retires the prompt and refuses the same button", async () => {
+  const warning = "送信できたか確認できません。端末を確かめてください";
+  const { notifier, postedBlocks, updates } = fakeNotifier();
+  let acceptedWrites = 0;
+  const terminals = fakeBackend(
+    () => "blocked",
+    () => PERMISSION_PANE,
+    {
+      openAnswer() {
+        return fakeAnswerChannel({
+          async digit() {
+            acceptedWrites++;
+            throw new WriteOutcomeUnknown();
+          },
+        });
+      },
+    },
+    "orca",
+  );
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing(), "orca");
+    await sleep(200);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const pairingKey = fakePairing().key;
+
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", pairingKey),
+      { ok: true },
+    );
+    assert.equal(acceptedWrites, 1);
+    const warningUpdate = updates.find((update) => update.text === warning);
+    assert.ok(warningUpdate, "the prompt message carries the uncertainty warning");
+    assert.deepEqual(warningUpdate.blocks, [], "the old answer buttons are removed");
+
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", pairingKey),
+      { ok: false, reason: "not-pending" },
+    );
+    assert.equal(acceptedWrites, 1, "the same button cannot send a second time");
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("Orca pre-write answer refusal leaves the button retryable", async () => {
+  const { notifier, postedBlocks } = fakeNotifier();
+  let attempts = 0;
+  const terminals = fakeBackend(
+    () => "blocked",
+    () => PERMISSION_PANE,
+    {
+      openAnswer() {
+        return fakeAnswerChannel({
+          async digit() {
+            attempts++;
+            if (attempts === 1) throw new ExpectationLost("process changed before send");
+          },
+        });
+      },
+    },
+    "orca",
+  );
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing(), "orca");
+    await sleep(200);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    const pairingKey = fakePairing().key;
+
+    await assert.rejects(
+      engine.answerPermissionButton(PANE, promptId, "1", pairingKey),
+      ExpectationLost,
+    );
+    assert.deepEqual(
+      await engine.answerPermissionButton(PANE, promptId, "1", pairingKey),
+      { ok: true },
+    );
+    assert.equal(attempts, 2);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("Orca plan feedback rejects C0 text before selecting an answer", async () => {
+  const { notifier } = fakeNotifier();
+  const planPane = [
+    "Claude has written up a plan and is ready to execute. Would you like to proceed?",
+    "",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+    "     3. Tell Claude what to change",
+  ].join("\n");
+  let writes = 0;
+  const terminals = fakeBackend(
+    () => "blocked",
+    () => planPane,
+    {
+      openAnswer() {
+        return fakeAnswerChannel({
+          async digit() {
+            writes++;
+          },
+          async text() {
+            writes++;
+          },
+          async confirm() {
+            writes++;
+          },
+        });
+      },
+    },
+    "orca",
+  );
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await adopt(engine, fakePairing(), "orca");
+    await sleep(200);
+    await assert.rejects(
+      engine.answerPlanFeedback(PANE, "\u001b[A\r"),
+      (error: unknown) => error instanceof ExpectationLost && error.userMessage?.includes("制御文字"),
+    );
+    assert.equal(writes, 0);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+
+test("Orca rejects original C0 text before downloading attachments", async () => {
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  let downloads = 0;
+  const submitted: string[] = [];
+  const terminals = fakeBackend(
+    () => "idle",
+    () => "",
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("idle", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+          sessionId: null,
+        };
+      },
+      async submit(_ref, text) {
+        submitted.push(text);
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier, posts } = fakeNotifier();
+  const withFiles: Notifier = {
+    ...notifier,
+    async fetchIncomingFile() {
+      downloads++;
+      return null;
+    },
+  };
+  const engine = engineFor(terminals, withFiles, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", "\r", {
+      files: [{ id: "F1", name: "screen.png", size: 12 } as never],
+    });
+    assert.deepEqual(posts, [`${UNSENDABLE_TEXT_MESSAGE} 端末で確かめてください。`]);
+    assert.equal(downloads, 0, "unsafe original text must be refused before attachment I/O");
+    assert.deepEqual(submitted, []);
+    assert.equal(engine.isBusy(target), false);
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("OMP turns submit normal text and keep their poll loop attached", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-omp-turn-submit-"));
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca", cwd: dir };
+  const sessionId = "9a51b84e-610c-4d9e-bb20-28d7c850c552";
+  const transcriptIdentity = { path: join(dir, "omp.jsonl"), device: "1", inode: "2" };
+  const submitted: string[] = [];
+  const terminals = fakeBackend(
+    () => "idle",
+    () => "",
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("idle", "orca"),
+          agent: "omp",
+          ref: {
+            target: receivedTarget,
+            pid: 42,
+            processStartedAt: 1,
+            agentKind: "omp",
+            sessionId,
+            transcriptIdentity,
+          },
+          sessionId,
+          transcriptIdentity,
+        };
+      },
+      async submit(_ref, text) {
+        submitted.push(text);
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier } = fakeNotifier();
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", "hello");
+    assert.deepEqual(submitted, ["hello"]);
+    assert.equal(engine.isBusy(target), true, "accepted OMP turns keep ownership while awaiting transcript/screen evidence");
+  } finally {
+    engine.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an accepted OMP turn ignores historical completion until its own transcript boundary", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-omp-stale-end-"));
+  const target = `orca:${PANE}`;
+  const sessionId = "omp-stale-end";
+  const transcriptPath = join(dir, "omp-session.jsonl");
+  const transcriptIdentity = { path: transcriptPath, device: "1", inode: "2" };
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca", cwd: dir };
+  const historicalRecords = [
+    {
+      type: "message",
+      timestamp: "2026-09-28T10:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "old prompt" }] },
+    },
+    {
+      type: "message",
+      timestamp: "2026-09-28T10:00:01.000Z",
+      message: {
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: "old OMP output" }],
+      },
+    },
+  ];
+  writeFileSync(transcriptPath, `${historicalRecords.map((record) => JSON.stringify(record)).join("\n")}\n`);
+
+  let submitted = false;
+  let pollCount = 0;
+  let signalFirstPoll!: () => void;
+  const firstPoll = new Promise<void>((resolve) => (signalFirstPoll = resolve));
+  const terminals = fakeBackend(
+    () => "working",
+    () => "",
+    {
+      async get(receivedTarget) {
+        if (submitted && pollCount++ === 0) signalFirstPoll();
+        return {
+          ...fakeAgent(submitted ? "working" : "idle"),
+          ref: {
+            target: receivedTarget,
+            pid: 42,
+            processStartedAt: 1,
+            agentKind: "omp",
+            sessionId,
+            transcriptIdentity,
+          },
+          backend: "orca",
+          agent: "omp",
+          sessionId,
+          cwd: dir,
+          transcriptIdentity,
+          evidence: { kind: "hint", state: "done", waitingSince: null },
+        };
+      },
+      async read() {
+        return { text: "", draft: null, complete: false };
+      },
+      async submit() {
+        submitted = true;
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier, posts, updates } = fakeNotifier();
+  const engine = new TurnEngine(
+    terminals,
+    notifier,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 100, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+    { list: () => [pairing] },
+  );
+
+  try {
+    await engine.startTurn(pairing, "U1", "new OMP prompt");
+    await firstPoll;
+    await sleep(20);
+    assert.equal(engine.isBusy(target), true, "a historical completion must not finalize an accepted fresh turn");
+    assert.equal(updates.some(({ text }) => text.startsWith("✅")), false);
+    assert.equal(posts.some((post) => post.includes("old OMP output")), false);
+
+    const newRecords = [
+      {
+        type: "message",
+        timestamp: "2026-09-28T10:05:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: "new prompt" }] },
+      },
+      {
+        type: "message",
+        timestamp: "2026-09-28T10:05:01.000Z",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "new OMP response" }],
+        },
+      },
+    ];
+    appendFileSync(transcriptPath, `${newRecords.map((record) => JSON.stringify(record)).join("\n")}\n`);
+    for (let i = 0; i < 100; i++) {
+      if (!engine.isBusy(target) && posts.join("\n").includes("new OMP response")) break;
+      await sleep(20);
+    }
+
+    assert.equal(engine.isBusy(target), false, "a newly observed completion should release the turn");
+    assert.ok(posts.some((post) => post.includes("new OMP response")), JSON.stringify(posts));
+  } finally {
+    engine.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("adopted OMP waits post one plain screen notice and resolve it at the terminal", async () => {
+  const target = `orca:${PANE}`;
+  const sessionId = "9a51b84e-610c-4d9e-bb20-28d7c850c552";
+  const transcriptDir = mkdtempSync(join(tmpdir(), "cctag-omp-turn-wait-"));
+  const transcriptPath = join(transcriptDir, "omp-session.jsonl");
+  writeFileSync(transcriptPath, "");
+  const transcriptIdentity = { path: transcriptPath, device: "1", inode: "2" };
+  const agent: AgentInfo = {
+    ...fakeAgent("working", "orca"),
+    ref: {
+      target,
+      pid: 42,
+      processStartedAt: 1,
+      agentKind: "omp",
+      sessionId,
+      transcriptIdentity,
+    },
+    backend: "orca",
+    agent: "omp",
+    sessionId,
+    transcriptIdentity,
+    evidence: { kind: "hint", state: "working", waitingSince: null },
+  };
+  const waiting = capturedOmpScreen("ask-open.screen.json");
+  const idle = capturedOmpScreen("idle.screen.json");
+  const notice = formatOmpScreenNotice(waiting);
+  const fingerprint = ompScreenFingerprint(waiting);
+  assert.ok(notice);
+  assert.ok(fingerprint);
+  let screen = waiting;
+  let failNextRead = false;
+  let terminalWrites = 0;
+  let screenReads = 0;
+  let lastReadText = "";
+  const terminals = fakeBackend(
+    () => "working",
+    () => "",
+    {
+      async get() {
+        return agent;
+      },
+      async read() {
+        screenReads++;
+        if (failNextRead) {
+          failNextRead = false;
+          throw new Error("screen unavailable");
+        }
+        lastReadText = screen.text;
+        return screen;
+      },
+      async submit() {
+        terminalWrites++;
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier, posts, postedBlocks, updates } = fakeNotifier();
+  const engine = engineFor(terminals, notifier, 600_000);
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+
+  try {
+    assert.equal(
+      await engine.adoptBlockedTerminal(pairing, {
+        backend: "orca",
+        driver: ompDriver,
+        sessionId,
+        transcriptIdentity,
+        transcriptPath: transcriptIdentity.path,
+        offset: 0,
+        collected: [],
+        paneId: target,
+        ref: agent.ref,
+        cwd: agent.cwd,
+        outboxBaseline: {},
+        writes: new WrittenFileTracker(),
+        ompStatus: { waitingFingerprint: fingerprint, waitingSamples: 2, noticeFingerprint: null },
+        ompNotice: notice,
+        ompFingerprint: fingerprint,
+      }),
+      true,
+    );
+    assert.equal(engine.isOmpWaiting(target), true);
+    assert.deepEqual(posts, ["🖥️ ターミナル側で入力待ちを検出しました…", notice]);
+    assert.deepEqual(postedBlocks[1], [], "OMP notice has no answer buttons");
+    failNextRead = true;
+    await sleep(5_100);
+    assert.equal(engine.isOmpWaiting(target), true, "an unreadable screen does not release the blocked wait");
+    assert.equal(posts.filter((post) => post === notice).length, 1, "a failed screen read does not repost");
+    assert.equal(terminalWrites, 0);
+
+    screen = idle;
+    for (let i = 0; i < 1_100 && engine.isOmpWaiting(target); i++) await sleep(10);
+    assert.equal(lastReadText, idle.text, `poll must observe the complete idle screen (${screenReads} reads)`);
+    assert.equal(engine.isOmpWaiting(target), false, "a complete idle composer releases the terminal-only wait");
+    assert.ok(updates.some((update) => update.text === `${notice}\n\n（ターミナル側で回答済み）`));
+  } finally {
+    engine.abortAll();
+    rmSync(transcriptDir, { recursive: true, force: true });
+  }
+});
+
+test("OMP turn discards records and posts only the loss notice when ownership changes after a read", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-omp-turn-loss-"));
+  let engine: TurnEngine | undefined;
+  try {
+    const cwd = join(dir, "cwd");
+    mkdirSync(cwd);
+    const transcriptPath = join(dir, "omp-session.jsonl");
+    const sessionId = "9a51b84e-610c-4d9e-bb20-28d7c850c552";
+    const transcriptIdentity = { path: transcriptPath, device: "1", inode: "2" };
+    const record = {
+      type: "message",
+      timestamp: "2026-09-28T22:53:54.622Z",
+      message: { role: "assistant", content: [{ type: "text", text: "must not be posted" }] },
+    };
+    writeFileSync(transcriptPath, `${JSON.stringify(record)}\n`);
+    const target = `orca:${PANE}`;
+    const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca", cwd };
+    const agent: AgentInfo = {
+      ...fakeAgent("working", "orca"),
+      agent: "omp",
+      ref: {
+        target,
+        pid: 42,
+        processStartedAt: 1,
+        agentKind: "omp",
+        sessionId,
+        transcriptIdentity,
+      },
+      sessionId,
+      transcriptIdentity,
+      cwd,
+      evidence: { kind: "hint", state: "working", waitingSince: null },
+    };
+    let gets = 0;
+    const terminals = fakeBackend(
+      () => "working",
+      () => "",
+      {
+        async get() {
+          gets++;
+          return gets === 1 ? agent : null;
+        },
+        async exists() {
+          return true;
+        },
+      },
+      "orca",
+    );
+    const { notifier, posts } = fakeNotifier();
+    engine = new TurnEngine(
+      terminals,
+      notifier,
+      { turnTimeoutMs: 60_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+      { list: () => [pairing] },
+    );
+
+    const adopted = await engine.adoptBlockedTerminal(pairing, {
+      backend: "orca",
+      driver: ompDriver,
+      sessionId,
+      transcriptPath,
+      transcriptIdentity,
+      offset: 0,
+      collected: [],
+      paneId: target,
+      ref: agent.ref,
+      cwd,
+      outboxBaseline: {},
+      writes: new WrittenFileTracker(),
+    });
+    assert.equal(adopted, true);
+    for (let i = 0; i < 40 && engine.isBusy(target); i++) await sleep(10);
+
+    assert.equal(engine.isBusy(target), false);
+    assert.equal(posts.filter((post) => post === OMP_RESUME_NOTICE).length, 1);
+    assert.equal(posts.some((post) => post.includes("must not be posted")), false);
+  } finally {
+    engine?.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Orca permits interior LF and TAB and reports an accepted write", async () => {
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  const text = "first line\n\tsecond line";
+  const submitted: string[] = [];
+  const terminals = fakeBackend(
+    () => "idle",
+    () => "",
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("idle", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+          sessionId: null,
+        };
+      },
+      async submit(_ref, submittedText) {
+        submitted.push(submittedText);
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier, updates } = fakeNotifier();
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", text);
+    assert.deepEqual(submitted, [text], "interior LF/TAB must survive normalization");
+    assert.ok(
+      updates.some(({ text: update }) => update.includes("orca は入力を受け付けました")),
+      "accepted writes need visible status feedback",
+    );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a startup dialog asks for a terminal-side answer instead of submitting", async () => {
+  // Captured Claude Code fresh-directory prompt, shared with startup-prompt.test.ts.
+  const startupDialog = [
+    " Accessing workspace:",
+    " /private/tmp/scratch/v3-workdir",
+    " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known",
+    " open source project, or work from your team).",
+    " ❯ 1. Yes, I trust this folder",
+    "   2. No, exit",
+    " Enter to confirm · Esc to cancel",
+  ].join("\n");
+  const target = `orca:${PANE}`;
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
+  let submits = 0;
+  const terminals = fakeBackend(
+    () => "idle",
+    () => startupDialog,
+    {
+      async get(receivedTarget) {
+        return {
+          ...fakeAgent("idle", "orca"),
+          ref: { target: receivedTarget, pid: 42, processStartedAt: 1 },
+          sessionId: null,
+        };
+      },
+      async submit() {
+        submits++;
+        return { status: "accepted", draftStashed: false };
+      },
+    },
+    "orca",
+  );
+  const { notifier, posts } = fakeNotifier();
+  const engine = engineFor(terminals, notifier, 600_000);
+
+  try {
+    await engine.startTurn(pairing, "U1", "continue");
+    assert.equal(submits, 0);
+    assert.ok(posts.some((post) => post.includes("このダイアログは端末で答えてください")));
+    assert.ok(posts.some((post) => post.includes("Is this a project you created or one you trust?")));
+  } finally {
+    engine.abortAll();
+  }
+});
 
 test("disconnecting during startTurn's setup abandons it instead of prompting the pane", async () => {
   // Codex review, Critical 3. abortTurn() could only reach a turn that had
@@ -437,19 +1363,12 @@ test("disconnecting during startTurn's setup abandons it instead of prompting th
   const prompted: string[] = [];
   let releaseDownload: (() => void) | undefined;
   const downloadStarted = new Promise<void>((r) => setTimeout(r, 60));
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("idle");
-    },
-    async paneRead() {
-      return "";
-    },
-    async agentPrompt(_paneId: string, text: string) {
+  const herdr = fakeBackend(() => "idle", () => "", {
+    async submit(_ref, text) {
       prompted.push(text);
+      return { status: "accepted", draftStashed: false };
     },
-    async agentSend() {},
-    async paneSendKeys() {},
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   // A notifier whose file download blocks, standing in for a slow transfer.
@@ -554,8 +1473,9 @@ test("a cancel landing while the prompt is being posted does not leak the pane",
       return { async update() {} };
     },
   };
+  const terminals = fakeHerdr(() => "blocked");
   const engine = new TurnEngine(
-    fakeHerdr(() => "blocked"),
+    terminals,
     slowPost,
     { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
     { list: () => [fakePairing()] },
@@ -587,8 +1507,9 @@ test("cancelling does not free the pane while the holder is still driving it", a
       return { async update() {} };
     },
   };
+  const terminals = fakeHerdr(() => "blocked");
   const engine = new TurnEngine(
-    fakeHerdr(() => "blocked"),
+    terminals,
     slowPost,
     { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
     { list: () => [fakePairing()] },
@@ -614,19 +1535,12 @@ test("a cancel mid-submit leaves the pane held until the keystrokes stop", async
   // handing the pane to the next caller while this one was still typing into it.
   const { notifier } = fakeNotifier();
   let releasePrompt: (() => void) | undefined;
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("working");
-    },
-    async paneRead() {
-      return ""; // no startup dialog to trip over
-    },
-    async agentPrompt() {
+  const herdr = fakeBackend(() => "working", () => "", {
+    async submit() {
       await new Promise<void>((r) => (releasePrompt = r));
+      return { status: "accepted", draftStashed: false };
     },
-    async paneSendKeys() {},
-    async agentSend() {},
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   const starting = engine.startTurn(fakePairing(), "U1", "hello").catch(() => {});
@@ -684,21 +1598,13 @@ test("a failed pane read does not surrender a prompt already posted to Slack", a
   // re-adopted and posted the same prompt again, discarding the collected output.
   const { notifier, posts } = fakeNotifier();
   let reads = 0;
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
-    },
-    // The first reads fail, i.e. before the prompt has been posted and while the
-    // loop is still on its fast interval — the failures have to land somewhere
-    // the test can reach without waiting out the five-second floor a posted
-    // prompt switches to.
-    async paneRead() {
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
+    async read() {
       reads += 1;
       if (reads <= 2) throw new Error("herdr command timed out");
-      return PERMISSION_PANE;
+      return { text: PERMISSION_PANE, draft: null, complete: true };
     },
-    async agentSend() {},
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
 
   try {
@@ -800,7 +1706,7 @@ test("the new status line is the one the poll loop then updates", async () => {
   // the thread, which is the same invisibility in a new place.
   const events: string[] = [];
   const postedBlocks: unknown[][] = [];
-  let status: AgentInfo["agentStatus"] = "blocked";
+  let status: AgentStatus = "blocked";
   const tracking: Notifier = {
     async postReply() {},
     async postMessage(_c, _t, text, blocks) {
@@ -814,12 +1720,7 @@ test("the new status line is the one the poll loop then updates", async () => {
       };
     },
   };
-  const engine = new TurnEngine(
-    fakeHerdr(() => status),
-    tracking,
-    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
-    { list: () => [fakePairing()] },
-  );
+  const engine = engineFor(fakeHerdr(() => status), tracking, 600_000);
 
   try {
     await adopt(engine, fakePairing());
@@ -865,12 +1766,7 @@ test("an answer records who pressed it when that was not the owner", async () =>
       };
     },
   };
-  const engine = new TurnEngine(
-    fakeHerdr(() => "blocked"),
-    recording,
-    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
-    { list: () => [fakePairing()] },
-  );
+  const engine = engineFor(fakeHerdr(() => "blocked"), recording, 600_000);
 
   try {
     await adopt(engine, fakePairing());
@@ -902,12 +1798,7 @@ test("the owner's own answer is left unmarked", async () => {
       };
     },
   };
-  const engine = new TurnEngine(
-    fakeHerdr(() => "blocked"),
-    recording,
-    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
-    { list: () => [fakePairing()] },
-  );
+  const engine = engineFor(fakeHerdr(() => "blocked"), recording, 600_000);
 
   try {
     await adopt(engine, fakePairing());
@@ -1010,6 +1901,55 @@ test("a confirmed SendUserFile that does upload logs the candidate count and the
   }
 });
 
+test("an incomplete list from either backend prevents automatic outbox uploads", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-incomplete-outbox-"));
+  try {
+    const outbox = join(cwd, ".cctag", "outbox");
+    mkdirSync(outbox, { recursive: true });
+    const candidate = join(outbox, "artifact.txt");
+    writeFileSync(candidate, "keep this file on disk");
+
+    const uploads: string[] = [];
+    const { notifier, posts } = fakeNotifier();
+    const withUpload: Notifier = {
+      ...notifier,
+      async uploadFile(_channel, _threadTs, args) {
+        uploads.push(args.filename);
+      },
+    };
+    for (const failedBackend of ["orca", "herdr"] as const) {
+      const pairing: Pairing =
+        failedBackend === "orca"
+          ? { ...fakePairing(), paneId: `orca:${PANE}`, backend: "orca" }
+          : fakePairing();
+      const terminals = fakeBackend(
+        () => "idle",
+        () => "",
+        {
+          async list() {
+            return {
+              agents: [],
+              failures: [{ backend: failedBackend, reason: "backend unavailable" }],
+              complete: false,
+              notices: [],
+            };
+          },
+        },
+      );
+      const engine = engineFor(terminals, withUpload, 600_000);
+      await engine.uploadOutboxAdditions(pairing, cwd, {}, []);
+    }
+
+    assert.deepEqual(uploads, []);
+    assert.equal(posts.filter((post) => post.includes("自動添付を見送りました")).length, 2);
+    assert.ok(posts.some((post) => post.includes("orcaのインスタンス一覧")));
+    assert.ok(posts.some((post) => post.includes("herdrのインスタンス一覧")));
+    assert.equal(readFileSync(candidate, "utf8"), "keep this file on disk");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // --- multi-select questions -------------------------------------------------
 
 /** A multi-select dialog as Claude Code 2.1.251 draws it (checkbox on every
@@ -1062,23 +2002,91 @@ function recordingNotifier(): {
   return { notifier, posts, updates, postedBlocks };
 }
 
-function multiSelectHerdr(pane: () => string): { herdr: HerdrClient; sent: string[] } {
-  const sent: string[] = [];
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
+const MULTI_SELECT_REVIEW = [
+  "←  ☒ 削る場所  ✔ Submit  →",
+  "",
+  "Review your answers",
+  "",
+  "Ready to submit your answers?",
+  "",
+  "❯ 1. Submit answers",
+].join("\n");
+
+interface FakeHerdrAnswerCli {
+  bin: string;
+  calls(): string[][];
+  pane(): string;
+  setPane(text: string): void;
+  cleanup(): void;
+}
+
+function fakeHerdrAnswerCli(
+  initialPane: string,
+  reviewPane = MULTI_SELECT_REVIEW,
+  failReviewDigit = false,
+): FakeHerdrAnswerCli {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-turn-herdr-"));
+  const bin = join(dir, "herdr-test");
+  const callsFile = join(dir, "calls.jsonl");
+  const paneFile = join(dir, "pane.txt");
+  const script = `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
+if (args[0] === "pane" && args[1] === "send-keys" && args.includes("Enter")) {
+  fs.writeFileSync(${JSON.stringify(paneFile)}, ${JSON.stringify(reviewPane)});
+}
+if (
+  ${JSON.stringify(failReviewDigit)} &&
+  args[0] === "pane" &&
+  args[1] === "send-text" &&
+  args[3] === "1" &&
+  fs.readFileSync(${JSON.stringify(paneFile)}, "utf8").includes("Review your answers")
+) {
+  process.exit(1);
+}
+if (args[0] === "pane" && args[1] === "read") {
+  process.stdout.write(fs.readFileSync(${JSON.stringify(paneFile)}, "utf8"));
+}
+`;
+  writeFileSync(bin, script);
+  writeFileSync(paneFile, initialPane);
+  chmodSync(bin, 0o755);
+  return {
+    bin,
+    calls() {
+      try {
+        const text = readFileSync(callsFile, "utf8").trim();
+        return text ? text.split("\n").map((line) => JSON.parse(line) as string[]) : [];
+      } catch {
+        return [];
+      }
     },
-    async paneRead() {
-      return pane();
+    pane() {
+      return readFileSync(paneFile, "utf8");
     },
-    async agentSend(_p: string, text: string) {
-      sent.push(`text:${text}`);
+    setPane(text) {
+      writeFileSync(paneFile, text);
     },
-    async paneSendKeys(_p: string, ...keys: string[]) {
-      sent.push(...keys.map((k) => `key:${k}`));
+    cleanup() {
+      rmSync(dir, { recursive: true, force: true });
     },
-  } as unknown as HerdrClient;
-  return { herdr, sent };
+  };
+}
+
+function multiSelectHerdr(
+  pane: () => string,
+  reviewPane = MULTI_SELECT_REVIEW,
+  failReviewDigit = false,
+): { herdr: FakeBackend; cli: FakeHerdrAnswerCli } {
+  const cli = fakeHerdrAnswerCli(pane(), reviewPane, failReviewDigit);
+  const backend = new HerdrBackend(cli.bin);
+  const herdr = fakeBackend(() => "blocked", () => cli.pane(), {
+    openAnswer(ref, prompt) {
+      return backend.openAnswer(ref, prompt);
+    },
+  });
+  return { herdr, cli };
 }
 
 
@@ -1098,36 +2106,116 @@ async function adoptAndAwaitPrompt(engine: TurnEngine, pairing: Pairing = fakePa
  *  that a *different* prompt replaced it cannot be observed sooner. */
 const BLOCKED_POLL_FLOOR_MS = 5_600;
 
-test("a multi-select question can be answered from Slack", async () => {
+test("a multi-select answer confirms a review without requiring a Cancel row", async () => {
   // Until 2026-08-31 it could not: the blocks carried no interactive element, so
   // the only way to answer was at the keyboard. Reported from a four-question
   // dialog where question 1 was answered from Slack and question 2 — the
   // multi-select one — was not.
   const { notifier, updates, postedBlocks } = recordingNotifier();
-  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
     const promptId = promptIdFromPostedBlocks(postedBlocks);
     const result = await engine.answerQuestionMultiSelect(PANE, promptId, [0, 2], fakePairing().key);
     assert.equal(result.ok, true);
-    // Options 1 and 3 toggled, then options.length + 1 downs onto Submit, then
-    // Enter. The fixture's fourth row is `Type something`, so there are three.
-    assert.deepEqual(sent.slice(0, 2), ["text:1", "text:3"]);
-    assert.equal(sent.filter((k) => k === "key:Down").length, 4);
-    assert.ok(sent.includes("key:Enter"));
+    assert.deepEqual(cli.calls(), [
+      ["pane", "read", PANE, "--source", "recent", "--lines", "200"],
+      ["pane", "send-text", PANE, "1"],
+      ["pane", "send-text", PANE, "3"],
+      ["pane", "send-keys", PANE, "Down", "Down", "Down", "Down"],
+      ["pane", "send-keys", PANE, "Enter"],
+      ["pane", "send-text", PANE, "1"],
+    ]);
     assert.ok(
       updates.some((u) => u.includes("§2.1「橋渡し」を圧縮") && u.includes("§5.3の処理時間の記述を圧縮")),
       "the thread should say which options were chosen",
     );
   } finally {
     engine.abortAll();
+    cli.cleanup();
+  }
+});
+
+test("a non-review transition ends the compound answer on Submit Enter", async () => {
+  const { notifier, updates, postedBlocks } = recordingNotifier();
+  const nextQuestion = multiSelectPane("次の設問です");
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"), nextQuestion);
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    assert.equal((await engine.answerQuestionMultiSelect(PANE, promptId, [0], fakePairing().key)).ok, true);
+    assert.deepEqual(cli.calls(), [
+      ["pane", "read", PANE, "--source", "recent", "--lines", "200"],
+      ["pane", "send-text", PANE, "1"],
+      ["pane", "send-keys", PANE, "Down", "Down", "Down", "Down"],
+      ["pane", "send-keys", PANE, "Enter"],
+    ]);
+    assert.ok(updates.some((update) => update.includes("§2.1「橋渡し」を圧縮")));
+  } finally {
+    engine.abortAll();
+    cli.cleanup();
+  }
+});
+
+
+test("a changed multi-select prompt gets no writes before the first Herdr check", async () => {
+  const { notifier, postedBlocks, updates } = recordingNotifier();
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    cli.setPane(multiSelectPane("別の質問に変わりました"));
+    await assert.rejects(
+      engine.answerQuestionMultiSelect(PANE, promptId, [0], fakePairing().key),
+      ExpectationLost,
+    );
+    assert.equal(
+      updates.some((update) => update.includes("（ターミナル側で回答済み）")),
+      false,
+      "an incomplete answer must not resolve the Slack prompt",
+    );
+  } finally {
+    engine.abortAll();
+    cli.cleanup();
+  }
+});
+
+test("a failed review confirmation leaves the Slack prompt unresolved", async () => {
+  const { notifier, postedBlocks, updates } = recordingNotifier();
+  const { herdr, cli } = multiSelectHerdr(
+    () => multiSelectPane("どこから捻出しますか？"),
+    MULTI_SELECT_REVIEW,
+    true,
+  );
+  const engine = engineFor(herdr, notifier, 600_000);
+  try {
+    await adoptAndAwaitPrompt(engine);
+    const promptId = promptIdFromPostedBlocks(postedBlocks);
+    await assert.rejects(engine.answerQuestionMultiSelect(PANE, promptId, [0], fakePairing().key));
+    assert.deepEqual(cli.calls(), [
+      ["pane", "read", PANE, "--source", "recent", "--lines", "200"],
+      ["pane", "send-text", PANE, "1"],
+      ["pane", "send-keys", PANE, "Down", "Down", "Down", "Down"],
+      ["pane", "send-keys", PANE, "Enter"],
+      ["pane", "send-text", PANE, "1"],
+    ]);
+    assert.equal(
+      updates.some((update) => update.includes("（ターミナル側で回答済み）")),
+      false,
+      "a failed final write must not resolve the Slack prompt",
+    );
+  } finally {
+    engine.abortAll();
+    cli.cleanup();
   }
 });
 
 test("a stale submit for an already-answered question is refused", async () => {
   const { notifier, postedBlocks } = recordingNotifier();
-  const { herdr } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
@@ -1138,12 +2226,13 @@ test("a stale submit for an already-answered question is refused", async () => {
     assert.equal(again.ok, false, "the prompt id is spent");
   } finally {
     engine.abortAll();
+    cli.cleanup();
   }
 });
 
 test("indices outside the option list never reach the pane as keystrokes", async () => {
   const { notifier, postedBlocks } = recordingNotifier();
-  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
@@ -1151,12 +2240,11 @@ test("indices outside the option list never reach the pane as keystrokes", async
     // 10 would be typed into the dialog as a keystroke meaning nothing — or, on
     // a dialog with ten rows, as the wrong one.
     await engine.answerQuestionMultiSelect(PANE, promptId, [0, 9], fakePairing().key);
-    assert.deepEqual(
-      sent.filter((k) => k.startsWith("text:")),
-      ["text:1"],
-    );
+    const textWrites = cli.calls().filter((args) => args[1] === "send-text").map((args) => args[3]);
+    assert.deepEqual(textWrites, ["1", "1"], "valid choice and review confirm only");
   } finally {
     engine.abortAll();
+    cli.cleanup();
   }
 });
 
@@ -1167,13 +2255,14 @@ test("answering at the keyboard keeps the question in the thread", async () => {
   // the question nor its options.
   const { notifier, updates } = recordingNotifier();
   let question = "どこから捻出しますか？";
-  const { herdr } = multiSelectHerdr(() => multiSelectPane(question));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane(question));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
     // A *different* question now showing, with the pane never leaving `blocked`,
     // is how the poll loop learns the pending one was answered at the terminal.
     question = "見直し範囲はどうしますか？";
+    cli.setPane(multiSelectPane(question));
     await sleep(BLOCKED_POLL_FLOOR_MS);
 
     const note = updates.find((u) => u.includes("（ターミナル側で回答済み）"));
@@ -1182,6 +2271,7 @@ test("answering at the keyboard keeps the question in the thread", async () => {
     assert.ok(note.includes("§2.1「橋渡し」を圧縮"), "so must the options");
   } finally {
     engine.abortAll();
+    cli.cleanup();
   }
 });
 
@@ -1190,33 +2280,49 @@ test("a reply of just option numbers ticks those boxes instead of being typed as
   // read "1,3" as a selection — the free-text row records it verbatim — so
   // without this the agent received the string "1,3" and had to guess.
   const { notifier, updates } = recordingNotifier();
-  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
     assert.equal((await engine.answerQuestionFreeText(PANE, "1,3")).ok, true);
-    assert.deepEqual(sent.slice(0, 2), ["text:1", "text:3"], "toggled, not typed");
+    assert.deepEqual(cli.calls(), [
+      ["pane", "read", PANE, "--source", "recent", "--lines", "200"],
+      ["pane", "send-text", PANE, "1"],
+      ["pane", "send-text", PANE, "3"],
+      ["pane", "send-keys", PANE, "Down", "Down", "Down", "Down"],
+      ["pane", "send-keys", PANE, "Enter"],
+      ["pane", "send-text", PANE, "1"],
+    ]);
     assert.ok(
       updates.some((u) => u.includes("§2.1「橋渡し」を圧縮") && u.includes("§5.3の処理時間の記述を圧縮")),
       "the thread should name the options, not echo the digits",
     );
   } finally {
     engine.abortAll();
+    cli.cleanup();
   }
 });
 
 test("a reply that is not just option numbers is still passed through as text", async () => {
   const { notifier } = recordingNotifier();
-  const { herdr, sent } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
+  const { herdr, cli } = multiSelectHerdr(() => multiSelectPane("どこから捻出しますか？"));
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);
     // Out of range, so it cannot be a selection — and a duplicate would toggle
     // the same box off again, which is worse than passing the text along.
     assert.equal((await engine.answerQuestionFreeText(PANE, "1,9")).ok, true);
-    assert.ok(sent.includes("text:1,9"), `expected the text verbatim, got ${JSON.stringify(sent)}`);
+    assert.deepEqual(cli.calls(), [
+      ["pane", "read", PANE, "--source", "recent", "--lines", "200"],
+      ["pane", "send-keys", PANE, "Down", "Down", "Down"],
+      ["pane", "send-text", PANE, "1,9"],
+      ["pane", "send-keys", PANE, "Down"],
+      ["pane", "send-keys", PANE, "Enter"],
+      ["pane", "send-text", PANE, "1"],
+    ]);
   } finally {
     engine.abortAll();
+    cli.cleanup();
   }
 });
 
@@ -1254,20 +2360,18 @@ test("a button from the previous turn cannot answer the next same-kind prompt", 
 
   const nextButton = fakeNotifier();
   const writes: string[] = [];
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
+    openAnswer() {
+      return fakeAnswerChannel({
+        async digit(n) {
+          writes.push(`text:${n}`);
+        },
+        async confirm() {
+          writes.push("key:Enter");
+        },
+      });
     },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
-    async agentSend(_paneId: string, text: string) {
-      writes.push(`text:${text}`);
-    },
-    async paneSendKeys(_paneId: string, ...keys: string[]) {
-      writes.push(...keys.map((key) => `key:${key}`));
-    },
-  } as unknown as HerdrClient;
+  });
   const currentTurn = engineFor(herdr, nextButton.notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(currentTurn, pairing);
@@ -1286,20 +2390,18 @@ test("a button from the previous turn cannot answer the next same-kind prompt", 
 test("a matching prompt ID from another pairing is rejected without writing keys", async () => {
   const { notifier, postedBlocks } = fakeNotifier();
   const writes: string[] = [];
-  const herdr = {
-    async agentGet() {
-      return fakeAgent("blocked");
+  const herdr = fakeBackend(() => "blocked", () => PERMISSION_PANE, {
+    openAnswer() {
+      return fakeAnswerChannel({
+        async digit(n) {
+          writes.push(`text:${n}`);
+        },
+        async confirm() {
+          writes.push("key:Enter");
+        },
+      });
     },
-    async paneRead() {
-      return PERMISSION_PANE;
-    },
-    async agentSend(_paneId: string, text: string) {
-      writes.push(`text:${text}`);
-    },
-    async paneSendKeys(_paneId: string, ...keys: string[]) {
-      writes.push(...keys.map((key) => `key:${key}`));
-    },
-  } as unknown as HerdrClient;
+  });
   const engine = engineFor(herdr, notifier, 600_000);
   try {
     await adoptAndAwaitPrompt(engine);

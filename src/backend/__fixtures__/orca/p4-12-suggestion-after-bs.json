@@ -1,0 +1,47 @@
+{
+  "id": "<request-id>",
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "<terminal>",
+      "status": "running",
+      "tail": [
+        " ▐▛███▛█   Claude Code v2.1.287",
+        "▝▜██████▀  Sonnet 5.5 · Claude Team",
+        " ▝▝   ▝▝   ~/workspace/github.com/TMLlaboratory/cctag · /rc",
+        "❯ Reply with exactly: OK. No tools.",
+        "⏺ OK",
+        "  ⎿  Stop says: <redacted Stop-hook warning>",
+        "✻ Cooked for 3s · done 7:08 PM",
+        "❯ Give me two options (A or B) for renaming a variable across a repo, one line each, then ask which. No tools.",
+        "⏺ A. エディタ/LSP の rename 機能（シンボル単位でスコープを理解して一括変更。文字列やコメントは対象外）",
+        "  B. rg -l 'oldName' | xargs sed -i '' 's/\\boldName\\b/newName/g'（全文一括置換。速いが同名の別シンボルや文字列も巻き込む）",
+        "  どちらにしますか？",
+        "  ⎿  Stop says: <redacted Stop-hook warning>",
+        "✻ Baked for 2s · done 7:08 PM",
+        "❯ A",
+        "⏺ A（LSP の rename）で進めます。変更前の変数名、変更後の名前、定義されているファイルを教えてください。",
+        "  ⎿  Stop says: <redacted Stop-hook warning>",
+        "✻ Cogitated for 2s · done 7:10 PM",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "❯",
+        "──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "   Sonnet 5.5  │  effort:medium │  ctx ▌▒▒▒▒▒▒▒▒▒ 6%",
+        "   5h  ▒▒▒▒▒▒▒▒▒ 1% ↻04:49:54 │ 7d ████▎▒▒▒▒▒ 43% ↻55:49:54",
+        "   cctag │  main",
+        "  ⏵⏵ auto mode on (shift+tab to cycle)"
+      ],
+      "truncated": false,
+      "limited": false,
+      "oldestCursor": "0",
+      "nextCursor": "1",
+      "latestCursor": "1",
+      "returnedLineCount": 24,
+      "source": "screen",
+      "draft": "`userName` を `accountName` に変えて"
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

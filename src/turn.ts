@@ -13,20 +13,32 @@ import {
   type IncomingFile,
   type SavedAttachment,
 } from "./attachments.js";
-import type { HerdrClient } from "./herdr/client.js";
-import type { AgentInfo } from "./herdr/types.js";
+import type { Terminals } from "./backend/index.js";
+import {
+  ExpectationLost,
+  hasUnsendableC0Controls,
+  SubmitRefused,
+  UNSENDABLE_TEXT_MESSAGE,
+  WriteOutcomeUnknown,
+  WRITE_OUTCOME_UNKNOWN_MESSAGE,
+} from "./backend/types.js";
+import type { AgentInfo, AgentRef, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
+import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
+import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
-import { SettleTracker } from "./settle.js";
+import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
-import { readNewRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { readNewRecords, readRecentRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo, type BlockedPrompt } from "./agents/driver.js";
+import { promptFingerprint } from "./agents/fingerprint.js";
 import {
-  driverFor,
-  promptFingerprint,
-  type AgentDriver,
-  type AskUserQuestionPaneInfo,
-  type BlockedPrompt,
-} from "./agents/driver.js";
+  createOmpStatusMemory,
+  markOmpNoticePosted,
+  resolveOmpStatus,
+  type OmpStatusMemory,
+  type OmpStatusResolution,
+} from "./agents/omp/status.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 import { postSegmented } from "./slack/post.js";
 import {
@@ -40,9 +52,23 @@ import {
 import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sameTranscriptIdentity(
+  left: TranscriptIdentity | undefined,
+  right: TranscriptIdentity | undefined,
+): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.path === right.path &&
+    left.device === right.device &&
+    left.inode === right.inode
+  );
 }
 
 const PROMPT_ID_LIMIT = 2 ** 48;
@@ -112,18 +138,21 @@ function waitBeforeNextPoll(state: TurnState, ms: number): Promise<void> {
   });
 }
 
-export type TurnPhase = "running" | "awaiting-question" | "awaiting-permission";
+export type TurnPhase = "running" | "awaiting-question" | "awaiting-permission" | "awaiting-omp";
 
 interface TurnState {
   phase: TurnPhase;
   pairing: Pairing;
   requesterUserId: string;
   driver: AgentDriver;
+  backend: BackendName;
+  ref: AgentRef;
   paneId: string;
   /** Live cwd of the pane, read at turn start — the outbox lives under it. */
   cwd: string;
   sessionId: string;
   transcriptPath: string;
+  transcriptIdentity?: TranscriptIdentity;
   offset: number;
   collected: string[];
   /** `<cwd>/.cctag/outbox` as it looked when the turn began, so only what this
@@ -138,32 +167,35 @@ interface TurnState {
   /**
    * When to give up, as an absolute time rather than `startedAt + timeout`.
    *
-   * The distinction matters because a blocked pane is waiting on a person, and
-   * a person taking their time is not a stalled turn. Every poll that finds the
-   * pane blocked pushes this forward, so the timeout only ever measures how
-   * long the *agent* has gone without progress. Without that, an unanswered
-   * prompt timed out on schedule, the turn ended, and BackgroundWatcher — which
-   * adopts any blocked paired pane with no active turn — immediately re-adopted
-   * it and posted the same prompt again, once per timeout window, forever.
+   * A confirmed blocked status refreshes this deadline because the prompt is
+   * waiting on a person. An incomplete screen preserves the previous deadline,
+   * so a stale blocked status cannot extend an unreadable turn indefinitely.
+   * Without refreshing a confirmed prompt, it timed out on schedule, finalized
+   * the turn, and BackgroundWatcher re-adopted it and posted it once per timeout.
    */
   deadlineAt: number;
   /**
-   * Decides completion from the agent's own transcript, because herdr's
-   * `working` cannot be trusted to clear — see settle.ts. Owned per turn: it
+   * Decides completion from the agent's transcript rather than trusting a
+   * backend status that may not clear — see settle.ts. Owned per turn: it
    * carries the turn's open/closed state, so it must not outlive it.
    */
   settle: SettleTracker;
+  /** OMP's consecutive-screen and one-notice-per-fingerprint memory. */
+  ompStatus: OmpStatusMemory | null;
+  ompNoticeText?: string;
+  /** Last resolved status, retained only for this turn's incomplete-screen path. */
+  previousStatus: AgentStatus;
   /**
-   * Consecutive failures per herdr operation, each reset only by that same
+   * Consecutive failures per terminal operation, each reset only by that same
    * operation succeeding.
    *
-   * One shared counter did not work: agentGet runs first on every poll, so its
-   * success reset the count before paneRead was even attempted. A pane whose
+   * One shared counter did not work: get runs first on every poll, so its
+   * success reset the count before read was even attempted. A terminal whose
    * reads failed persistently therefore never got past "first failure", and —
    * being blocked — had its deadline pushed forward each time too, so the turn
-   * held the pane forever while making no progress at all.
+   * held the terminal forever while making no progress at all.
    */
-  failures: { agentGet: number; paneRead: number };
+  failures: { get: number; read: number };
   /** This turn's claim on the pane. Its signal is what the poll loop watches,
    *  so cancelling the lease stops the loop; released by finalize/abort. */
   lease: PaneLease;
@@ -174,17 +206,13 @@ interface TurnState {
    *  didn't parse — never compared in that case (see promptFingerprint). */
   promptFingerprint?: string | null;
   /**
-   * Set synchronously the moment an answer is accepted, before any input is
-   * sent, and cleared once the prompt is resolved or the attempt failed.
-   *
-   * The phase/prompt-id checks alone cannot serialize two answers: Slack buttons
-   * can be clicked twice, and both deliveries pass those checks before either
-   * reaches the state mutation that happens after `await`. Both then drive the
-   * TUI — for Codex that is digit-plus-Enter twice, whose second copy can land
-   * on whatever menu appeared next and confirm it.
+   * Set synchronously before any answer write, then cleared when the prompt is
+   * resolved or a pre-write attempt fails. An unknown write outcome clears the
+   * prompt ID but leaves this claimed until the pane presents a different prompt.
    */
   answering?: boolean;
   promptHandle?: MessageHandle;
+  pendingPrompt?: BlockedPrompt;
   pendingQuestionInfo?: AskUserQuestionPaneInfo;
   // Set when the current awaiting-permission prompt is Claude Code's
   // ExitPlanMode approval, which uniquely offers a "Tell Claude what to
@@ -227,14 +255,13 @@ export interface StartTurnOptions {
 const SUBMIT_RETRIES_WITH_IMAGES = 6;
 
 /**
- * How many herdr queries in a row may fail before a turn gives up on its pane.
+ * How many backend queries in a row may fail before a turn gives up on its terminal.
  *
- * Each herdr call already has its own 15s timeout, so this tolerates roughly a
- * minute of herdr being unreachable — long enough to ride out a restart (the
- * Homebrew auto-update case that produced `protocol_mismatch` before) without
- * abandoning a turn whose agent is still working perfectly well.
+ * Each query already has its own 15s timeout, so this tolerates roughly a
+ * minute of the backend being unreachable — long enough to ride out a restart
+ * without abandoning a turn whose agent is still working perfectly well.
  */
-const HERDR_FAILURES_BEFORE_GIVING_UP = 3;
+const BACKEND_FAILURES_BEFORE_GIVING_UP = 3;
 
 /**
  * How much of a blocked pane to read before parsing the prompt on it.
@@ -255,12 +282,15 @@ export type AnswerResult = { ok: true } | { ok: false; reason: "not-pending" };
  * pairing before it noticed the terminal was blocked — handed over so
  * adoptBlockedTerminal() doesn't lose or re-read anything. */
 export interface BlockedTerminalHandoff {
+  backend: BackendName;
   driver: AgentDriver;
   sessionId: string;
   transcriptPath: string;
+  transcriptIdentity?: TranscriptIdentity;
   offset: number;
   collected: string[];
   paneId: string;
+  ref: AgentRef;
   /** Live pane cwd — the adopted turn needs it to find the outbox. */
   cwd: string;
   /** The watcher's outbox snapshot, NOT a fresh one: re-baselining at adoption
@@ -270,6 +300,10 @@ export interface BlockedTerminalHandoff {
   /** Write tracking so far, handed over rather than restarted for the same
    *  reason — a write confirmed before the block still needs uploading. */
   writes: WrittenFileTracker;
+  /** Handoff evidence already confirmed twice by the watcher. */
+  ompStatus?: OmpStatusMemory;
+  ompNotice?: string;
+  ompFingerprint?: string;
 }
 
 export class TurnEngine {
@@ -286,7 +320,7 @@ export class TurnEngine {
   private readonly leases = new PaneLeaseRegistry();
 
   constructor(
-    private readonly herdr: HerdrClient,
+    private readonly terminals: Terminals,
     private readonly notifier: Notifier,
     private readonly opts: TurnEngineOptions,
     /** Read (never mutated) to tell whether this pane's cwd is shared with
@@ -296,6 +330,10 @@ export class TurnEngine {
 
   isBusy(paneId: string): boolean {
     return this.leases.isHeld(paneId);
+  }
+  isOmpWaiting(paneId: string): boolean {
+    const state = this.turns.get(paneId);
+    return state?.driver.kind === "omp" && (state.phase === "awaiting-omp" || state.previousStatus === "blocked");
   }
 
   /**
@@ -353,12 +391,22 @@ export class TurnEngine {
     let handedToPollLoop = false;
 
     try {
-      const agent = await this.herdr.agentGet(paneId);
+      const agent = await this.terminals.get(paneId);
       if (!agent) {
         throw new Error("agent-not-found");
       }
       if (lease.cancelled) return;
       const driver = driverFor(agent.agent);
+      const backend = backendForTarget(agent.ref.target);
+      if (backend === "orca" && hasUnsendableC0Controls(text)) {
+        await this.notifier.postReply(
+          pairing.channel,
+          pairing.threadTs ?? "",
+          submitRefusedText("unsafe-text", backend),
+        );
+        return;
+      }
+
 
       // Downloading happens here, inside the reservation, not in the caller:
       // a several-megabyte transfer can take a minute, and doing it before the
@@ -380,7 +428,7 @@ export class TurnEngine {
         : text;
 
       const sessionId = agent.sessionId ?? "";
-      const tPath = driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      const tPath = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
       const offset = tPath ? transcriptSizeSafe(tPath) : 0;
 
       // A pane sitting at one of the agent's startup dialogs reports `idle`, so
@@ -405,15 +453,16 @@ export class TurnEngine {
       // it's what lets the detector be shape-based rather than a list of known
       // dialogs, since the only thing on a fresh pane's screen is startup UI.
       if (!tPath && driver.parseStartupPrompt) {
-        const paneText = await this.herdr
-          .paneRead(agent.paneId, { source: driver.paneReadSource, lines: 40 })
+        const paneText = await this.terminals
+          .read(agent.ref.target, 40, driver.readRegion)
+          .then((snapshot) => snapshot.text)
           .catch(() => "");
         const question = paneText ? driver.parseStartupPrompt(paneText) : null;
         if (question) {
           await this.notifier.postReply(
             pairing.channel,
             pairing.threadTs ?? "",
-            `⚠️ ペインが起動時のダイアログで停止しています。ターミナルで応答してください。\n` +
+            `⚠️ ペインが起動時のダイアログで停止しています。このダイアログは端末で答えてください。\n` +
               `> ${question}\n` +
               `cctagは代わりに答えません（信頼の付与やツールチェーンの更新を含むため、` +
               `ディレクトリと環境を確認できる人が判断すべき項目です）。応答後にもう一度送ってください。`,
@@ -430,10 +479,13 @@ export class TurnEngine {
         pairing,
         requesterUserId,
         driver,
-        paneId: agent.paneId,
+        backend,
+        ref: agent.ref,
+        paneId: agent.ref.target,
         cwd: agent.cwd,
         sessionId,
         transcriptPath: tPath,
+        transcriptIdentity: agent.transcriptIdentity,
         offset,
         collected: [],
         outboxBaseline: snapshotOutbox(agent.cwd),
@@ -444,9 +496,11 @@ export class TurnEngine {
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         settle: new SettleTracker(),
-        failures: { agentGet: 0, paneRead: 0 },
+        previousStatus: "working",
+        failures: { get: 0, read: 0 },
         lease,
         promptId: null,
+        ompStatus: driver.kind === "omp" ? createOmpStatusMemory() : null,
       };
       this.turns.set(paneId, state);
 
@@ -466,51 +520,35 @@ export class TurnEngine {
         .trim();
 
       try {
-        // Atomic submit (text + Enter, server-side) — NOT send-text then a
-        // separate Enter. The two-call version raced Claude Code's paste
-        // coalescing: an Enter arriving before the injected text settled got
-        // absorbed as a newline, leaving the message unsent in the box until
-        // the next turn flushed it. agent prompt sequences both itself... but
-        // herdr 0.7.5 has been observed reporting agent.prompt as `ok` in ~2ms
-        // while the pane stays idle and nothing actually lands (confirmed via
-        // herdr's own server log against a real failure) — a herdr-internal
-        // timing issue this call can't detect on its own. Guard against it: if
-        // the pane is still idle after one poll interval, resend a bare Enter.
-        // Harmless no-op if the box really is empty (nothing to submit); if
-        // our text is sitting there unsent, this flushes it without a retry
-        // loop mis-firing on a genuinely-instant reply (those move to
-        // "working" at some point before settling, so the *resting* states —
-        // idle or done, same pair pollLoop's own finalize check treats as
-        // settled — are what "never even started" looks like here).
-        //
-        // Image attachments make this the normal case rather than the rare one,
-        // and one retry is no longer enough — see SUBMIT_RETRIES_WITH_IMAGES.
-        await this.herdr.agentPrompt(paneId, normalized);
-        // Retrying needs a stronger precondition than "the pane looks idle".
-        // A short turn can finish between two polls, and by then whoever is at
-        // the keyboard may have started typing the next prompt — a blind Enter
-        // would submit *their* draft. The transcript growing past the
-        // pre-submit offset means our prompt did land (Claude Code appends the
-        // user message on submit), so that's the signal to stop. Without a
-        // located transcript there's nothing to check against, so fall back to
-        // the single conservative retry this had before.
         const canVerify = tPath !== "";
         const retries = prepared.imageCount > 0 && canVerify ? SUBMIT_RETRIES_WITH_IMAGES : 1;
-        for (let i = 0; i < retries; i++) {
-          await sleep(this.opts.pollIntervalMs);
-          // A cancel landing mid-sequence must stop the keystrokes, not just the
-          // poll loop afterwards: these Enters go to a live pane, and by now the
-          // thread they belong to may already be disconnected.
-          if (lease.cancelled) break;
-          if (canVerify && transcriptSizeSafe(tPath) > offset) break; // submitted
-          const recheck = await this.herdr.agentGet(paneId).catch(() => null);
-          if (!recheck || (recheck.agentStatus !== "idle" && recheck.agentStatus !== "done")) break;
-          await this.herdr.paneSendKeys(paneId, "Enter");
+        const outcome = await this.terminals.submit(agent.ref, normalized, {
+          driver,
+          cancelled: () => lease.cancelled,
+          transcriptGrew: () => (canVerify ? transcriptSizeSafe(tPath) > offset : null),
+          retryLimit: retries,
+          pollIntervalMs: this.opts.pollIntervalMs,
+        });
+        if (outcome.draftStashed) {
+          await this.notifier
+            .postReply(pairing.channel, pairing.threadTs ?? "", draftStashedText(backend))
+            .catch(() => {});
+        }
+        if (backend === "orca" && outcome.status === "accepted") {
+          await statusHandle.update(`📨 ${backend} は入力を受け付けました。ターン開始を確認しています…`).catch(() => {});
         }
       } catch (err) {
         // Input injection failed after the state was already registered —
         // roll it back so the terminal doesn't stay stuck "busy" forever.
         this.turns.delete(paneId);
+        if (err instanceof SubmitRefused) {
+          await statusHandle.update(submitRefusedText(err.reason, backend, err.composer)).catch(() => {});
+          return;
+        }
+        if (err instanceof WriteOutcomeUnknown) {
+          await statusHandle.update(writeOutcomeUnknownText(err)).catch(() => {});
+          return;
+        }
         await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
         throw err;
       }
@@ -583,14 +621,10 @@ export class TurnEngine {
   }
 
   /**
-   * BackgroundWatcher calls this when it notices a paired terminal has gone
-   * `blocked` with no active Slack-initiated turn running (i.e. work started
-   * directly at the terminal just hit an AskUserQuestion or permission
-   * prompt). Registering a TurnState and running the same pollLoop() a
-   * normal turn uses means the existing AskUserQuestion/permission button
-   * flow — and answering it from Slack — works identically whether the turn
-   * was Slack-initiated or discovered mid-flight; no input is sent, since
-   * the terminal is already sitting at the prompt.
+   * BackgroundWatcher calls this when a paired terminal has become blocked
+   * without an active Slack turn. Interactive drivers expose the prompt for
+   * Slack answers; OMP carries its confirmed screen notice here and stays
+   * terminal-only.
    */
   async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<boolean> {
     const paneId = pairing.paneId;
@@ -621,10 +655,13 @@ export class TurnEngine {
         pairing,
         requesterUserId: pairing.pairedBy,
         driver: handoff.driver,
+        backend: handoff.backend,
+        ref: handoff.ref,
         paneId: handoff.paneId,
         cwd: handoff.cwd,
         sessionId: handoff.sessionId,
         transcriptPath: handoff.transcriptPath,
+        transcriptIdentity: handoff.transcriptIdentity,
         offset: handoff.offset,
         collected: [...handoff.collected],
         outboxBaseline: handoff.outboxBaseline,
@@ -635,9 +672,12 @@ export class TurnEngine {
         startedAt: Date.now(),
         deadlineAt: Date.now() + this.opts.turnTimeoutMs,
         settle: adoptedSettle,
-        failures: { agentGet: 0, paneRead: 0 },
+        previousStatus: "blocked",
+        failures: { get: 0, read: 0 },
         lease,
         promptId: null,
+        ompStatus:
+          handoff.driver.kind === "omp" ? (handoff.ompStatus ?? createOmpStatusMemory()) : null,
       };
       this.turns.set(paneId, state);
 
@@ -647,6 +687,13 @@ export class TurnEngine {
       if (lease.cancelled) {
         this.turns.delete(paneId);
         return false;
+      }
+      if (
+        handoff.driver.kind === "omp" &&
+        handoff.ompNotice &&
+        handoff.ompFingerprint
+      ) {
+        await this.postOmpNotice(state, handoff.ompNotice, handoff.ompFingerprint);
       }
 
       handedToPollLoop = true;
@@ -679,18 +726,31 @@ export class TurnEngine {
     ) {
       return { ok: false, reason: "not-pending" };
     }
+    const prompt = state.pendingPrompt;
+    if (!prompt || prompt.kind !== "question" || !("verified" in prompt)) {
+      return { ok: false, reason: "not-pending" };
+    }
     const info = state.pendingQuestionInfo;
-    const label = info.options[optionIndex]?.label ?? String(optionIndex + 1);
+    const label = info.options[optionIndex]?.label;
+    if (label === undefined) return { ok: false, reason: "not-pending" };
 
     state.answering = true; // claimed — see TurnState.answering
     try {
-      const answer = state.driver.answerQuestionOption
-        ? state.driver.answerQuestionOption(this.herdr, state.paneId, optionIndex + 1, info, state.lease.signal)
-        : state.driver.answerOption(this.herdr, state.paneId, String(optionIndex + 1));
-      await answer;
+      const channel = this.terminals.openAnswer(state.ref, prompt.verified);
+      if (state.driver.answerQuestionOption) {
+        await state.driver.answerQuestionOption(
+          this.terminals,
+          channel,
+          state.paneId,
+          optionIndex + 1,
+          info,
+          state.lease.signal,
+        );
+      } else {
+        await state.driver.answerOption(channel, String(optionIndex + 1), label);
+      }
     } catch (err) {
-      state.answering = false; // nothing was accepted; let the user try again
-      throw err;
+      return this.handleAnswerFailure(state, err);
     }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, label, actor), []).catch(() => {});
     this.markPromptResolved(state);
@@ -718,11 +778,10 @@ export class TurnEngine {
     }
     const info = state.pendingQuestionInfo;
     const submit = state.driver.answerQuestionMultiSelect;
-    // Only reachable if the blocks offered checkboxes, which only happens for a
-    // multi-select question on a driver that can submit one — but the guard is
-    // cheap and a stale message is not a reason to send digits into a
-    // single-select list.
-    if (!submit || !info.multiSelect) return { ok: false, reason: "not-pending" };
+    const prompt = state.pendingPrompt;
+    if (!submit || !info.multiSelect || !prompt || prompt.kind !== "question" || !("verified" in prompt)) {
+      return { ok: false, reason: "not-pending" };
+    }
 
     const chosen = optionIndices.filter((i) => i >= 0 && i < info.options.length);
     if (chosen.length === 0) return { ok: false, reason: "not-pending" };
@@ -730,15 +789,15 @@ export class TurnEngine {
     state.answering = true; // claimed — see TurnState.answering
     try {
       await submit(
-        this.herdr,
-        state.paneId,
+        this.terminals,
+        this.terminals.openAnswer(state.ref, prompt.verified),
+        state.ref,
         chosen.map((i) => i + 1),
         info,
         state.lease.signal,
       );
     } catch (err) {
-      state.answering = false; // nothing was accepted; let the user try again
-      throw err;
+      return this.handleAnswerFailure(state, err);
     }
     const labels = chosen.map((i) => info.options[i].label).join(", ");
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, labels, actor), []).catch(() => {});
@@ -753,6 +812,10 @@ export class TurnEngine {
       return { ok: false, reason: "not-pending" };
     }
     const info = state.pendingQuestionInfo;
+    const prompt = state.pendingPrompt;
+    if (!prompt || prompt.kind !== "question" || !("verified" in prompt)) {
+      return { ok: false, reason: "not-pending" };
+    }
 
     // "1,3" to a multi-select question means options 1 and 3, not the literal
     // string. Claude Code does not read it that way — the free-text row records
@@ -771,10 +834,16 @@ export class TurnEngine {
 
     state.answering = true;
     try {
-      await answer(this.herdr, state.paneId, info, freeText);
+      await answer(
+        this.terminals,
+        this.terminals.openAnswer(state.ref, prompt.verified),
+        state.ref,
+        info,
+        freeText,
+        state.lease.signal,
+      );
     } catch (err) {
-      state.answering = false;
-      throw err;
+      return this.handleAnswerFailure(state, err);
     }
     await state.promptHandle?.update(askUserQuestionAnsweredText(info.header, freeText), []).catch(() => {});
     this.markPromptResolved(state);
@@ -800,12 +869,27 @@ export class TurnEngine {
     ) {
       return { ok: false, reason: "not-pending" };
     }
+    const prompt = state.pendingPrompt;
+    if (!prompt) return { ok: false, reason: "not-pending" };
+
+    let answer: () => Promise<void>;
+    if (prompt.kind === "blind-permission") {
+      if (num !== "y" && num !== "n") return { ok: false, reason: "not-pending" };
+      answer = () => this.terminals.openBlind(state.ref, prompt.blind).answer(num);
+    } else if (prompt.kind === "permission") {
+      const choice = prompt.menu.choices.find((candidate) => candidate.num === num);
+      if (!choice) return { ok: false, reason: "not-pending" };
+      const channel = this.terminals.openAnswer(state.ref, prompt.verified);
+      answer = () => state.driver.answerOption(channel, num, choice.label);
+    } else {
+      return { ok: false, reason: "not-pending" };
+    }
+
     state.answering = true;
     try {
-      await state.driver.answerOption(this.herdr, state.paneId, num);
+      await answer();
     } catch (err) {
-      state.answering = false;
-      throw err;
+      return this.handleAnswerFailure(state, err);
     }
     const by = actor ? `（${actor}）` : "";
     await state.promptHandle?.update(`→ ${num} を送信しました${by}`, []).catch(() => {});
@@ -832,21 +916,32 @@ export class TurnEngine {
     ) {
       return { ok: false, reason: "not-pending" };
     }
+    const prompt = state.pendingPrompt;
     const answer = state.driver.answerPlanFeedback;
-    if (!answer) return { ok: false, reason: "not-pending" };
+    if (!answer || !prompt || prompt.kind !== "permission") return { ok: false, reason: "not-pending" };
+    if (!prompt.menu.choices.some((choice) => choice.num === String(state.planFeedbackOptionNum))) {
+      return { ok: false, reason: "not-pending" };
+    }
 
+    if (state.backend === "orca" && hasUnsendableC0Controls(freeText)) {
+      throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
+    }
     state.answering = true;
     try {
-      await answer(this.herdr, state.paneId, state.planFeedbackOptionNum, freeText);
+      await answer(
+        this.terminals.openAnswer(state.ref, prompt.verified),
+        state.planFeedbackOptionNum,
+        freeText,
+      );
     } catch (err) {
-      state.answering = false;
-      throw err;
+      return this.handleAnswerFailure(state, err);
     }
     await state.promptHandle?.update(`→ 修正を依頼しました: ${freeText}`, []).catch(() => {});
     this.markPromptResolved(state);
     await this.restartStatusLine(state);
     return { ok: true };
   }
+
 
   /**
    * Posts a fresh status line and makes it the turn's.
@@ -897,14 +992,27 @@ export class TurnEngine {
     return `❓ *${info.header}*: ${info.question}\n${options}\n\n（ターミナル側で回答済み）`;
   }
 
+  private async handleAnswerFailure(state: TurnState, error: unknown): Promise<AnswerResult> {
+    if (error instanceof WriteOutcomeUnknown) {
+      state.promptId = null;
+      state.answering = true;
+      await state.promptHandle?.update(WRITE_OUTCOME_UNKNOWN_MESSAGE, []).catch(() => {});
+      return { ok: true };
+    }
+    state.answering = false;
+    throw error;
+  }
+
   private markPromptResolved(state: TurnState): void {
     state.promptId = null;
     state.promptHandle = undefined;
     state.promptFingerprint = undefined;
+    state.pendingPrompt = undefined;
     state.pendingQuestionInfo = undefined;
     state.planFeedbackOptionNum = undefined;
     state.answering = false;
     state.phase = "running";
+    state.ompNoticeText = undefined;
   }
 
   /**
@@ -923,6 +1031,7 @@ export class TurnEngine {
     const promptId = nextPromptId();
     state.promptId = promptId;
     state.promptFingerprint = fingerprint;
+    state.pendingPrompt = prompt;
     state.answering = false;
 
     if (prompt.kind === "question") {
@@ -938,7 +1047,9 @@ export class TurnEngine {
       return;
     }
 
-    const { menu, isPlanPrompt, planFeedbackOptionNum: feedbackNum } = prompt;
+    const menu = prompt.kind === "permission" ? prompt.menu : null;
+    const isPlanPrompt = prompt.kind === "permission" && prompt.isPlanPrompt;
+    const feedbackNum = prompt.kind === "permission" ? prompt.planFeedbackOptionNum : undefined;
     state.planFeedbackOptionNum = feedbackNum;
 
     if (isPlanPrompt && this.notifier.uploadTextFile) {
@@ -957,26 +1068,15 @@ export class TurnEngine {
         ? { ...menu, choices: menu.choices.filter((c) => c.num !== String(feedbackNum)) }
         : menu;
 
-    // The screen that defeated the parser, kept somewhere it can still be
-    // found. It used to exist only inside the Slack message posted below — so
-    // deleting that message, or an in-place update replacing it once the prompt
-    // was answered, destroyed the only copy and left an occurrence impossible
-    // to diagnose afterwards. That happened. Logged whole: BLOCKED_PANE_LINES
-    // bounds it, and a parse failure is rare enough that one dump each is
-    // exactly what's wanted.
     if (!buttonMenu) {
       console.error(
         `[turn ${paneId}] could not parse the prompt on screen (question-shaped: ${
-          state.driver.looksLikeQuestionScreen?.(paneText) === true
+          prompt.kind === "unreadable-question"
         }). Raw pane follows:\n${paneText}`,
       );
     }
 
-    // A question that failed to parse must not be offered a yes/no button: it
-    // would send a bare `y` into a numbered — possibly multi-select — list. See
-    // unreadableQuestionBlocks.
-    const unreadableQuestion = !buttonMenu && state.driver.looksLikeQuestionScreen?.(paneText) === true;
-
+    const unreadableQuestion = prompt.kind === "unreadable-question";
     const header = isPlanPrompt
       ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
       : unreadableQuestion
@@ -995,6 +1095,27 @@ export class TurnEngine {
     state.phase = "awaiting-permission";
   }
 
+  private async postOmpNotice(state: TurnState, text: string, fingerprint: string): Promise<void> {
+    try {
+      const handle = await this.notifier.postMessage(state.pairing.channel, state.pairing.threadTs ?? "", text);
+      state.promptHandle = handle;
+      state.promptFingerprint = fingerprint;
+      state.promptId = null;
+      state.pendingPrompt = undefined;
+      state.pendingQuestionInfo = undefined;
+      state.planFeedbackOptionNum = undefined;
+      state.answering = false;
+      state.ompNoticeText = text;
+      if (state.ompStatus) state.ompStatus = markOmpNoticePosted(state.ompStatus, fingerprint);
+      state.phase = "awaiting-omp";
+    } catch (error) {
+      console.error(
+        `[turn ${state.paneId}] OMP waiting notice post failed:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
   private async pollLoop(state: TurnState): Promise<void> {
     const paneId = state.paneId;
     try {
@@ -1007,6 +1128,60 @@ export class TurnEngine {
       if (this.turns.get(paneId) === state) this.turns.delete(paneId);
       state.lease.release();
     }
+  }
+
+  private switchOmpSession(state: TurnState, agent: AgentInfo): void {
+    state.driver = driverFor(agent.agent);
+    state.ref = agent.ref;
+    state.cwd = agent.cwd;
+    state.sessionId = agent.sessionId ?? "";
+    state.transcriptIdentity = agent.transcriptIdentity;
+    state.transcriptPath = agent.transcriptIdentity?.path ?? "";
+    state.offset = state.transcriptPath ? transcriptSizeSafe(state.transcriptPath) : 0;
+    state.collected = [];
+    state.writes = new WrittenFileTracker();
+    state.toolCounts = {};
+    state.outboxBaseline = snapshotOutbox(agent.cwd);
+    state.settle = new SettleTracker();
+    state.previousStatus = "working";
+    state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
+    state.ompStatus = agent.agent === "omp" ? createOmpStatusMemory() : null;
+  }
+
+  private async revalidateOmpTranscript(
+    state: TurnState,
+    beforeRead: AgentInfo,
+  ): Promise<"same" | "changed" | "lost" | "retry"> {
+    let current: AgentInfo | null;
+    try {
+      current = await this.terminals.get(state.paneId);
+      state.failures.get = 0;
+    } catch (error) {
+      state.failures.get++;
+      if (state.failures.get <= BACKEND_FAILURES_BEFORE_GIVING_UP) {
+        console.error(
+          `[turn ${state.paneId}] OMP transcript ownership query failed (${state.failures.get}/${BACKEND_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+          error instanceof Error ? error.message : error,
+        );
+        return "retry";
+      }
+      await this.finalize(state, `⚠️ ${state.backend}への問い合わせが連続して失敗しました（部分的な出力のみ）`);
+      return "lost";
+    }
+    if (!current || current.agent !== "omp" || !current.transcriptIdentity) {
+      state.collected = [];
+      state.writes = new WrittenFileTracker();
+      await this.finalize(state, OMP_RESUME_NOTICE);
+      return "lost";
+    }
+    if (
+      current.sessionId !== beforeRead.sessionId ||
+      !sameTranscriptIdentity(current.transcriptIdentity, beforeRead.transcriptIdentity)
+    ) {
+      this.switchOmpSession(state, current);
+      return "changed";
+    }
+    return "same";
   }
 
   private async poll(state: TurnState): Promise<void> {
@@ -1022,53 +1197,81 @@ export class TurnEngine {
       if (state.lease.signal.aborted) return;
 
       // `null` and a thrown error mean different things and must not be
-      // conflated: agentGet() returns null only for herdr's own "no such pane"
-      // answer, but throws for a command timeout, a spawn failure, or output it
-      // can't parse. Treating the second as a dead pane ended live turns on a
-      // transient hiccup — and, because finalize() releases the pane, handed it
-      // to the watcher, which rebaselines and drops the rest of the output.
+      // conflated: the Herdr adapter's get returns null only for its own "no
+      // such pane" answer, but throws for a command timeout, spawn failure, or
+      // output it cannot parse. Treating the second as a dead pane ended live
+      // turns on a transient hiccup and handed the pane to the watcher, which
+      // rebaselines and drops the rest of the output.
       let agent: AgentInfo | null;
       try {
-        agent = await this.herdr.agentGet(paneId);
-        state.failures.agentGet = 0;
+        agent = await this.terminals.get(paneId);
+        state.failures.get = 0;
       } catch (err) {
-        state.failures.agentGet += 1;
-        if (state.failures.agentGet <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+        state.failures.get += 1;
+        if (state.failures.get <= BACKEND_FAILURES_BEFORE_GIVING_UP) {
           console.error(
-            `[turn ${paneId}] herdr query failed (${state.failures.agentGet}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+            `[turn ${paneId}] ${state.backend} query failed (${state.failures.get}/${BACKEND_FAILURES_BEFORE_GIVING_UP}), retrying:`,
             err instanceof Error ? err.message : err,
           );
           continue;
         }
-        await this.finalize(state, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
+        await this.finalize(
+          state,
+          `⚠️ ${state.backend}への問い合わせが連続して失敗しました（部分的な出力のみ）`,
+        );
         return;
       }
       if (!agent) {
-        await this.finalize(state, "⚠️ インスタンスが終了しました（部分的な出力のみ）");
+        await this.finalize(
+          state,
+          state.driver.kind === "omp" ? OMP_RESUME_NOTICE : "⚠️ インスタンスが終了しました（部分的な出力のみ）",
+        );
+        return;
+      }
+      if (state.driver.kind === "omp" && agent.agent !== "omp") {
+        state.collected = [];
+        state.writes = new WrittenFileTracker();
+        await this.finalize(state, OMP_RESUME_NOTICE);
         return;
       }
 
-      if (agent.sessionId && agent.sessionId !== state.sessionId) {
-        state.sessionId = agent.sessionId;
-        state.transcriptPath = state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-        state.offset = 0;
+      const sessionChanged = Boolean(agent.sessionId && agent.sessionId !== state.sessionId);
+      const identityChanged =
+        state.driver.kind === "omp" &&
+        !sameTranscriptIdentity(state.transcriptIdentity, agent.transcriptIdentity);
+      if (sessionChanged || identityChanged) {
+        if (state.driver.kind === "omp") {
+          this.switchOmpSession(state, agent);
+        } else {
+          state.sessionId = agent.sessionId ?? "";
+          state.transcriptIdentity = agent.transcriptIdentity;
+          state.transcriptPath =
+            agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+          state.offset = 0;
+          // Session-local lifecycle and screen evidence must not leak to this transcript.
+          state.settle = new SettleTracker();
+          state.previousStatus = "working";
+        }
       } else if (!state.transcriptPath) {
-        // Still no transcript (herdr may never report a sessionId at all —
-        // e.g. its SessionStart hook is being blocked — so the branch above
-        // never fires). Retry the driver's cwd-based fallback every poll:
-        // the very first attempt (at turn start, in startTurn()) can miss if
-        // Claude Code hasn't created the session's transcript file yet, and
-        // without this retry that miss is permanent for the rest of the turn.
-        const located = state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+        // Retry the cwd-based fallback if transcript creation was delayed.
+        const located =
+          agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
         if (located) {
           state.transcriptPath = located;
-          state.offset = 0;
+          state.transcriptIdentity = agent.transcriptIdentity;
+          state.offset = state.driver.kind === "omp" ? transcriptSizeSafe(located) : 0;
         }
       }
 
       if (state.transcriptPath) {
-        const { records, newOffset } = await readNewRecords(state.transcriptPath, state.offset);
-        const grew = newOffset > state.offset;
+        const readOffset = state.offset;
+        const { records, newOffset } = await readNewRecords(state.transcriptPath, readOffset);
+        if (state.driver.kind === "omp") {
+          const ownership = await this.revalidateOmpTranscript(state, agent);
+          if (ownership === "lost") return;
+          if (ownership !== "same") continue;
+        }
+        const grew = newOffset > readOffset;
         state.offset = newOffset;
         const output = state.driver.extractTurnOutput(records);
         state.collected.push(...output.texts);
@@ -1077,12 +1280,7 @@ export class TurnEngine {
         }
         state.writes.ingest(output);
         state.settle.observe(output.lifecycle ?? []);
-        // Progress in the transcript is proof the agent is alive and working, so
-        // the deadline measures silence rather than total elapsed time. Without
-        // this a genuinely long turn was cut at turnTimeoutMs no matter how much
-        // it was producing — the timeout's own doc comment says it should only
-        // measure how long the agent has gone without progress, and a blocked
-        // pane was the only thing that used to satisfy it.
+        // Transcript growth proves the agent is alive and working.
         if (grew) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
       }
 
@@ -1101,13 +1299,69 @@ export class TurnEngine {
       // has to come *before* the check below rather than after: while a prompt
       // is up the loop sleeps on a 5s floor, so a deadline refreshed only after
       // the check would already have lapsed by the time the next poll reads it.
-      // herdr's status, corrected where the transcript contradicts a `working`
-      // that will never clear (settle.ts). `blocked` is never rewritten, so
-      // everything below this line behaves exactly as it did for a real prompt.
-      const status = state.settle.effectiveStatus(agent.agentStatus);
+      // Shared resolution preserves herdr's classified correction and applies
+      // Orca's timestamp/status hints without confusing either with output offsets.
+      let boundaries = EMPTY_TRANSCRIPT_BOUNDARIES;
+      if (agent.evidence.kind === "hint" && state.transcriptPath) {
+        const recentRecords = await readRecentRecords(state.transcriptPath);
+        if (state.driver.kind === "omp") {
+          const ownership = await this.revalidateOmpTranscript(state, agent);
+          if (ownership === "lost") return;
+          if (ownership !== "same") continue;
+        }
+        boundaries = transcriptBoundaries(state.driver.extractLifecycle(recentRecords));
+      }
 
+      let resolution: StatusResolution;
+      let ompResolution: OmpStatusResolution | null = null;
+      if (state.driver.kind === "omp") {
+        let snapshot: ScreenSnapshot | null = null;
+        try {
+          snapshot = await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, "screen");
+          state.failures.read = 0;
+        } catch (error) {
+          state.failures.read++;
+          if (state.failures.read === 1) {
+            console.error(
+              `[turn ${paneId}] OMP screen read failed; retaining prior state:`,
+              error instanceof Error ? error.message : error,
+            );
+          }
+        }
+        if (state.transcriptPath) {
+          const ownership = await this.revalidateOmpTranscript(state, agent);
+          if (ownership === "lost") return;
+          if (ownership !== "same") continue;
+        }
+        ompResolution = resolveOmpStatus({
+          settle: state.settle,
+          boundaries,
+          previousStatus: state.previousStatus,
+          memory: state.ompStatus ?? createOmpStatusMemory(),
+          snapshot,
+        });
+        state.ompStatus = ompResolution.memory;
+        resolution = ompResolution;
+      } else {
+        resolution = await resolveStatus({
+          evidence: agent.evidence,
+          settle: state.settle,
+          boundaries,
+          previousStatus: state.previousStatus,
+          readScreen: async () => {
+            const snapshot = await this.terminals.read(state.paneId, 40, "screen");
+            state.failures.read = 0;
+            return {
+              snapshot,
+              fingerprint: snapshot.complete ? promptFingerprint(state.driver.parseBlockedPane(snapshot.text)) : null,
+            };
+          },
+        });
+      }
+      const status = resolution.status;
+      state.previousStatus = status;
       const blocked = status === "blocked";
-      if (blocked) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
+      if (resolution.extendDeadline) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
 
       if (Date.now() > state.deadlineAt) {
         await this.finalize(state, "⚠️ タイムアウトしました（エージェントはまだ動作中の可能性があります）");
@@ -1115,6 +1369,12 @@ export class TurnEngine {
       }
 
       if (blocked) {
+        if (state.driver.kind === "omp") {
+          if (ompResolution?.notice && ompResolution.fingerprint) {
+            await this.postOmpNotice(state, ompResolution.notice, ompResolution.fingerprint);
+          }
+          continue;
+        }
         // Staying busy for as long as the prompt is up is what stops
         // BackgroundWatcher from re-adopting the pane and posting the same
         // prompt again; and a pane sitting at a prompt is not one a new turn
@@ -1128,21 +1388,27 @@ export class TurnEngine {
         // failed read.
         let paneText: string;
         try {
-          paneText = await this.herdr.paneRead(state.paneId, {
-            source: state.driver.paneReadSource,
-            lines: BLOCKED_PANE_LINES,
-          });
-          state.failures.paneRead = 0;
+          if (resolution.screen) {
+            paneText = resolution.screen.text;
+          } else {
+            paneText = (
+              await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion)
+            ).text;
+          }
+          state.failures.read = 0;
         } catch (err) {
-          state.failures.paneRead += 1;
-          if (state.failures.paneRead <= HERDR_FAILURES_BEFORE_GIVING_UP) {
+          state.failures.read += 1;
+          if (state.failures.read <= BACKEND_FAILURES_BEFORE_GIVING_UP) {
             console.error(
-              `[turn ${paneId}] pane read failed (${state.failures.paneRead}/${HERDR_FAILURES_BEFORE_GIVING_UP}), retrying:`,
+              `[turn ${paneId}] pane read failed (${state.failures.read}/${BACKEND_FAILURES_BEFORE_GIVING_UP}), retrying:`,
               err instanceof Error ? err.message : err,
             );
             continue;
           }
-          await this.finalize(state, "⚠️ herdrへの問い合わせが連続して失敗しました（部分的な出力のみ）");
+          await this.finalize(
+            state,
+            `⚠️ ${state.backend}への問い合わせが連続して失敗しました（部分的な出力のみ）`,
+          );
           return;
         }
         const prompt = state.driver.parseBlockedPane(paneText);
@@ -1173,12 +1439,23 @@ export class TurnEngine {
         // else: still the same prompt we already posted — keep waiting.
         continue;
       }
+      if (
+        state.driver.kind === "omp" &&
+        state.phase === "awaiting-omp" &&
+        !ompResolution?.releaseBlocked
+      ) {
+        continue;
+      }
 
       if (state.phase !== "running") {
         // Was awaiting an answer, and the terminal is no longer blocked —
         // resolved, either by our own button/free-text (which already
         // cleared promptHandle) or directly at the terminal keyboard.
-        await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
+        const resolvedText =
+          state.driver.kind === "omp" && state.ompNoticeText
+            ? `${state.ompNoticeText}\n\n（ターミナル側で回答済み）`
+            : this.answeredAtTerminalText(state);
+        await state.promptHandle?.update(resolvedText, []).catch(() => {});
         this.markPromptResolved(state);
       }
 
@@ -1234,7 +1511,7 @@ export class TurnEngine {
       warning =
         state.driver.kind === "codex"
           ? "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（ペインでターンが開始されなかった可能性があります。Codexはターンが走るまでセッションファイルを作りません）。"
-          : "⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（herdrがsessionIdを報告できていない可能性があります）。";
+          : `⚠️ transcriptが見つからず、応答テキストを読み取れませんでした（${state.backend}がsessionIdを報告できていない可能性があります）。`;
     }
     if (warning) {
       await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", warning);
@@ -1296,12 +1573,17 @@ export class TurnEngine {
    * those come from this turn's own transcript, so they're never ambiguous.
    */
   private async outboxOwnership(pairing: Pairing, cwd: string): Promise<{ sole: true } | { sole: false; reason: string }> {
-    const agents = await this.herdr.agentList().catch(() => null);
-    if (!agents) {
+    const result = await this.terminals.list().catch(() => null);
+    if (!result || !result.complete) {
       // Ownership can't be established, so it can't be assumed either.
-      return { sole: false, reason: "herdrのインスタンス一覧を取得できず、宛先スレッドを確認できませんでした" };
+      const backendNames = result?.failures.map((failure) => failure.backend).join(", ");
+      const subject = backendNames ? `${backendNames}のインスタンス一覧` : "インスタンス一覧";
+      return {
+        sole: false,
+        reason: `${subject}を取得できず、宛先スレッドを確認できませんでした`,
+      };
     }
-    const cwdByPane = new Map(agents.map((a) => [a.paneId, a.cwd]));
+    const cwdByPane = new Map(result.agents.map((a) => [a.ref.target, a.cwd]));
     const sharing = this.pairings.list().filter((p) => p.key !== pairing.key && cwdByPane.get(p.paneId) === cwd);
     if (sharing.length === 0) return { sole: true };
     return { sole: false, reason: "同じディレクトリに接続されたスレッドが他にもあり、どのスレッド宛てか判別できません" };

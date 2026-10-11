@@ -6,6 +6,7 @@ import {
   assertExplicitEnvFileExists,
   parsePositiveNumber,
   resolveEnvFile,
+  resolveBackendConfig,
 } from "./config.js";
 
 function withEnv(value: string | undefined, run: () => void): void {
@@ -165,4 +166,36 @@ test("the embedded config template stays in sync with every key required() deman
       `CONFIG_TEMPLATE is missing required key ${key}`,
     );
   }
+});
+
+test("backend config resolves injectable defaults and environment overrides", () => {
+  const checked: string[] = [];
+  assert.deepEqual(
+    resolveBackendConfig({}, (path) => {
+      checked.push(path);
+      return true;
+    }),
+    {
+      herdr: { bin: "/opt/homebrew/bin/herdr" },
+      orca: { bin: "/opt/homebrew/bin/orca" },
+    },
+  );
+  assert.deepEqual(checked, ["/opt/homebrew/bin/herdr", "/opt/homebrew/bin/orca"]);
+
+  assert.deepEqual(
+    resolveBackendConfig({ CCTAG_HERDR_BIN: "/custom/herdr", CCTAG_ORCA_BIN: "" }, (path) => path === "/custom/herdr"),
+    { herdr: { bin: "/custom/herdr" }, orca: null },
+  );
+});
+
+test("missing backends disable individually and both disabled refuse startup", () => {
+  assert.deepEqual(
+    resolveBackendConfig({}, (path) => path === "/opt/homebrew/bin/orca"),
+    { herdr: null, orca: { bin: "/opt/homebrew/bin/orca" } },
+  );
+  assert.throws(
+    () => resolveBackendConfig({ CCTAG_HERDR_BIN: "", CCTAG_ORCA_BIN: "" }, () => true),
+    /enable at least one backend/,
+  );
+  assert.throws(() => resolveBackendConfig({}, () => false), /enable at least one backend/);
 });

@@ -7,9 +7,12 @@
 <img src="assets/icon.png" alt="cctag icon" width="120" />
 
 Bridge a Slack thread to a **locally running coding-agent TUI session** —
-Claude Code or Codex CLI — the way
+Claude Code, Codex CLI, or oh-my-pi (`omp`) — the way
 [Claude Tag](https://www.anthropic.com/news/introducing-claude-tag) bridges
-Slack to a cloud session — except cctag drives *your own terminal*.
+Slack to a cloud session — except cctag drives *your own terminal*. Available
+agent/backend combinations vary; see the support matrix below.
+
+The diagram below shows a herdr-based setup; an Orca-based setup uses Orca for its terminal connection.
 
 ```
 Slack thread (@cctag)
@@ -25,14 +28,19 @@ cctag daemon (Node/TS, runs on your machine)
    └─ pairing: thread (channel, thread_ts) ⇔ herdr pane_id
 ```
 
-cctag controls the paired agent through [herdr](https://herdr.dev) (a terminal
-workspace manager) rather than screen-scraping tmux — agent discovery,
-keystroke injection, and status detection all go through the `herdr` CLI.
-Turn output is read from the agent's own structured JSONL transcript, not
-parsed off the screen. herdr reports which CLI is running in each pane
-(`claude` or `codex`), and cctag picks the matching driver automatically, so
-one `@cctag` bot can be paired to either kind of session — see [Agent
-support](#agent-support) for what differs between them.
+In a Herdr-backed setup, cctag controls the paired agent through [herdr](https://herdr.dev)
+(a terminal workspace manager) rather than screen-scraping tmux — discovery,
+keystroke injection, and status use Herdr. Turn output comes from the agent's
+own structured JSONL transcript, not the screen. Herdr reports `claude` or
+`codex`, and cctag selects the matching driver. This covers Claude Code or
+Codex CLI on Herdr; see the support matrix for Orca combinations.
+
+cctag can also drive agents running in [Orca](https://github.com/stablyai/orca)
+terminals, alongside herdr, from the same Spoke. In the `@cctag connect` picker,
+Orca Claude Code and `omp` rows share the `orca · <directory name>` group;
+`omp` rows carry the `[omp]` prefix. Herdr pane IDs and existing pairings keep
+their current format.
+See [Terminal backends](#terminal-backends-herdr-and-orca).
 
 ## What this actually looks like in use
 
@@ -80,21 +88,24 @@ better choice — is set out in
 Pre-1.0 is a deliberate claim rather than a placeholder: the interface still
 moves, so pin an exact version if that matters to you.
 
-Text-in / text-out turns work end-to-end for both **Claude Code**
-and **Codex CLI**. Multiple-choice prompts are also supported: when the
-paired agent shows a tool-permission (or Codex command-approval) menu, cctag
-renders it as Slack buttons and answers are sent back into the terminal for
-you. If someone answers directly at the keyboard instead, the Slack message
-updates to say so.
+Text-in / text-out turns work for the supported combinations: Claude Code on
+Herdr or Orca, Codex CLI on Herdr, and `omp` on Orca. For supported Claude Code
+and Codex CLI tool-permission / command-approval prompts, cctag shows Slack
+buttons; a human can answer through Slack or at the terminal. `omp` questions
+and approvals appear in Slack as terminal-only notices; Slack answers aren't
+supported.
 
-Note on how this works: neither agent writes a pending permission/question
-prompt to its session transcript until *after* it's answered (Claude Code's
-`AskUserQuestion` tool call is written atomically with its result), so
-pending prompts are read directly off the terminal screen via `herdr pane
-read`, not from the transcript. See `src/agents/claude/prompts.ts` and
-`src/agents/codex/prompts.ts`.
+Claude Code and Codex CLI don't write pending permission or question prompts
+to their session transcripts until after they're answered, so cctag reads them
+from the terminal screen through the selected backend (Herdr or Orca). OMP
+uses a separate terminal-only notice path. See
+`src/agents/claude/prompts.ts`, `src/agents/codex/prompts.ts`, and
+`src/agents/omp/prompts.ts`.
 
 ### Agent support
+
+The table compares Claude Code and Codex CLI; `omp`'s narrower support is
+listed in the terminal-backend matrix below.
 
 | Feature | Claude Code | Codex CLI |
 |---|:---:|:---:|
@@ -110,7 +121,40 @@ read`, not from the transcript. See `src/agents/claude/prompts.ts` and
 | Agent → Slack uploads detected from the transcript | ✅ `SendUserFile` | — *(no equivalent tool)* |
 
 Where a feature isn't supported, cctag replies saying so rather than failing
-silently — e.g. `@cctag mode plan` on a Codex-paired thread.
+silently — e.g. `@cctag mode plan` on Codex or `@cctag model` on `omp`.
+
+### Terminal backends: herdr and Orca
+
+One Spoke can serve both backends at once. Each backend uses its configured
+executable if that path exists; when a variable is unset, cctag uses its
+default path (`CCTAG_HERDR_BIN`: `/opt/homebrew/bin/herdr`;
+`CCTAG_ORCA_BIN`: `/opt/homebrew/bin/orca`). Set either variable to an empty
+string to disable that backend. At least one backend must be available.
+
+| | herdr | Orca |
+|---|:---:|:---:|
+| Claude Code | ✅ everything in the table above | ✅ everything in the table above |
+| Codex CLI | ✅ | — *(not listed: Orca's shared Codex app server can attribute status to the wrong pane — [stablyai/orca#23643](https://github.com/stablyai/orca/issues/23643))* |
+| oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) |
+
+On Orca, cctag identifies the agent from its pane key, process start time and
+foreground process group. For `omp`, it also verifies the transcript the
+process holds open for writing. The process identity is checked again
+immediately before each terminal write. A pane whose agent or session cannot
+be identified is omitted rather than guessed. A resumed `omp` session without
+a verifiable open transcript cannot be connected; if that leaves no
+connectable agents, the empty `@cctag connect` result says to start a new
+session.
+
+Orca reports Claude Code's grayed-out next-prompt suggestion the same way as
+text a person typed, so before sending a Slack message into a non-empty
+composer cctag types one character to tell them apart and removes it again. A
+suggestion is replaced by the message. A typed draft is stashed with Ctrl+S,
+the message is sent, and Claude Code puts the draft back; this replaces any
+draft stashed earlier, because Claude Code keeps only one. When cctag cannot
+confirm what happened, it sends nothing and says in the thread what may be left
+in the composer. This was verified with Claude Code 2.1.287; on other versions
+a message may be refused while a suggestion is shown.
 
 For a fuller walkthrough of the mechanism — Hub/Spoke roles, how herdr's
 agent registry differs from raw pane access, why a turn ending is decided
@@ -129,9 +173,9 @@ authorized — see [docs/how-it-works.md](docs/how-it-works.md).
   other's events instead of sharing them. The Hub holds the single Socket
   Mode connection and only routes events; it never runs or sees anyone's
   coding-agent session. Each Spoke connects out to the Hub over an
-  authenticated WebSocket and drives that person's own local herdr-managed
-  instances (Claude Code, Codex CLI, or both), exactly like standalone mode
-  does.
+  authenticated WebSocket and drives that person's local agents through its
+  enabled terminal backend(s), exactly like standalone mode. Claude Code uses
+  herdr or Orca, Codex CLI uses herdr, and `omp` uses Orca.
 
 **If someone else already runs a Hub you can join**, you only need [For Spoke
 users](#for-spoke-users) below — skip straight there, none of the Slack app
@@ -140,10 +184,11 @@ setup applies to you.
 ## Requirements
 
 - **Node.js 20+** — needed everywhere cctag runs (Hub, Spoke, or standalone).
-- **[herdr](https://herdr.dev)**, installed and running, with your Claude
-  Code and/or Codex CLI instance(s) started as herdr agents — needed only on
-  machines that actually run one of these CLIs (standalone setups and every
-  Spoke). A Hub-only machine never runs either and doesn't need herdr at all.
+- **[herdr](https://herdr.dev) and/or [Orca](https://github.com/stablyai/orca)**,
+  with Claude Code running in either backend, Codex CLI in herdr, or `omp` in
+  Orca. Needed only on machines that run these agent sessions (standalone and
+  every Spoke). A Hub-only machine runs no agent sessions and needs neither
+  backend.
 - **A Slack workspace where you can create an app** (Socket Mode; no public
   server or open ports needed) — needed only if you're creating the Slack
   app yourself (standalone or Hub operator). Spoke users never touch Slack
@@ -211,19 +256,21 @@ Which document you need depends on which side you are on.
 | Hosting the Hub (or running standalone) | [docs/running-a-hub.md](docs/running-a-hub.md) |
 | Already paired, want to know what you can do | [docs/usage.md](docs/usage.md) |
 
-Briefly: a Spoke user needs herdr, a token from whoever runs the Hub, and four
-values in a config file. Someone hosting a Hub additionally creates the Slack
-app and issues those tokens. Standalone is the Hub and the Spoke in one process
+Briefly: a Spoke needs three required configuration values (`CCTAG_OWNER_USER_ID`,
+`CCTAG_HUB_URL`, and `CCTAG_SPOKE_TOKEN`) plus at least one available backend
+executable (Herdr or Orca). Someone hosting a Hub also creates the Slack app and
+issues credentials to Spokes. Standalone runs the Hub and Spoke in one process
 on one machine.
 
 
 ## Security notes
 
 Anyone who can post in a paired thread can send arbitrary text into a
-full-permission local coding agent. Pairing is owner-opt-in per thread, the
-owner can disconnect at any time, and tool permission prompts still require
-a human's approval via Slack buttons — nothing runs unattended. Only pair
-threads in channels with people you trust.
+full-permission local coding agent. Pairing is owner-opt-in per thread, and the
+owner can disconnect at any time. For supported Claude Code and Codex CLI
+prompts, a human can answer with Slack buttons or at the terminal. OMP
+questions and approvals are reported in Slack with instructions to answer in
+the terminal. Pair only threads in channels with people you trust.
 
 ## Contributing
 

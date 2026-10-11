@@ -1,0 +1,48 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "<terminal-B>",
+      "status": "running",
+      "tail": [
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>",
+        "<redacted-screen-line>"
+      ],
+      "truncated": false,
+      "limited": false,
+      "oldestCursor": "0",
+      "nextCursor": "28",
+      "latestCursor": "28",
+      "returnedLineCount": 26,
+      "source": "screen"
+    }
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

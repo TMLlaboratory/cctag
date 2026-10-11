@@ -1,25 +1,24 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { backendForTarget } from "./backend/target.js";
 
 export interface Pairing {
   key: string; // `${channel}:${threadTs}` for thread pairings, `${channel}` for channel pairings
   channel: string;
   threadTs?: string;
-  // The herdr target used for every agent-level call (get/send-keys/prompt).
-  // herdr 0.7.5 dropped terminal_id as a valid agent target — only a unique
-  // agent name or its hosting pane id resolve now — so paneId is the
-  // functional identity going forward. It's also more durable than
-  // terminalId: a pane's id doesn't change when the CLI running inside it
-  // restarts, so a pairing survives a Claude Code/Codex restart in place.
+  // The backend target used for terminal operations. Its `orca:` prefix is
+  // authoritative; an unprefixed target is Herdr.
   paneId: string;
+  /** Optional persistence tag derived from paneId; it is never used to route. */
+  backend?: "orca";
   // Display/debug only, snapshotted at pairing time — never used to address
-  // herdr (see paneId). A pane whose occupant restarts gets a new terminalId,
-  // so this can go stale; that's fine, it's cosmetic.
+  // Terminals. A pane's id doesn't change when its CLI restarts, so this can
+  // become stale without affecting the pairing.
   terminalId: string;
   cwd: string; // display only, snapshotted at pairing time
   // Display/help-text only, snapshotted at pairing time (e.g. "claude" | "codex").
-  // Driver selection always comes from a live agentGet() call, never this field —
+  // Driver selection comes from a live Terminals.get() call, never this field —
   // so a pane whose CLI changed after pairing still gets the right driver.
   agent?: string;
   pairedBy: string; // Slack user id of the owner who paired it
@@ -44,6 +43,12 @@ export class PairingStore {
   constructor(private readonly path: string = DEFAULT_STORE_PATH) {
     this.load();
   }
+  private static withTargetBackend(pairing: Pairing): Pairing {
+    const normalized = { ...pairing };
+    if (backendForTarget(pairing.paneId) === "orca") normalized.backend = "orca";
+    else delete normalized.backend;
+    return normalized;
+  }
 
   private load(): void {
     let raw: string;
@@ -60,14 +65,9 @@ export class PairingStore {
     for (const p of list) {
       const missing = PairingStore.missingFields(p);
       if (missing.length > 0) {
-        // Entries written before daa33a3 (or otherwise corrupted) may lack
-        // paneId — herdr has no terminalId target anymore, so passing one of
-        // these through hangs `checkPairing` on `herdr agent get undefined`
-        // forever and the thread silently stops getting replies. Drop it
-        // from the in-memory map instead of loading it; we deliberately
-        // don't rewrite the file here (see save() — this method only reads),
-        // so the stale entry stays on disk until the next add()/remove()
-        // triggers a save() and it's dropped for good.
+        // Older or invalid records may lack paneId. terminalId is display-only
+        // and cannot substitute for a backend target, so drop the entry from
+        // memory without rewriting the file; add/remove later saves the cleaned map.
         const thread = p?.threadTs ? `${p.channel}:${p.threadTs}` : (p?.channel ?? p?.key ?? "<unknown>");
         console.error(
           `[pairing] dropping invalid pairing for ${thread} (missing: ${missing.join(", ")}). ` +
@@ -75,7 +75,13 @@ export class PairingStore {
         );
         continue;
       }
-      this.pairings.set(p.key, p);
+      const storedBackend = p.backend ?? "herdr";
+      const targetBackend = backendForTarget(p.paneId);
+      if (storedBackend !== targetBackend) {
+        console.warn(`[pairing] stored backend ${storedBackend} disagrees with target ${p.paneId}; using ${targetBackend}`);
+      }
+      const normalized = PairingStore.withTargetBackend(p);
+      this.pairings.set(normalized.key, normalized);
     }
   }
 
@@ -120,18 +126,19 @@ export class PairingStore {
   }
 
   add(p: Pairing): void {
-    const previous = this.pairings.get(p.key);
-    this.pairings.set(p.key, p);
+    const normalized = PairingStore.withTargetBackend(p);
+    const previous = this.pairings.get(normalized.key);
+    this.pairings.set(normalized.key, normalized);
     try {
       this.save();
     } catch (err) {
       // Keep in-memory state consistent with what's actually on disk —
       // otherwise a restart would silently revert this "successful" add.
-      if (previous) this.pairings.set(p.key, previous);
-      else this.pairings.delete(p.key);
+      if (previous) this.pairings.set(normalized.key, previous);
+      else this.pairings.delete(normalized.key);
       throw err;
     }
-    this.onChange?.({ action: "add", pairing: p });
+    this.onChange?.({ action: "add", pairing: normalized });
   }
 
   remove(key: string): boolean {

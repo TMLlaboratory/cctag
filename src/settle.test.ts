@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { SettleTracker } from "./settle.js";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries } from "./settle.js";
+import { readLastMatchingRecordBefore, readNewRecords, readRecentRecords } from "./agents/transcript.js";
 import { extractLifecycle, type TranscriptRecord } from "./agents/claude/transcript.js";
 
 // --- the tracker itself -----------------------------------------------------
@@ -195,4 +198,282 @@ test("subagent records never arm or settle the pane's turn", () => {
     { ...assistantWith("end_turn", []), isSidechain: true },
   ]);
   assert.deepEqual(events, []);
+});
+
+const V2_LIFECYCLE = extractLifecycle(
+  readFileSync(new URL("./agents/claude/__fixtures__/claude-interrupt.jsonl", import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as TranscriptRecord),
+);
+const V2_STARTED = V2_LIFECYCLE.find((event) => event.kind === "started")!;
+const V2_ENDED = V2_LIFECYCLE.find((event) => event.kind === "aborted")!;
+const V2_START_AT = V2_STARTED.timestamp!;
+const V2_END_AT = V2_ENDED.timestamp!;
+
+const hint = (state: "working" | "waiting" | "done" | null, waitingSince: number | null) => ({
+  kind: "hint" as const,
+  state,
+  waitingSince,
+});
+
+test("classified status resolution matches SettleTracker exactly", async () => {
+  const settle = new SettleTracker();
+  settle.observe(V2_LIFECYCLE);
+  for (const status of ["idle", "working", "blocked", "done", "unknown"] as const) {
+    const resolved = await resolveStatus({
+      evidence: { kind: "classified", status },
+      settle,
+      boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+      previousStatus: "unknown",
+    });
+    assert.equal(resolved.status, settle.effectiveStatus(status));
+    assert.equal(resolved.extendDeadline, resolved.status === "blocked");
+  }
+});
+
+test("a strong waitingSince hint wins over an incomplete screen", async () => {
+  let reads = 0;
+  const resolved = await resolveStatus({
+    evidence: hint("waiting", V2_START_AT + 1),
+    settle: new SettleTracker(),
+    boundaries: transcriptBoundaries([V2_STARTED]),
+    previousStatus: "working",
+    readScreen: async () => {
+      reads++;
+      return { snapshot: { text: "partial", draft: null, complete: false }, fingerprint: null };
+    },
+  });
+  assert.equal(resolved.status, "blocked");
+  assert.equal(resolved.extendDeadline, true);
+  assert.equal(reads, 0, "row 1 must decide before the incomplete-screen row");
+});
+
+test("an incomplete screen preserves a blocked status without extending its deadline", async () => {
+  const resolved = await resolveStatus({
+    evidence: hint("working", null),
+    settle: new SettleTracker(),
+    boundaries: transcriptBoundaries([V2_STARTED]),
+    previousStatus: "blocked",
+    readScreen: async () => ({
+      snapshot: { text: "partial", draft: null, complete: false },
+      fingerprint: null,
+    }),
+  });
+  assert.equal(resolved.status, "blocked");
+  assert.equal(resolved.extendDeadline, false, "the existing deadline remains unchanged");
+});
+
+test("a thrown screen read preserves the previous blocked status without extending its deadline", async () => {
+  const resolved = await resolveStatus({
+    evidence: hint("working", null),
+    settle: new SettleTracker(),
+    boundaries: transcriptBoundaries([V2_STARTED]),
+    previousStatus: "blocked",
+    readScreen: async () => {
+      throw new Error("screen read unavailable");
+    },
+  });
+  assert.equal(resolved.status, "blocked");
+  assert.equal(resolved.extendDeadline, false);
+});
+
+test("a running transcript uses a complete screen fingerprint to distinguish blocked from working", async () => {
+  const boundaries = transcriptBoundaries([V2_STARTED]);
+  const blocked = await resolveStatus({
+    evidence: hint("working", null),
+    settle: new SettleTracker(),
+    boundaries,
+    previousStatus: "working",
+    readScreen: async () => ({
+      snapshot: { text: "permission prompt", draft: null, complete: true },
+      fingerprint: "permission",
+    }),
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.extendDeadline, true);
+
+  const working = await resolveStatus({
+    evidence: hint("working", null),
+    settle: new SettleTracker(),
+    boundaries,
+    previousStatus: "blocked",
+    readScreen: async () => ({
+      snapshot: { text: "empty composer", draft: null, complete: true },
+      fingerprint: null,
+    }),
+  });
+  assert.equal(working.status, "working");
+  assert.equal(working.extendDeadline, false);
+});
+
+test("a transcript end newer than waitingSince resolves to idle", async () => {
+  const settle = new SettleTracker();
+  settle.observe(V2_LIFECYCLE);
+  const resolved = await resolveStatus({
+    evidence: hint("working", Math.floor((V2_START_AT + V2_END_AT) / 2)),
+    settle,
+    boundaries: transcriptBoundaries(V2_LIFECYCLE),
+    previousStatus: "working",
+  });
+  assert.equal(resolved.status, "idle");
+  assert.equal(resolved.extendDeadline, false);
+});
+
+test("a historical transcript end before waitingSince still blocks", async () => {
+  const resolved = await resolveStatus({
+    evidence: hint("waiting", V2_END_AT + 1),
+    settle: new SettleTracker(),
+    boundaries: transcriptBoundaries(V2_LIFECYCLE),
+    previousStatus: "working",
+  });
+  assert.equal(resolved.status, "blocked");
+  assert.equal(resolved.extendDeadline, true);
+});
+
+test("a turn the transcript ended is not kept alive by a later waiting hint", async () => {
+  // Whether Orca keeps reporting waiting after a turn ends is not captured; if it
+  // does, the hint must not hold the ended turn open as blocked.
+  const settle = new SettleTracker();
+  settle.observe(V2_LIFECYCLE);
+  const resolved = await resolveStatus({
+    evidence: hint("waiting", V2_END_AT + 1),
+    settle,
+    boundaries: transcriptBoundaries(V2_LIFECYCLE),
+    previousStatus: "blocked",
+  });
+  assert.deepEqual(resolved, { status: "idle", extendDeadline: false });
+});
+
+test("an unknown end timestamp cannot release a waiting hint", async () => {
+  const boundaries = transcriptBoundaries([
+    V2_STARTED,
+    { kind: "aborted", timestamp: null },
+  ]);
+  assert.equal(boundaries.lastEndAt, null);
+  const resolved = await resolveStatus({
+    evidence: hint("waiting", V2_START_AT + 1),
+    settle: new SettleTracker(),
+    boundaries,
+    previousStatus: "working",
+  });
+  assert.equal(resolved.status, "blocked");
+  assert.equal(resolved.extendDeadline, true);
+});
+
+test("a local command ends its turn on Orca and leaves herdr's status alone", async () => {
+  // /compact writes only string user records and ends on its stdout record.
+  const lifecycle = extractLifecycle(
+    readFileSync(new URL("./agents/claude/__fixtures__/claude-compact.jsonl", import.meta.url), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as TranscriptRecord),
+  );
+  const settle = new SettleTracker();
+  settle.observe(lifecycle);
+  assert.equal(settle.settledByTranscript, true);
+
+  // A stale "working" hint must not outlive the transcript's end.
+  const resolved = await resolveStatus({
+    evidence: hint("working", null),
+    settle,
+    boundaries: transcriptBoundaries(lifecycle),
+    previousStatus: "working",
+    readScreen: async () => assert.fail("a settled turn needs no screen"),
+  });
+  assert.deepEqual(resolved, { status: "idle", extendDeadline: false });
+
+  for (const status of ["idle", "blocked"] as const) {
+    const herdr = await resolveStatus({
+      evidence: { kind: "classified", status },
+      settle,
+      boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+      previousStatus: "working",
+    });
+    assert.equal(herdr.status, status);
+  }
+});
+
+test("without transcript boundaries, the Orca state hint is the fallback", async () => {
+  for (const [state, expected] of [
+    ["working", "working"],
+    ["done", "idle"],
+    ["waiting", "unknown"],
+    [null, "unknown"],
+  ] as const) {
+    const resolved = await resolveStatus({
+      evidence: hint(state, null),
+      settle: new SettleTracker(),
+      boundaries: EMPTY_TRANSCRIPT_BOUNDARIES,
+      previousStatus: "blocked",
+    });
+    assert.equal(resolved.status, expected);
+    assert.equal(resolved.extendDeadline, false);
+  }
+});
+
+test("recent transcript reads are bounded and independent of the output offset", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cctag-transcript-tail-"));
+  const path = join(directory, "session.jsonl");
+  writeFileSync(
+    path,
+    Array.from({ length: 300 }, (_, id) => JSON.stringify({ id })).join("\n") + "\n" + '{"partial"',
+  );
+  try {
+    const offsetRead = await readNewRecords(path, statSync(path).size);
+    assert.equal(offsetRead.records.length, 0);
+
+    const recent = await readRecentRecords(path);
+    assert.equal(recent.length, 256);
+    assert.equal(recent[0]?.id, 44);
+    assert.equal(recent[255]?.id, 299);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("recent transcript reads handle cut records, exact record edges, and short files", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cctag-transcript-edges-"));
+  const windowBytes = 256 * 1024;
+  const cutPath = join(directory, "cut.jsonl");
+  const edgePath = join(directory, "edge.jsonl");
+  const shortPath = join(directory, "short.jsonl");
+  try {
+    const largeRecord = JSON.stringify({ id: "cut", padding: "x".repeat(windowBytes) });
+    writeFileSync(cutPath, `${largeRecord}\n${JSON.stringify({ id: "after-cut" })}\n`);
+    assert.deepEqual(await readRecentRecords(cutPath), [{ id: "after-cut" }]);
+
+    const prefix = `${JSON.stringify({ id: "prefix" })}\n`;
+    const edgeRecord = `${JSON.stringify({ id: "edge" })}\n`;
+    writeFileSync(edgePath, prefix + edgeRecord + " ".repeat(windowBytes - edgeRecord.length));
+    assert.deepEqual(await readRecentRecords(edgePath), [{ id: "edge" }]);
+
+    writeFileSync(shortPath, `${JSON.stringify({ id: "short" })}\n`);
+    assert.deepEqual(await readRecentRecords(shortPath), [{ id: "short" }]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("lifecycle baselines join multi-chunk records and leave partial tails readable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cctag-transcript-baseline-"));
+  const path = join(directory, "session.jsonl");
+  const started = JSON.stringify({ id: "start", type: "user" });
+  const large = JSON.stringify({ id: "large", padding: "x".repeat(128 * 1024) });
+  const partial = JSON.stringify({ id: "post-baseline" });
+  const splitAt = Math.floor(partial.length / 2);
+  const captured = `${started}\n${large}\n${partial.slice(0, splitAt)}`;
+  writeFileSync(path, captured);
+  try {
+    const baseline = await readLastMatchingRecordBefore(path, statSync(path).size, (record) => record.id === "start");
+    assert.ok(baseline);
+    assert.deepEqual(baseline.record, JSON.parse(started));
+    assert.equal(baseline.completeOffset, Buffer.byteLength(`${started}\n${large}\n`));
+
+    writeFileSync(path, `${captured}${partial.slice(splitAt)}\n`);
+    const tail = await readNewRecords(path, baseline.completeOffset);
+    assert.deepEqual(tail.records, [JSON.parse(partial)]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

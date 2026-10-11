@@ -1,0 +1,126 @@
+{
+  "id": "<capture-id>",
+  "ok": true,
+  "result": {
+    "enabled": true,
+    "settingsPath": "<redacted-path>",
+    "appliedBy": "offline",
+    "statuses": [
+      {
+        "agent": "claude",
+        "state": "installed",
+        "configPath": "<redacted-path>",
+        "managedHooksPresent": true,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": "<redacted>"
+      },
+      {
+        "agent": "<redacted>",
+        "state": "<redacted>",
+        "configPath": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "configPath": "<redacted>",
+        "state": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      },
+      {
+        "agent": "<redacted>",
+        "configPath": "<redacted>",
+        "state": "<redacted>",
+        "managedHooksPresent": false,
+        "detail": null
+      }
+    ]
+  },
+  "_meta": {
+    "runtimeId": "<runtime-id>"
+  }
+}

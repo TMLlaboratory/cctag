@@ -1,0 +1,28 @@
+# Captured basis
+# Live scratch parent before any child: PID 23428, PPID 23280, PGID 23428,
+# TPGID 23428, TTY ttys016, lstart Mon Sep 28 17:05:36 2026, command claude.
+# Its only ORCA_PANE_KEY and ORCA_TERMINAL_HANDLE values are represented by
+# <pane-A> and <terminal-A>. `! claude` in Claude Code failed with:
+# "Input must be provided either through stdin or as a prompt argument when using --print".
+# A PID/CWD check found no child in the scratch directory. No same-TTY child was
+# captured; do not represent the rows below as live observations.
+
+# Synthetic policy: a connected parent with no child is discoverable and passes
+# sameProcess. Then a child is added in the same foreground process group and
+# with the same TTY and Orca environment. The parent stays alive and unchanged.
+# This must be unsafe both during initial discovery and at the pre-write check.
+
+Scenario: parent only (captured row)
+PID    PPID   PGID   TPGID  TTY      LSTART                         COMMAND  ENV
+23428  23280  23428  23428  ttys016  Mon Sep 28 17:05:36 2026         claude   ORCA_PANE_KEY=<pane-A> ORCA_TERMINAL_HANDLE=<terminal-A>
+Expected discovery: return the parent AgentRef for <pane-A>.
+Expected sameProcess(ref): true while this exact parent row remains foreground and no same-TTY foreground child exists.
+
+Scenario: same-TTY foreground child exists at initial discovery
+PID    PPID   PGID   TPGID  TTY      LSTART                         COMMAND  ENV
+23428  23280  23428  23428  ttys016  Mon Sep 28 17:05:36 2026         claude   ORCA_PANE_KEY=<pane-A> ORCA_TERMINAL_HANDLE=<terminal-A>
+90001  23428  23428  23428  ttys016  Mon Sep 28 17:20:00 2026         claude   ORCA_PANE_KEY=<pane-A> ORCA_TERMINAL_HANDLE=<terminal-A>  [synthetic]
+Expected discovery: unresolved/null; the foreground child may consume terminal input, so do not publish either process as a safe target.
+Expected sameProcess(ref): false for a ref previously captured for PID 23428, despite the unchanged PID, lstart, and pane key; the same-TTY foreground child invalidates it.
+
+The captured parent row supplies real PID/PPID/PGID/TPGID/TTY/lstart/command fields. The child PID, start time, and shared foreground group are deterministic synthetic inputs derived from the design's step-6 condition. The earlier captured Bash-tool child Claude had no TTY and TPGID 0; that is a different case and does not substitute for this child.

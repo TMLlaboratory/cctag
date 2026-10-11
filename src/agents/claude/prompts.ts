@@ -449,9 +449,6 @@ export function parseCurrentMode(paneText: string): CctagMode | null {
   return null;
 }
 
-/** Shift+Tab (backtab) as a raw terminal control sequence — see HerdrClient.paneSendText. */
-export const BACKTAB = "\x1b[Z";
-
 /**
  * Claude Code's ExitPlanMode approval prompt prints the plan's file path in
  * its footer, e.g. "ctrl+g to edit in Vim · ~/.claude/plans/<slug>.md".
@@ -554,4 +551,45 @@ export function parseClaudeStartupPrompt(paneText: string): string | null {
     .map((l) => l.trim())
     .find((l) => l && !/^[›❯>]?\s*\d+\./.test(l) && !/Enter to confirm|Press enter/i.test(l));
   return headline ? headline.slice(0, 160) : "起動時の選択待ちダイアログ";
+}
+/**
+ * Reads the label on Claude Code's selected menu row. Prefer the question
+ * parsers' reconstructed labels so wrapped options compare with the same
+ * labels the Slack prompt displayed; model/permission rows use their menu
+ * parser, and an edited free-text row falls back to its visible row text.
+ */
+export function parseCursorLabel(paneText: string): string | null {
+  const lines = paneText.split("\n");
+  let selectedNum: string | null = null;
+  let selectedLabel = "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*❯\s+Submit\s*$/.test(lines[i]!)) return "Submit";
+    const match = /^\s*❯\s*(\d+)\.\s*(.*?)\s*$/.exec(lines[i]!);
+    if (match) {
+      selectedNum = match[1];
+      selectedLabel = match[2].trim();
+      break;
+    }
+  }
+  if (selectedNum === null || !selectedLabel) return null;
+
+  const classicAt = classicAnchorIndex(paneText);
+  const previewAt = previewAnchorIndex(paneText);
+  const questionAt = Math.max(classicAt, previewAt);
+  const permissionAt = permissionAnchorIndex(paneText);
+  if (questionAt < 0 || permissionAt > questionAt) {
+    const choice = parsePermissionMenu(paneText)?.choices.find((item) => item.num === selectedNum);
+    return choice?.label ?? selectedLabel;
+  }
+
+  const optionNumber = Number(selectedNum);
+  if (previewAt > classicAt) {
+    const question = parsePreviewQuestionPane(paneText);
+    return question?.options[optionNumber - 1]?.label ?? selectedLabel;
+  }
+  const question = parseAskUserQuestionPane(paneText);
+  if (!question) return selectedLabel;
+  if (optionNumber <= question.options.length) return question.options[optionNumber - 1].label;
+  if (optionNumber === question.options.length + 1) return selectedLabel;
+  return null;
 }

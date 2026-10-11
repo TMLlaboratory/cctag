@@ -1,0 +1,43 @@
+{
+  "capture": {
+    "date": "2026-10-07",
+    "claudeVersion": "2.1.291",
+    "orcaCliVersion": "1.4.218",
+    "command": "orca terminal read --terminal <terminal> --screen --json",
+    "readMode": "default unbounded screen read",
+    "state": "idle-composer-named-session",
+    "notes": "Live blank composer after `/rename design`: the session name is drawn into the rule above the prompt, the rule below stays plain. Excerpt: the 20 rows above the finished turn were dropped as private work content; the read itself returned 33 rows with truncated and limited false, as kept below.",
+    "redactions": {
+      "<terminal>": "terminal handle",
+      "<recap>": "three-row session recap describing private work",
+      "<redacted>": "context and usage meters",
+      "<repo>": "repository name in the status line",
+      "<branch>": "branch name in the status line",
+      "<diffstat>": "working-tree diff counts in the status line"
+    }
+  },
+  "terminal": {
+    "handle": "<terminal>",
+    "status": "running",
+    "tail": [
+      "✻ Sautéed for 52s · done 2:46 AM",
+      "❯ /rename design",
+      "  ⎿  Session renamed to: design",
+      "※ recap: <recap>",
+      "─────────────────────────────────────────────────────────────────────────────────────────────────────────────── design ─",
+      "❯",
+      "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+      "   Opus 5.5 (1M context)  │  effort:high │  ctx <redacted>",
+      "   5h <redacted> │ 7d <redacted>",
+      "   <repo> │  <branch>  <diffstat>",
+      "  ⏵⏵ auto mode on (shift+tab to cycle)"
+    ],
+    "truncated": false,
+    "limited": false,
+    "oldestCursor": "0",
+    "nextCursor": "9",
+    "latestCursor": "9",
+    "returnedLineCount": 11,
+    "source": "screen"
+  }
+}
