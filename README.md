@@ -84,7 +84,7 @@ better choice — is set out in
 
 ## Status
 
-**v0.4.0** — see [CHANGELOG.md](CHANGELOG.md) for what each release changed.
+**v0.5.0** — see [CHANGELOG.md](CHANGELOG.md) for what each release changed.
 Pre-1.0 is a deliberate claim rather than a placeholder: the interface still
 moves, so pin an exact version if that matters to you.
 
