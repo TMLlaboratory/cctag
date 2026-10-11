@@ -125,3 +125,20 @@ test("markdownToMrkdwn leaves asterisks in a code fence alone", () => {
   const md = ["```", "**not bold**", "```"].join("\n");
   assert.equal(markdownToMrkdwn(md), md);
 });
+
+test("segmentForSlack keeps every text segment within a section block's 3,000 characters", () => {
+  // A long bilingual reply: one run of prose between 3,000 and 3,900 characters
+  // used to land in a single section and fail the post with `invalid_blocks`.
+  const md = `${"あ".repeat(1400)}\n\n---\n\n${"word ".repeat(400)}`;
+  const texts = segmentForSlack(md).map((s) => (s.kind === "text" ? s.text : ""));
+  assert.ok(texts.length > 1);
+  for (const t of texts) assert.ok(t.length <= 3000, `segment of ${t.length} characters`);
+  const joined = texts.join("");
+  assert.equal(joined.match(/あ/g)?.length, 1400);
+  assert.equal(joined.match(/word/g)?.length, 400);
+});
+
+test("segmentForSlack keeps a split code fence within a section block, markers included", () => {
+  const md = "```\n" + "x".repeat(80).concat("\n").repeat(60) + "```";
+  for (const s of segmentForSlack(md)) if (s.kind === "text") assert.ok(s.text.length <= 3000);
+});

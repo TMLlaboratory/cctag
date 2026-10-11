@@ -13,6 +13,12 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- Long replies no longer lose their tables. Prose was cut into pieces of up
+  to 3,900 characters, but a Block Kit section holds 3,000, so a reply with a
+  3,000–3,900-character run of prose was rejected as `invalid_blocks` and
+  re-posted as plain text, its tables turned into monospace grids. Long
+  bilingual replies hit this most. Prose bound for blocks is now cut at the
+  section limit.
 - The Hub no longer keeps the location of every message it has ever posted.
   `messageLocations`, which lets a Spoke edit a message it posted earlier, got
   an entry per post and lost none, so it grew for the life of the process. It
