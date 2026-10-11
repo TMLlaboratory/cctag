@@ -22,6 +22,7 @@ export type VerifiedModelMenuPrompt = VerifiedPrompt & {
 export type BlindPermissionPrompt = {
   readonly [blindPermissionPromptBrand]: true;
   readonly driver: AgentDriver;
+  readonly form: "key-confirms" | "key-then-enter";
 };
 
 export function createVerifiedPrompt(
@@ -50,6 +51,9 @@ export function createVerifiedModelMenuPrompt(
   };
 }
 
-export function createBlindPermissionPrompt(driver: AgentDriver): BlindPermissionPrompt {
-  return { [blindPermissionPromptBrand]: true, driver };
+export function createBlindPermissionPrompt(
+  driver: AgentDriver,
+  form: BlindPermissionPrompt["form"],
+): BlindPermissionPrompt {
+  return { [blindPermissionPromptBrand]: true, driver, form };
 }

@@ -154,8 +154,6 @@ const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens"
 
 const INTERRUPTED_USER_PREFIX = "[Request interrupted by user";
 
-const LOCAL_COMMAND_STDOUT_PREFIX = "<local-command-stdout>";
-
 function parseBoundaryTimestamp(timestamp: string | undefined): number | null {
   if (timestamp === undefined) return null;
   const timestampMs = Date.parse(timestamp);
@@ -167,6 +165,8 @@ function isInterruptedUserContent(content: unknown): boolean {
   const block = content[0] as ContentBlock | undefined;
   return block?.type === "text" && typeof block.text === "string" && block.text.startsWith(INTERRUPTED_USER_PREFIX);
 }
+
+const LOCAL_COMMAND_STDOUT_PREFIX = "<local-command-stdout>";
 
 /**
  * Turn boundaries in a Claude Code transcript.
