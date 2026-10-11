@@ -410,7 +410,7 @@ export const claudeDriver: AgentDriver = {
     if (!menu) {
       return looksLikeQuestionScreen(paneText)
         ? { kind: "unreadable-question" }
-        : { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver) };
+        : { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver, "key-confirms") };
     }
     const feedbackNum = findPlanFeedbackOption(paneText);
     const content = {
@@ -421,7 +421,7 @@ export const claudeDriver: AgentDriver = {
     };
     const fingerprint = promptFingerprint(content);
     if (fingerprint === null) {
-      return { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver) };
+      return { kind: "blind-permission", blind: createBlindPermissionPrompt(claudeDriver, "key-confirms") };
     }
     return {
       ...content,

@@ -347,7 +347,7 @@ test("Codex model Escape ends its channel without allowing later writes", async 
   }
 });
 
-test("Herdr blind permission channel sends only one y or n and no Enter", async () => {
+test("Herdr blind permission channel sends only one y or n and no Enter to Claude Code", async () => {
   for (const choice of ["y", "n"] as const) {
     const cli = fakeHerdrCli();
     try {
@@ -356,6 +356,26 @@ test("Herdr blind permission channel sends only one y or n and no Enter", async 
       if (prompt.kind !== "blind-permission") throw new Error(`expected blind permission, got ${prompt.kind}`);
       await backend.openBlind(REF, prompt.blind).answer(choice);
       assert.deepEqual(cli.calls(), [["pane", "send-text", "wT:p1", choice]]);
+    } finally {
+      cli.cleanup();
+    }
+  }
+});
+
+test("Herdr blind permission channel follows y or n with Enter on Codex", async () => {
+  // Codex's approval menu says "Press enter to confirm": the key alone does not
+  // answer it, so the pane would sit waiting while Slack showed it answered.
+  for (const choice of ["y", "n"] as const) {
+    const cli = fakeHerdrCli();
+    try {
+      const backend = new HerdrBackend(cli.bin);
+      const prompt = codexDriver.parseBlockedPane("unparsed approval request");
+      if (prompt.kind !== "blind-permission") throw new Error(`expected blind permission, got ${prompt.kind}`);
+      await backend.openBlind(REF, prompt.blind).answer(choice);
+      assert.deepEqual(cli.calls(), [
+        ["pane", "send-text", "wT:p1", choice],
+        ["pane", "send-keys", "wT:p1", "Enter"],
+      ]);
     } finally {
       cli.cleanup();
     }

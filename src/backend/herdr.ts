@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
@@ -222,8 +223,15 @@ export class HerdrBackend implements Terminals {
     };
   }
 
-  openBlind(ref: AgentRef, _prompt: BlindPermissionPrompt): BlindChannel {
-    return { answer: (choice) => this.writeText(ref.target, choice) };
+  openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel {
+    return {
+      answer: async (choice) => {
+        await this.writeText(ref.target, choice);
+        if (prompt.form === "key-confirms") return;
+        await delay(150);
+        await this.writeKeys(ref.target, "Enter");
+      },
+    };
   }
 
   openComposer(ref: AgentRef, _driver: AgentDriver): ComposerChannel {

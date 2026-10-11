@@ -1177,6 +1177,9 @@ export class OrcaBackend implements Terminals {
 
   openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel {
     this.refuseOmpInput(ref, prompt.driver?.kind);
+    if (prompt.form !== "key-confirms") {
+      throw new ExpectationLost("Orca has no verified blind confirmation that needs an Enter.");
+    }
     let attempted = false;
     return {
       answer: async (choice) => {
