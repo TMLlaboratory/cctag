@@ -34,9 +34,9 @@ const MESSAGE_NOTIFY_COOLDOWN_MS = 60_000;
 // Hub-side heartbeat values — deliberately identical to the Spoke-side
 // heartbeat (src/spoke/index.ts's HEARTBEAT_INTERVAL_MS / PONG_TIMEOUT_MS).
 // That heartbeat (#4) lets a Spoke notice its own half-open connection to
-// the Hub; this is the other direction, which nothing watched. Without this, a half-open Spoke connection (the TCP
-// path silently stops delivering packets, no FIN/RST) sits in
-// `spokesByOwner` looking alive — Linux's default TCP keepalive can take up
+// the Hub; this is the other direction, which nothing watched. Without
+// this, a half-open Spoke connection (the TCP path silently stops
+// delivering packets, no FIN/RST) sits in `spokesByOwner` looking alive — Linux's default TCP keepalive can take up
 // to two hours to notice at the OS level, and every Slack event routed to
 // that owner silently fails for the entire window.
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -112,8 +112,7 @@ async function runServer(): Promise<void> {
   // instead of one per 60 seconds. The other four call sites
   // (app_mention/pair_select/aq_answer/perm_choice) are each a single,
   // deliberate user action, not a stream, so they stay unconditional.
-  // Bounded the same way fileOwner is above: insertion-ordered Map, oldest
-  // evicted once the cap is exceeded. Losing this on a Hub restart is fine
+  // Bounded with setBounded, as fileOwner is above. Losing this on a Hub restart is fine
   // — worst case is one extra notice for a thread that was mid-cooldown.
   const lastNotifiedAt = new Map<string, number>();
 
@@ -121,11 +120,7 @@ async function runServer(): Promise<void> {
     const now = Date.now();
     const last = lastNotifiedAt.get(key);
     if (last !== undefined && now - last < MESSAGE_NOTIFY_COOLDOWN_MS) return false;
-    lastNotifiedAt.set(key, now);
-    if (lastNotifiedAt.size > MAX_TRACKED_NOTIFY_COOLDOWNS) {
-      const oldest = lastNotifiedAt.keys().next();
-      if (!oldest.done) lastNotifiedAt.delete(oldest.value);
-    }
+    setBounded(lastNotifiedAt, key, now, MAX_TRACKED_NOTIFY_COOLDOWNS);
     return true;
   }
 
