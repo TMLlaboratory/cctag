@@ -1,0 +1,5 @@
+{"type":"system","subtype":"compact_boundary","isSidechain":false,"version":"2.1.287","timestamp":"2026-10-02T00:00:00.000Z"}
+{"type":"user","isCompactSummary":true,"isSidechain":false,"version":"2.1.287","timestamp":"2026-10-02T00:00:00.000Z","message":{"role":"user","content":"SUMMARY"}}
+{"type":"user","isMeta":true,"isSidechain":false,"version":"2.1.287","timestamp":"2026-10-02T00:00:00.000Z","message":{"role":"user","content":"<local-command-caveat>CAVEAT</local-command-caveat>"}}
+{"type":"user","isSidechain":false,"version":"2.1.287","timestamp":"2026-10-02T00:00:00.000Z","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>CMD</command-message>\n<command-args>ARGS</command-args>"}}
+{"type":"user","isSidechain":false,"version":"2.1.287","timestamp":"2026-10-02T00:00:01.000Z","message":{"role":"user","content":"<local-command-stdout>Compacted (ctrl+o to see full summar</local-command-stdout>"}}

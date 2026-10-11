@@ -31,6 +31,11 @@ would have to keep. Pin an exact version if that matters to you.
   was read as a new turn starting: the transcript never said the interrupted
   turn had ended. It is now an `aborted` boundary, as Codex's `turn_aborted`
   already was.
+- A Claude Code local command (such as `/compact`, `/model`, `/effort` or
+  `/copy`) now ends its turn when it prints its output. These commands write no
+  assistant reply, so the transcript read as a turn that started and never
+  ended. herdr's own idle status hid this; a backend that takes the turn's end
+  from the transcript waited until the turn timed out.
 - Bold in an agent's reply now renders as bold in Slack. The italic rule ran
   after the bold one and rewrote its `*x*` as `_x_`, so every `**x**` since the
   first release came out italic — and next to Japanese text, where Slack needs a
