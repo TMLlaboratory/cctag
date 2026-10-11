@@ -37,6 +37,13 @@ would have to keep. Pin an exact version if that matters to you.
   "完了（テキスト応答なし）" nine seconds in, its transcript ending on a tool
   call. Against a running turn, that status now has to last 15 seconds; a turn
   that writes its end still settles at once (#47).
+- A Claude Code question in a named session reaches Slack again on herdr.
+  The dialog's bottom rule carries the session name, and herdr's rule for a
+  blocked form looks only below the last rule, so herdr reported the pane
+  `idle` with the question on screen and no buttons were posted. When herdr
+  says `idle`/`done` while the transcript says the turn is still running,
+  cctag now reads the screen itself and treats a prompt it finds there as
+  blocked (#46).
 - On Orca, a free-text answer to a Claude Code question is submitted again.
   Typing replaced the "Type something." row the dialog was recognized by, so
   the check before Enter took the screen for a different prompt and stopped,

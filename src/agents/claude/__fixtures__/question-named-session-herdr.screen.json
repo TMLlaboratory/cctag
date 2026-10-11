@@ -1,0 +1,12 @@
+{
+  "capture": {
+    "date": "2026-10-12",
+    "claudeVersion": "2.1.296",
+    "herdrVersion": "0.9.3",
+    "detectionManifest": "2026.09.11.1",
+    "command": "herdr pane read <pane> --source visible",
+    "state": "question-named-session-herdr",
+    "notes": "A single-select AskUserQuestion in a named session (`cctag`), on a 240-column herdr pane. The dialog's bottom rule carries the session name, so herdr's live_blocked_form rule (region after_last_horizontal_rule) saw an empty region and reported idle while this was on screen (issue #46). An excerpt: the rows above the dialog's top rule were the session's own transcript and were dropped; the dialog rows are unaltered."
+  },
+  "text": "─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n ☐ 調査\n\n│ 【調査用】そのまま10秒ほど待ってから、端末で「1」を選んでください。この間に herdr の判定を記録します。\n\n❯ 1. 1 を選ぶ\n     10秒ほど待ってから端末で選ぶ\n  2. 2 を選ぶ\n     調査用の選択肢です\n  3. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── cctag ─"
+}
