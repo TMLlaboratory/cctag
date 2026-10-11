@@ -165,6 +165,21 @@ test("one response split across content blocks yields repeated completions, whic
   assert.equal(t.effectiveStatus("working"), "idle");
 });
 
+function localCommandFixture(name: string) {
+  return readFileSync(new URL(`./agents/claude/__fixtures__/${name}`, import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+}
+
+test("herdr's status after a local command: working settles, blocked is left alone", () => {
+  const t = new SettleTracker();
+  t.observe(extractLifecycle(localCommandFixture("claude-compact.jsonl")));
+  assert.equal(t.effectiveStatus("working"), "idle");
+  assert.equal(t.effectiveStatus("idle"), "idle");
+  assert.equal(t.effectiveStatus("blocked"), "blocked");
+});
+
 test("stop_sequence and max_tokens end a turn as well", () => {
   assert.deepEqual(extractLifecycle([assistantWith("stop_sequence", [])]), [
     { kind: "completed", timestamp: Date.parse(assistantWith("stop_sequence", []).timestamp) },
