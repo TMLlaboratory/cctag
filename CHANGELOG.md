@@ -11,6 +11,8 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
 ### Added
 
 - One Spoke can now use herdr and Orca at once: Claude Code works on either
@@ -83,8 +85,9 @@ would have to keep. Pin an exact version if that matters to you.
 ### Security
 
 - Dependencies pulled in by `@slack/bolt` are updated past published
-  advisories: axios 1.20.0, proxy-addr 2.0.8 and qs 6.16.0. cctag's own code
-  is unchanged.
+  advisories: axios 1.20.0, proxy-addr 2.0.8 and qs 6.16.0, in both
+  `package-lock.json` and the `bun.lock` the release binaries are built from.
+  cctag's own code is unchanged.
 
 ## [0.4.0] - 2026-10-11
 
@@ -355,7 +358,8 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TMLlaboratory/cctag/releases/tag/v0.2.0
