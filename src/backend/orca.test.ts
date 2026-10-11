@@ -2245,9 +2245,10 @@ test("Orca writes read their terminal and screen before the final process check"
   const paths = ["submit", "answer", "blind", "composer"] as const;
   const idle = capturedClaudeScreen("idle-composer.screen.json");
   const question = capturedClaudeScreen("ask-user-question-multiselect-before-down.screen.json");
+  const working = capturedClaudeScreen("working.screen.json");
 
   const write = async (runtime: FakeOrcaRuntime, path: (typeof paths)[number]): Promise<void> => {
-    runtime.screen = path === "answer" ? question : idle;
+    runtime.screen = path === "answer" ? question : path === "blind" ? working : idle;
     const terminals = backend(runtime);
     if (path === "submit") {
       await terminals.submit(currentRef(), "hello", submitContext());

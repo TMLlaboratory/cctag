@@ -1185,6 +1185,10 @@ export class OrcaBackend implements Terminals {
       answer: async (choice) => {
         if (attempted) throw new ExpectationLost("The blind confirmation channel has already been used.");
         attempted = true;
+        const current = await this.get(ref.target);
+        if (current?.evidence.kind !== "hint" || current.evidence.state !== "waiting") {
+          throw new ExpectationLost("Orca no longer reports the agent waiting for the blind confirmation.");
+        }
         const handle = await this.writableHandle(ref);
         const snap = await this.readHandle(ref.target, handle);
         if (!snap.complete) throw new ExpectationLost("The Orca screen is incomplete before the blind confirmation.");
@@ -1192,10 +1196,6 @@ export class OrcaBackend implements Terminals {
         // could not parse, so there is no fingerprint to compare.
         if (prompt.driver.isIdleComposer?.(snap)) {
           throw new ExpectationLost("The blind confirmation is no longer on screen.");
-        }
-        const current = await this.get(ref.target);
-        if (current?.evidence.kind !== "hint" || current.evidence.state !== "waiting") {
-          throw new ExpectationLost("Orca no longer reports the agent waiting for the blind confirmation.");
         }
         if (!(await this.sameProcess(ref))) {
           throw new ExpectationLost("The Orca process changed before the blind confirmation.");
