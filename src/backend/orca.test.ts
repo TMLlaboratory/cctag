@@ -2660,12 +2660,16 @@ test("Orca Claude multi-select never confirms when the review screen does not ap
   assert.equal(runtime.sendCalls[3]!.args.includes("--enter"), true);
 });
 
-test("Orca blind permission sends exactly one y-or-n byte without Enter", async () => {
-  const runtime = new FakeOrcaRuntime();
-  runtime.screen = capturedClaudeScreen("idle-composer.screen.json");
+function blindPrompt() {
   const parsed = claudeDriver.parseBlockedPane("ordinary terminal output");
   if (parsed.kind !== "blind-permission") throw new Error("expected a blind permission prompt");
-  const channel = backend(runtime).openBlind(currentRef(), parsed.blind);
+  return parsed.blind;
+}
+
+test("Orca blind permission sends exactly one y-or-n byte without Enter while the agent waits", async () => {
+  const runtime = new FakeOrcaRuntime();
+  runtime.screen = capturedClaudeScreen("working.screen.json");
+  const channel = backend(runtime).openBlind(currentRef(), blindPrompt());
 
   await channel.answer("y");
   await assert.rejects(channel.answer("n"), ExpectationLost);
@@ -2673,6 +2677,21 @@ test("Orca blind permission sends exactly one y-or-n byte without Enter", async 
   assert.equal(runtime.sendCalls.length, 1);
   assert.equal(runtime.sendCalls[0]!.args[runtime.sendCalls[0]!.args.indexOf("--text") + 1], "y");
   assert.equal(runtime.sendCalls[0]!.args.includes("--enter"), false);
+});
+
+test("Orca blind permission refuses once someone answered at the terminal", async () => {
+  // Answered at the terminal while the Slack button was still up: the composer
+  // is back, and a `y` sent now would land in it as the start of a message.
+  const answered = new FakeOrcaRuntime();
+  answered.screen = capturedClaudeScreen("idle-composer.screen.json");
+  await assert.rejects(backend(answered).openBlind(currentRef(), blindPrompt()).answer("y"), ExpectationLost);
+  assert.equal(answered.sendCalls.length, 0);
+
+  const resumed = new FakeOrcaRuntime();
+  resumed.screen = capturedClaudeScreen("working.screen.json");
+  resumed.worktreeAgentsOverride = [{ ...worktreeQuestionAgent, state: "working" }];
+  await assert.rejects(backend(resumed).openBlind(currentRef(), blindPrompt()).answer("y"), ExpectationLost);
+  assert.equal(resumed.sendCalls.length, 0);
 });
 
 test("Orca composer BackTab is one raw write after process, screen, idle, and draft gates", async () => {
