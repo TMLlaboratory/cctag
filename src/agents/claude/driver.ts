@@ -576,6 +576,7 @@ export const claudeDriver: AgentDriver = {
     // onto Submit, Enter, then confirm the review screen.
     if (isOrca) assertAnswerNotAborted(signal);
     await channel.move("Down", 1);
+    await sleep(150);
     if (isOrca) assertAnswerNotAborted(signal);
     await channel.confirm("Submit", false);
     if (isOrca) {
