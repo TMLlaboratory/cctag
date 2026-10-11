@@ -31,6 +31,7 @@ import {
   UNSENDABLE_TEXT_MESSAGE,
   WriteOutcomeUnknown,
 } from "./types.js";
+import { stripSidePane } from "./side-pane.js";
 import { backendForTarget } from "./target.js";
 
 const execFileAsync = promisify(execFile);
@@ -761,7 +762,7 @@ export class OrcaBackend implements Terminals {
       ? terminal.tail.filter((line): line is string => typeof line === "string")
       : [];
     return {
-      text: tail.join("\n"),
+      text: stripSidePane(tail.join("\n")),
       draft: typeof terminal.draft === "string" ? terminal.draft : null,
       complete:
         validTail &&
