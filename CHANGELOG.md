@@ -44,6 +44,11 @@ would have to keep. Pin an exact version if that matters to you.
   says `idle`/`done` while the transcript says the turn is still running,
   cctag now reads the screen itself and treats a prompt it finds there as
   blocked (#46).
+- Both of those now also hold for a turn that was already running when the
+  Spoke started. On herdr, the watcher's baseline did not record that the
+  turn was running, so after a restart mid-turn one moment of `idle` posted
+  the terminal's response half-finished, and a question in a named session
+  was missed.
 - On Orca, a free-text answer to a Claude Code question is submitted again.
   Typing replaced the "Type something." row the dialog was recognized by, so
   the check before Enter took the screen for a different prompt and stopped,
