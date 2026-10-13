@@ -54,7 +54,7 @@ import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
-import { CODEX_ORCA_TERMINAL_ANSWER } from "./agents/codex/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1251,6 +1251,12 @@ export class TurnEngine {
       const identityChanged =
         state.driver.kind === "omp" &&
         !sameTranscriptIdentity(state.transcriptIdentity, agent.transcriptIdentity);
+      if (sessionChanged && state.driver.kind === "codex" && agent.transcriptIdentity) {
+        // Not followed into the new rollout: from 0 it replays the resumed thread's history, and
+        // from its end the turn never sees a start and holds the pane until the timeout.
+        await this.finalize(state, CODEX_THREAD_SWITCHED);
+        return;
+      }
       if (sessionChanged || identityChanged) {
         if (state.driver.kind === "omp") {
           this.switchOmpSession(state, agent);
@@ -1259,9 +1265,7 @@ export class TurnEngine {
           state.transcriptIdentity = agent.transcriptIdentity;
           state.transcriptPath =
             agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-          // Not from 0 for a transcript bound by its writer: that switch is the
-          // person resuming another thread (Codex on Orca), whose history predates this turn.
-          state.offset = agent.transcriptIdentity && state.transcriptPath ? transcriptSizeSafe(state.transcriptPath) : 0;
+          state.offset = 0;
           // Session-local lifecycle and screen evidence must not leak to this transcript.
           state.settle = new SettleTracker();
           state.previousStatus = "working";

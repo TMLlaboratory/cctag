@@ -16,7 +16,7 @@ import {
 import type { Pairing } from "./pairing.js";
 import type { MessageHandle, Notifier } from "./notifier.js";
 import { claudeDriver } from "./agents/claude/driver.js";
-import { codexDriver } from "./agents/codex/driver.js";
+import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
@@ -2433,7 +2433,7 @@ test("a channel pairing accepts its own permission button", async () => {
   }
 });
 
-test("a Codex thread resumed mid-turn on Orca is read from its end, not replayed", async () => {
+test("a Codex thread resumed mid-turn on Orca ends the turn instead of replaying it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cctag-codex-switch-"));
   let engine: TurnEngine | undefined;
   const { notifier, posts } = fakeNotifier();
@@ -2477,7 +2477,9 @@ test("a Codex thread resumed mid-turn on Orca is read from its end, not replayed
       outboxBaseline: {},
       writes: new WrittenFileTracker(),
     });
-    await sleep(200);
+    for (let i = 0; i < 50 && engine.isBusy(PANE); i++) await sleep(20);
+    assert.equal(engine.isBusy(PANE), false, "the pane is released");
+    assert.ok(posts.some((post) => post.includes(CODEX_THREAD_SWITCHED)), JSON.stringify(posts));
     assert.equal(posts.some((post) => post.includes("stale history")), false);
   } finally {
     engine?.abortAll();

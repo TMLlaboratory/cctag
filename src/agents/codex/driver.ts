@@ -99,6 +99,9 @@ function splitModelAndLevel(words: string[]): { levelKey: string | null; modelWo
 
 export const CODEX_ORCA_TERMINAL_ANSWER = "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。";
 
+export const CODEX_THREAD_SWITCHED =
+  "⚠️ 端末で Codex の別の会話に切り替わったため、このターンを終えました（部分的な出力のみ）";
+
 export const CODEX_SHARED_SERVER_NOTICE =
   "Codex の会話の記録（rollout）が見つからないため、Orca の Codex をつなげません。まだ最初のメッセージを送っていない Codex は、端末で一度送ってから選び直してください。Codex が共有の background server で動いている場合は、Orca の設定「Run each Codex terminal on its own server」を有効にして起動し直してください";
 
