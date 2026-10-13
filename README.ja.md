@@ -78,7 +78,7 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 場つなぎの表示ではなく意図的な宣言で、インターフェースはまだ動く。それが問題になるなら
 バージョンを固定して使うこと。
 
-テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeはherdrまたはOrca、Codex CLIはherdr、
+テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeはherdrまたはOrca、Codex CLIはherdrまたはOrca、
 `omp`はOrca。Claude CodeとCodex CLIの対応する権限確認・コマンド承認プロンプトはSlackのボタンにでき、
 Slack上または端末から人が回答できる。`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
 回答できない。
@@ -118,7 +118,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 | | herdr | Orca |
 |---|:---:|:---:|
 | Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて |
-| Codex CLI | ✅ | — *(一覧に出さない: Orcaの共有Codex app-serverは状態を別のペインに付けることがあるため — [stablyai/orca#23643](https://github.com/stablyai/orca/issues/23643))* |
+| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認は端末で答える |
 | oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） |
 
 Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
@@ -149,7 +149,7 @@ OrcaはClaude Codeの灰色の「次のプロンプトの提案」を、人が�
   唯一のSocket Mode接続を保持し、イベントのルーティングだけを行う — 誰のコーディングエージェント
   セッションも実行しないし、見ることもない。各Spokeは認証済みWebSocketでHubに接続し、
   有効にしたターミナルバックエンド経由でローカルのエージェントを操作する。対応する組み合わせは、
-  Claude CodeがherdrまたはOrca、Codex CLIがherdr、`omp`がOrca。
+  Claude CodeがherdrまたはOrca、Codex CLIがherdrまたはOrca、`omp`がOrca。
 
 **すでに誰かが運用しているHubに参加できる場合**は、下記の
 [Spoke利用者向け](#spoke利用者向け)だけで十分 — そこまで読み飛ばして構わない。Slack app関連の

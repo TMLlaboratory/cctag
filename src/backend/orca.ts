@@ -1070,6 +1070,14 @@ export class OrcaBackend implements Terminals {
 
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel {
     this.refuseOmpInput(ref, prompt.driver?.kind);
+    if (ref.agentKind === "codex" || prompt.driver?.kind === "codex") {
+      // Not answered from Slack: Codex 0.162 confirms an approval on its digit alone, so the
+      // driver's Enter after it finds the dialog gone and the answer reads as failed.
+      throw new ExpectationLost(
+        "Codex prompts on Orca are answered in the terminal.",
+        "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。",
+      );
+    }
     let active = true;
     let firstWrite = true;
     const throwIfExpired = () => {

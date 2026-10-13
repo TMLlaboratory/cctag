@@ -33,7 +33,7 @@ In a Herdr-backed setup, cctag controls the paired agent through [herdr](https:/
 keystroke injection, and status use Herdr. Turn output comes from the agent's
 own structured JSONL transcript, not the screen. Herdr reports `claude` or
 `codex`, and cctag selects the matching driver. This covers Claude Code or
-Codex CLI on Herdr; see the support matrix for Orca combinations.
+Codex CLI on Herdr or Orca; see the support matrix for Orca details.
 
 cctag can also drive agents running in [Orca](https://github.com/stablyai/orca)
 terminals, alongside herdr, from the same Spoke. In the `@cctag connect` picker,
@@ -89,7 +89,7 @@ Pre-1.0 is a deliberate claim rather than a placeholder: the interface still
 moves, so pin an exact version if that matters to you.
 
 Text-in / text-out turns work for the supported combinations: Claude Code on
-Herdr or Orca, Codex CLI on Herdr, and `omp` on Orca. For supported Claude Code
+Herdr or Orca, Codex CLI on Herdr or Orca, and `omp` on Orca. For supported Claude Code
 and Codex CLI tool-permission / command-approval prompts, cctag shows Slack
 buttons; a human can answer through Slack or at the terminal. `omp` questions
 and approvals appear in Slack as terminal-only notices; Slack answers aren't
@@ -134,7 +134,7 @@ string to disable that backend. At least one backend must be available.
 | | herdr | Orca |
 |---|:---:|:---:|
 | Claude Code | ✅ everything in the table above | ✅ everything in the table above |
-| Codex CLI | ✅ | — *(not listed: Orca's shared Codex app server can attribute status to the wrong pane — [stablyai/orca#23643](https://github.com/stablyai/orca/issues/23643))* |
+| Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts are answered in the terminal |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) |
 
 On Orca, cctag identifies the agent from its pane key, process start time and
@@ -175,7 +175,7 @@ authorized — see [docs/how-it-works.md](docs/how-it-works.md).
   coding-agent session. Each Spoke connects out to the Hub over an
   authenticated WebSocket and drives that person's local agents through its
   enabled terminal backend(s), exactly like standalone mode. Claude Code uses
-  herdr or Orca, Codex CLI uses herdr, and `omp` uses Orca.
+  herdr or Orca, Codex CLI uses herdr or Orca, and `omp` uses Orca.
 
 **If someone else already runs a Hub you can join**, you only need [For Spoke
 users](#for-spoke-users) below — skip straight there, none of the Slack app

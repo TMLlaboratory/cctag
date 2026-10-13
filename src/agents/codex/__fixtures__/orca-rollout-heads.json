@@ -1,0 +1,88 @@
+{
+  "capture": {
+    "capturedAt": "2026-10-11",
+    "codexVersion": "0.162.0",
+    "source": "first line of the two rollouts a --no-daemon Codex TUI held open for writing (lsof), after a guardian-reviewed command",
+    "redactions": {
+      "<instructions>": "base_instructions text",
+      "<cwd-A>": "the worktree path",
+      "<user-A>": "creator user id",
+      "<account-A>": "creator account id",
+      "<commit-A>": "git commit",
+      "<branch-A>": "git branch",
+      "<repo-A>": "git remote"
+    }
+  },
+  "user": {
+    "timestamp": "2026-10-11T08:22:46.823Z",
+    "ordinal": 0,
+    "type": "session_meta",
+    "payload": {
+      "creator_user_id": "<user-A>",
+      "creator_account_id": "<account-A>",
+      "session_id": "01a12a0e-8063-7751-b57d-e0e6db54b41a",
+      "id": "01a12a0e-8063-7751-b57d-e0e6db54b41a",
+      "timestamp": "2026-10-11T08:22:35.896Z",
+      "cwd": "<cwd-A>",
+      "runtime_workspace_roots": [
+        "<cwd-A>"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.162.0",
+      "source": "cli",
+      "thread_source": "user",
+      "model_provider": "openai",
+      "base_instructions": {
+        "text": "<instructions>"
+      },
+      "history_mode": "paginated",
+      "context_window": {
+        "window_id": "01a12a0e-8065-7f52-a2d5-ce45054c5140"
+      },
+      "git": {
+        "commit_hash": "<commit-A>",
+        "branch": "<branch-A>",
+        "repository_url": "<repo-A>"
+      }
+    }
+  },
+  "guardian": {
+    "timestamp": "2026-10-11T08:22:52.526Z",
+    "ordinal": 0,
+    "type": "session_meta",
+    "payload": {
+      "creator_user_id": "<user-A>",
+      "creator_account_id": "<account-A>",
+      "session_id": "01a12a0e-80a8-7700-9144-546f32a9bf2e",
+      "id": "01a12a0e-80a8-7700-9144-546f32a9bf2e",
+      "parent_thread_id": "01a12a0e-8063-7751-b57d-e0e6db54b41a",
+      "timestamp": "2026-10-11T08:22:35.962Z",
+      "cwd": "<cwd-A>",
+      "runtime_workspace_roots": [
+        "<cwd-A>"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.162.0",
+      "source": {
+        "subagent": {
+          "other": "guardian"
+        }
+      },
+      "thread_source": "guardian_review",
+      "model_provider": "openai",
+      "base_instructions": {
+        "text": "<instructions>"
+      },
+      "history_mode": "paginated",
+      "multi_agent_version": "disabled",
+      "context_window": {
+        "window_id": "01a12a0e-80a8-7700-9144-54767f150a1d"
+      },
+      "git": {
+        "commit_hash": "<commit-A>",
+        "branch": "<branch-A>",
+        "repository_url": "<repo-A>"
+      }
+    }
+  }
+}
