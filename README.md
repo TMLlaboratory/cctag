@@ -91,8 +91,9 @@ moves, so pin an exact version if that matters to you.
 Text-in / text-out turns work for the supported combinations: Claude Code on
 Herdr or Orca, Codex CLI on Herdr or Orca, and `omp` on Orca. For supported Claude Code
 and Codex CLI tool-permission / command-approval prompts, cctag shows Slack
-buttons; a human can answer through Slack or at the terminal. `omp` questions
-and approvals appear in Slack as terminal-only notices; Slack answers aren't
+buttons; a human can answer through Slack or at the terminal. Codex CLI approvals
+on Orca, and `omp` questions and approvals, appear in Slack as terminal-only
+notices; Slack answers aren't
 supported.
 
 Claude Code and Codex CLI don't write pending permission or question prompts
@@ -134,7 +135,7 @@ string to disable that backend. At least one backend must be available.
 | | herdr | Orca |
 |---|:---:|:---:|
 | Claude Code | ✅ everything in the table above | ✅ everything in the table above |
-| Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts are answered in the terminal |
+| Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) |
 
 On Orca, cctag identifies the agent from its pane key, process start time and
@@ -268,8 +269,8 @@ on one machine.
 Anyone who can post in a paired thread can send arbitrary text into a
 full-permission local coding agent. Pairing is owner-opt-in per thread, and the
 owner can disconnect at any time. For supported Claude Code and Codex CLI
-prompts, a human can answer with Slack buttons or at the terminal. OMP
-questions and approvals are reported in Slack with instructions to answer in
+prompts, a human can answer with Slack buttons or at the terminal. Codex CLI
+approvals on Orca and OMP questions and approvals are reported in Slack with instructions to answer in
 the terminal. Pair only threads in channels with people you trust.
 
 ## Contributing

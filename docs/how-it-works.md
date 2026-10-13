@@ -8,8 +8,8 @@ This document explains how cctag works internally (for setup steps, see the [REA
 your own machine.**
 
 The Herdr backend supports Claude Code and Codex CLI. Orca supports Claude Code
-with the same cctag features as Herdr, plus `omp` text turns, output, status,
-and `.cctag/outbox` uploads. Incoming attachments are passed as local paths;
+with the same cctag features as Herdr, plus Codex CLI and `omp` text turns,
+output, and status, and `omp` `.cctag/outbox` uploads. Incoming attachments are passed as local paths;
 Claude Code converts image paths into native image attachments. OMP questions
 and approvals are reported to Slack but must be answered in the terminal.
 Both backends keep the agent and local files on your machine; nothing is copied
@@ -25,8 +25,8 @@ Plan Mode — are its own. Herdr supports Claude Code and Codex CLI through
 per-pane drivers; Orca supports the same cctag feature set for Claude Code,
 plus `omp` text turns, output, status, and `.cctag/outbox` uploads. Incoming
 files are passed as paths, and only Claude Code turns image paths into native
-image attachments. Codex on Orca is not listed; OMP questions and approvals
-must be answered in the terminal. See the agent support table in the
+image attachments. Codex approvals on Orca and OMP questions and
+approvals must be answered in the terminal. See the agent support table in the
 [README](../README.md) for what differs.
 
 ```
@@ -47,7 +47,7 @@ roles.
 | | Role | Runs on | Can do |
 |---|---|---|---|
 | **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or the local terminal backends** |
-| **Spoke** | The local terminal connection | **Your own PC** | Lists, reads, and sends input to supported agents through enabled backends: Claude Code on either; Codex CLI on Herdr; `omp` on Orca |
+| **Spoke** | The local terminal connection | **Your own PC** | Lists, reads, and sends input to supported agents through enabled backends: Claude Code and Codex CLI on either; `omp` on Orca |
 
 The important part: **the Hub has no way to reach your terminal.** Even if
 the Hub's server were compromised, it has no ability to control the Claude
@@ -119,21 +119,23 @@ explicitly orphaned terminal whose `tabId:leafId` pair is not another pane's
 ordinary key.
 
 Claude Code on Orca supports the same cctag features as Claude Code on Herdr.
-Orca also supports `omp` text turns, output, and status. Codex is recognized
-but not listed by this backend. When `omp` waits for input, cctag posts the
+Orca also supports Codex CLI and `omp` text turns, output, and status. A Codex
+pane is listed once its TUI holds its own rollout open for writing: Codex runs
+its own app server there (Orca's default) and has had its first message. Codex
+approvals and `model` are answered in the terminal. When `omp` waits for input, cctag posts the
 visible prompt when available and a notice to answer in the terminal; Slack
 answers are not supported.
 
 Before every Orca terminal write, cctag rechecks the foreground process
-identity. For `omp`, it also verifies the identity of the transcript open for
-writing. A pane whose agent or session cannot be verified is omitted rather
+identity. For Codex and `omp`, it also verifies the identity of the transcript open
+for writing. A pane whose agent or session cannot be verified is omitted rather
 than guessed.
 
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
    the enabled backends: Herdr's Claude Code/Codex agents and Orca's
-   Claude Code/`omp` agents
+   Claude Code/Codex/`omp` agents
 
    "Owner only" is not simply a narrowed permission. **The Spoke runs on the
    owner's own machine, so `connect` is choosing which of your own panes to
@@ -145,11 +147,11 @@ than guessed.
 2. Pick one → that thread (channel + thread_ts) and the backend-qualified
    target (a Herdr pane or `orca:<paneKey>`) are recorded as a pairing
 
-   Orca supports the same cctag features for Claude Code as Herdr, plus `omp`
-   text turns, output, and status. OMP questions and approvals are reported to
-   Slack but must be answered in the terminal; Codex is not listed on Orca.
-   Before each Orca write, cctag rechecks the foreground process identity and,
-   for `omp`, the open transcript identity.
+   Orca supports the same cctag features for Claude Code as Herdr, plus Codex
+   CLI and `omp` text turns, output, and status. Codex approvals and OMP
+   questions and approvals are reported to Slack but must be answered in the
+   terminal. Before each Orca write, cctag rechecks the foreground process
+   identity and, for Codex and `omp`, the open transcript identity.
 3. For a Herdr-backed pairing, sending **`@cctag <message>`**:
    - Submits the text via herdr's `agent prompt`, which sends the text *and*
      the Enter in **one call**. Sending them separately raced Claude Code's

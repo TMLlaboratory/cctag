@@ -5,6 +5,7 @@ import { open, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { AgentDriver, OrcaProcessAccess, OrcaProcessIdentity, OrcaProcessSession } from "../agents/driver.js";
 import { ORCA_AGENT_DRIVERS } from "../agents/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER } from "../agents/codex/driver.js";
 import type {
   AnswerChannel,
   BlindChannel,
@@ -780,10 +781,11 @@ export class OrcaBackend implements Terminals {
   async sameProcess(ref: AgentRef): Promise<boolean> {
     const paneKey = targetPaneKey(ref.target);
     if (ref.pid === null || ref.processStartedAt === null) return false;
-    const rows =
-      ref.agentKind === "omp"
-        ? await this.processRows(true)
-        : parsePsRows(await this.runSystem("ps", PS_ARGS), this.drivers);
+    // Not Claude: its session id legitimately changes on /clear, so only writer-bound transcripts are rechecked.
+    const bindsTranscript = ref.agentKind === "omp" || ref.agentKind === "codex";
+    const rows = bindsTranscript
+      ? await this.processRows(true)
+      : parsePsRows(await this.runSystem("ps", PS_ARGS), this.drivers);
     const current = rows.find((row) => row.pid === ref.pid);
     if (
       !current ||
@@ -794,12 +796,11 @@ export class OrcaBackend implements Terminals {
     ) {
       return false;
     }
-    const processPaneKey =
-      ref.agentKind === "omp"
-        ? current.paneKey
-        : parseEnvironmentRows(
-            await this.runSystem("ps", ["eww", "-o", "pid=,command=", "-p", String(ref.pid)]),
-          ).get(ref.pid)?.paneKey;
+    const processPaneKey = bindsTranscript
+      ? current.paneKey
+      : parseEnvironmentRows(
+          await this.runSystem("ps", ["eww", "-o", "pid=,command=", "-p", String(ref.pid)]),
+        ).get(ref.pid)?.paneKey;
     if (
       processPaneKey !== paneKey ||
       !isForeground(current) ||
@@ -807,7 +808,7 @@ export class OrcaBackend implements Terminals {
     ) {
       return false;
     }
-    if (ref.agentKind !== "omp") return true;
+    if (!bindsTranscript) return true;
     if (ref.sessionId == null || !ref.transcriptIdentity) return false;
     const session = await this.session(current);
     const identity = session?.transcriptIdentity;
@@ -1075,7 +1076,7 @@ export class OrcaBackend implements Terminals {
       // driver's Enter after it finds the dialog gone and the answer reads as failed.
       throw new ExpectationLost(
         "Codex prompts on Orca are answered in the terminal.",
-        "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。",
+        CODEX_ORCA_TERMINAL_ANSWER,
       );
     }
     let active = true;

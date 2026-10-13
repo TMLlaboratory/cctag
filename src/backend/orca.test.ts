@@ -2845,3 +2845,40 @@ test("Orca refuses a Slack answer to a Codex prompt before writing anything", as
   );
   assert.equal(runtime.sendCalls.length, 0);
 });
+
+test("a Codex binding is checked again before each write, not only at discovery", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const heads = JSON.parse(
+    readFileSync(new URL("../agents/codex/__fixtures__/orca-rollout-heads.json", import.meta.url), "utf8"),
+  ) as { user: { payload: JsonObject } };
+  const cwd = "/workspace-codex";
+  const id = String(heads.user.payload.id);
+  const rollout = `${HOME}/.codex/sessions/2026/10/11/rollout-2026-10-11T17-22-35-${id}.jsonl`;
+  const process: ProcessFixture = {
+    pid: 40404,
+    ppid: 1,
+    pgid: 40404,
+    tpgid: 40404,
+    tty: "ttys008",
+    lstart: "Sun Oct 11 17:22:30 2026",
+    command: "codex --no-daemon",
+    paneKey: "codex-tab:codex-leaf",
+    terminalHandle: "codex-terminal",
+    cwd,
+  };
+  runtime.processes = [process];
+  runtime.terminals = [terminalFor(process.paneKey!, process.terminalHandle!, { title: "Codex terminal" })];
+  runtime.worktreeAgentsOverride = [];
+  runtime.descriptorOutputs.set(process.pid, `p${process.pid}\nf21\nau\ntREG\nD0x1000010\ni11\nn${rollout}`);
+  runtime.statOutputs.set(rollout, `${0x1000010} 11\n`);
+  runtime.openerOutputs.set(rollout, `p${process.pid}\nf21\nau`);
+  runtime.transcriptHeads.set(rollout, `${JSON.stringify({ ...heads.user, payload: { ...heads.user.payload, cwd } })}\n`);
+  const terminals = backend(runtime);
+
+  const agent = await terminals.get(`orca:${process.paneKey}`);
+  assert.equal(agent?.ref.sessionId, id);
+  assert.equal(await terminals.sameProcess(agent!.ref), true);
+
+  runtime.descriptorOutputs.delete(process.pid);
+  assert.equal(await terminals.sameProcess(agent!.ref), false, "the rollout is no longer written");
+});

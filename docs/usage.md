@@ -8,7 +8,7 @@ bot:
 
 | Command | Who | What it does |
 |---|---|---|
-| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca), Codex CLI (Herdr), `omp` (Orca) |
+| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca), Codex CLI (Herdr / Orca), `omp` (Orca) |
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
@@ -19,7 +19,7 @@ bot:
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired session; its reply is posted back in the thread |
 
 `mode`/`plan` reply with a "not supported" message on Codex CLI and `omp`;
-`model` is unavailable on `omp`. Orca does not list Codex CLI.
+`model` is unavailable on `omp` and on Codex CLI in Orca.
 
 Only one thread can be paired to a given terminal at a time. Only single-word
 messages (`connect`, `status`, ...) are treated as commands — anything with a

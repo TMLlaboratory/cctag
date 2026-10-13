@@ -373,16 +373,16 @@ export function permissionBlocks(paneId: string, promptId: number, menu: Permiss
  * was answered at the terminal.
  */
 export function unreadableQuestionBlocks(rawSnippet: string) {
+  return terminalAnswerBlocks(
+    "⚠️ 質問が表示されていますが、選択肢を読み取れませんでした。" +
+      "誤ったキーを送らないよう、ボタンは出していません — *ターミナルで直接回答してください*。",
+    rawSnippet,
+  );
+}
+
+export function terminalAnswerBlocks(reason: string, rawSnippet: string) {
   return [
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text:
-          "⚠️ 質問が表示されていますが、選択肢を読み取れませんでした。" +
-          "誤ったキーを送らないよう、ボタンは出していません — *ターミナルで直接回答してください*。",
-      },
-    },
+    { type: "section", text: { type: "mrkdwn", text: reason } },
     // The tail, not the head: the read is long and its bottom is the live prompt.
     // Keeping the first 2900 characters posted old transcript with the question cut off.
     { type: "section", text: { type: "mrkdwn", text: "```\n" + rawSnippet.slice(-2900) + "\n```" } },

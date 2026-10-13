@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import type { ScreenSnapshot } from "../../backend/types.js";
+import type { Terminals } from "../../backend/index.js";
+import type { AgentInfo, ScreenSnapshot } from "../../backend/types.js";
 import type { OrcaProcessAccess, OrcaProcessIdentity } from "../driver.js";
 import { CODEX_SHARED_SERVER_NOTICE, codexDriver } from "./driver.js";
 
@@ -117,4 +118,16 @@ test("a Codex binding is refused rather than guessed", async () => {
   for (const [name, fake] of Object.entries(cases)) {
     assert.equal(await session(PROCESS, fake), null, name);
   }
+});
+
+test("a model change for Codex on Orca is refused before /model reaches the terminal", async () => {
+  const terminals = new Proxy({} as Terminals, {
+    get: (_target, name) => () => {
+      throw new Error(`no terminal call expected, got ${String(name)}`);
+    },
+  });
+  const agent = { backend: "orca", ref: { target: "orca:pane", pid: PID, processStartedAt: 0 } } as AgentInfo;
+  const outcome = await codexDriver.runModelCommand!(terminals, agent, "gpt-6.1-sol high");
+  assert.match(outcome.reply, /端末で \/model/);
+  assert.equal(outcome.submitOutcome, null);
 });

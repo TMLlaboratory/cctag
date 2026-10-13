@@ -48,11 +48,13 @@ import {
   permissionBlocks,
   permissionParseFailureBlocks,
   unreadableQuestionBlocks,
+  terminalAnswerBlocks,
 } from "./slack/blocks.js";
 import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1077,6 +1079,16 @@ export class TurnEngine {
     }
 
     const unreadableQuestion = prompt.kind === "unreadable-question";
+    if (state.backend === "orca" && state.driver.kind === "codex") {
+      state.promptHandle = await this.notifier.postMessage(
+        state.pairing.channel,
+        state.pairing.threadTs ?? "",
+        CODEX_ORCA_TERMINAL_ANSWER,
+        terminalAnswerBlocks(CODEX_ORCA_TERMINAL_ANSWER, paneText),
+      );
+      state.phase = "awaiting-permission";
+      return;
+    }
     const header = isPlanPrompt
       ? "📋 プランが提示されました。ボタンで承認するか、修正内容をこのスレッドに返信してください。"
       : unreadableQuestion
@@ -1247,7 +1259,9 @@ export class TurnEngine {
           state.transcriptIdentity = agent.transcriptIdentity;
           state.transcriptPath =
             agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-          state.offset = 0;
+          // Not from 0 for a transcript bound by its writer: that switch is the
+          // person resuming another thread (Codex on Orca), whose history predates this turn.
+          state.offset = agent.transcriptIdentity && state.transcriptPath ? transcriptSizeSafe(state.transcriptPath) : 0;
           // Session-local lifecycle and screen evidence must not leak to this transcript.
           state.settle = new SettleTracker();
           state.previousStatus = "working";

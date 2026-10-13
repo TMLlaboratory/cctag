@@ -97,6 +97,8 @@ function splitModelAndLevel(words: string[]): { levelKey: string | null; modelWo
   return { levelKey: null, modelWords: words };
 }
 
+export const CODEX_ORCA_TERMINAL_ANSWER = "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。";
+
 export const CODEX_SHARED_SERVER_NOTICE =
   "Codex の会話の記録（rollout）が見つからないため、Orca の Codex をつなげません。まだ最初のメッセージを送っていない Codex は、端末で一度送ってから選び直してください。Codex が共有の background server で動いている場合は、Orca の設定「Run each Codex terminal on its own server」を有効にして起動し直してください";
 
@@ -236,6 +238,10 @@ export const codexDriver: AgentDriver = {
       reply,
       submitOutcome,
     });
+    if (agent.backend === "orca") {
+      // Refused before /model is sent: Orca has no Escape-capable channel to back out of the menu.
+      return result("⚠️ Orca 上の Codex のモデルは、端末で /model から変えてください。");
+    }
     const words = argsText.trim().split(/\s+/).filter(Boolean);
     if (words.length === 0) {
       return result("⚠️ モデル名を指定してください（例: `model gpt-5.6-sol high`）。");

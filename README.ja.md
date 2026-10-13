@@ -80,7 +80,7 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 
 テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeはherdrまたはOrca、Codex CLIはherdrまたはOrca、
 `omp`はOrca。Claude CodeとCodex CLIの対応する権限確認・コマンド承認プロンプトはSlackのボタンにでき、
-Slack上または端末から人が回答できる。`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
+Slack上または端末から人が回答できる。Orca上のCodex CLIの承認と`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
 回答できない。
 
 Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを回答後にしかセッショントランスクリプトへ
@@ -118,7 +118,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 | | herdr | Orca |
 |---|:---:|:---:|
 | Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて |
-| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認は端末で答える |
+| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える |
 | oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） |
 
 Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
@@ -233,7 +233,7 @@ Codex CLIのセッションIDをherdrに完全に報告させるには、`herdr-
 
 ペアリング済みのスレッドに投稿できる人は誰でも、フル権限のローカルコーディングエージェントに任意の
 テキストを送り込める。ペアリングはスレッドごとにownerが許可し、ownerはいつでも切断できる。
-Claude CodeとCodex CLIの対応するプロンプトは、Slackのボタンまたは端末から人が回答できる。`omp`の質問や承認は
+Claude CodeとCodex CLIの対応するプロンプトは、Slackのボタンまたは端末から人が回答できる。Orca上のCodex CLIの承認と`omp`の質問や承認は
 Slackに端末で答えるよう通知され、Slackからは回答できない。信頼できる人がいるチャンネルのスレッドだけをペアリングすること。
 
 ## 開発に参加する
