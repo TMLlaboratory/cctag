@@ -16,6 +16,7 @@ import {
 import type { Pairing } from "./pairing.js";
 import type { MessageHandle, Notifier } from "./notifier.js";
 import { claudeDriver } from "./agents/claude/driver.js";
+import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
@@ -2427,6 +2428,98 @@ test("a channel pairing accepts its own permission button", async () => {
       await engine.answerPermissionButton(PANE, promptId, "1", pairing.key),
       { ok: true },
     );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("a Codex thread resumed mid-turn on Orca ends the turn instead of replaying it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-codex-switch-"));
+  let engine: TurnEngine | undefined;
+  const { notifier, posts } = fakeNotifier();
+  try {
+    const first = join(dir, "rollout-A.jsonl");
+    const resumed = join(dir, "rollout-B.jsonl");
+    writeFileSync(first, "");
+    const record = (type: string, payload: Record<string, unknown>) =>
+      `${JSON.stringify({ type, timestamp: "2026-10-11T08:00:00.000Z", payload })}\n`;
+    writeFileSync(
+      resumed,
+      record("event_msg", { type: "task_started", turn_id: "old" }) +
+        record("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text: "stale history" }] }) +
+        record("event_msg", { type: "task_complete", turn_id: "old" }),
+    );
+    const identity = (path: string) => ({ path, device: "1", inode: path === first ? "11" : "22" });
+    const terminals = fakeBackend(() => "working", () => "", {
+      async get(): Promise<AgentInfo> {
+        return {
+          ...fakeAgent("working", "orca"),
+          agent: "codex",
+          sessionId: "B",
+          transcriptIdentity: identity(resumed),
+          cwd: dir,
+          evidence: { kind: "hint", state: "done", waitingSince: null },
+        };
+      },
+    }, "orca");
+    engine = engineFor(terminals, notifier, 600_000);
+    await engine.adoptBlockedTerminal(fakePairing(), {
+      backend: "orca",
+      driver: codexDriver,
+      sessionId: "A",
+      transcriptPath: first,
+      transcriptIdentity: identity(first),
+      offset: 0,
+      collected: [],
+      paneId: PANE,
+      ref: fakeAgent("working", "orca").ref,
+      cwd: dir,
+      outboxBaseline: {},
+      writes: new WrittenFileTracker(),
+    });
+    for (let i = 0; i < 50 && engine.isBusy(PANE); i++) await sleep(20);
+    assert.equal(engine.isBusy(PANE), false, "the pane is released");
+    assert.ok(posts.some((post) => post.includes(CODEX_THREAD_SWITCHED)), JSON.stringify(posts));
+    assert.equal(posts.some((post) => post.includes("stale history")), false);
+  } finally {
+    engine?.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Codex approval on Orca is posted as a terminal-only notice, without buttons", async () => {
+  const { notifier, posts, postedBlocks } = fakeNotifier();
+  const { terminal } = JSON.parse(
+    readFileSync(new URL("./agents/codex/__fixtures__/orca-approval.screen.json", import.meta.url), "utf8"),
+  ) as { terminal: { tail: string[] } };
+  const terminals = fakeBackend(() => "blocked", () => terminal.tail.join("\n"), {
+    async get(): Promise<AgentInfo> {
+      return {
+        ...fakeAgent("blocked", "orca"),
+        agent: "codex",
+        evidence: { kind: "hint", state: "waiting", waitingSince: Date.now() },
+      };
+    },
+  }, "orca");
+  const engine = engineFor(terminals, notifier, 600_000);
+  try {
+    await engine.adoptBlockedTerminal(fakePairing(), {
+      backend: "orca",
+      driver: codexDriver,
+      sessionId: "s1",
+      transcriptPath: "",
+      offset: 0,
+      collected: [],
+      paneId: PANE,
+      ref: fakeAgent("blocked", "orca").ref,
+      cwd: "/tmp/nonexistent-cctag-test",
+      outboxBaseline: {},
+      writes: new WrittenFileTracker(),
+    });
+    const notice = () => posts.findIndex((post) => post.includes("端末で答えてください"));
+    for (let i = 0; i < 50 && notice() < 0; i++) await sleep(20);
+    assert.ok(notice() >= 0, `posted: ${JSON.stringify(posts)}`);
+    assert.equal(JSON.stringify(postedBlocks).includes('"actions"'), false);
   } finally {
     engine.abortAll();
   }

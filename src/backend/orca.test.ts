@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentPickerBlocks } from "../slack/blocks.js";
 import { claudeDriver } from "../agents/claude/driver.js";
+import { codexDriver } from "../agents/codex/driver.js";
 import { OMP_RESUME_NOTICE, ompDriver } from "../agents/omp/driver.js";
 import type { SubmitContext } from "./index.js";
 import type { OrcaRuntime, OrcaExecResult } from "./orca.js";
@@ -1266,7 +1267,7 @@ test("screen reads are full-frame and reject non-positive line counts", async ()
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, false);
 });
 
-test("Codex and no-tty Claude daemon processes are never listed", async () => {
+test("a Codex outside a usable terminal and a no-tty Claude daemon are never listed", async () => {
   const runtime = new FakeOrcaRuntime();
   const claudeDaemon: ProcessFixture = {
     pid: 40001,
@@ -1298,7 +1299,6 @@ test("Codex and no-tty Claude daemon processes are never listed", async () => {
 
   const result = await backend(runtime).list();
   assert.deepEqual(result.agents, []);
-  assert.ok(result.notices.includes("Orca 上の Codex は未対応です"));
 });
 
 test("does not promote a Codex child of Claude to an Orca agent", async () => {
@@ -1322,7 +1322,6 @@ test("does not promote a Codex child of Claude to an Orca agent", async () => {
   const result = await backend(runtime).list();
   assert.equal(result.agents.length, 1);
   assert.equal(result.agents[0]!.agent, "claude");
-  assert.ok(result.notices.includes("Orca 上の Codex は未対応です"));
 });
 
 test("a same-tty foreground agent child blocks both discovery and sameProcess", async () => {
@@ -2831,4 +2830,55 @@ test("an answer typed into the free-text row can still be confirmed on Orca", as
   runtime.screen = capturedClaudeScreen("free-text-typed.screen.json");
   await channel.confirm("審査員に触ってもらう前提で進めたい．\nアカウントを分けるか，権限を絞った管理者 role にするのがよいと思う．");
   assert.deepEqual(runtime.sendCalls.at(-1)?.args.slice(-2), ["--enter", "--json"]);
+});
+
+test("Orca refuses a Slack answer to a Codex prompt before writing anything", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const { terminal } = JSON.parse(
+    readFileSync(new URL("../agents/codex/__fixtures__/orca-approval.screen.json", import.meta.url), "utf8"),
+  ) as { terminal: { tail: string[] } };
+  const prompt = codexDriver.parseBlockedPane(terminal.tail.join("\n"));
+  if (prompt.kind !== "permission") throw new Error(`expected a Codex permission prompt, got ${prompt.kind}`);
+  await assert.rejects(
+    async () => backend(runtime).openAnswer(currentRef(), prompt.verified),
+    (error: unknown) => error instanceof ExpectationLost && /端末で答えてください/.test(error.userMessage ?? ""),
+  );
+  assert.equal(runtime.sendCalls.length, 0);
+});
+
+test("a Codex binding is checked again before each write, not only at discovery", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const heads = JSON.parse(
+    readFileSync(new URL("../agents/codex/__fixtures__/orca-rollout-heads.json", import.meta.url), "utf8"),
+  ) as { user: { payload: JsonObject } };
+  const cwd = "/workspace-codex";
+  const id = String(heads.user.payload.id);
+  const rollout = `${HOME}/.codex/sessions/2026/10/11/rollout-2026-10-11T17-22-35-${id}.jsonl`;
+  const process: ProcessFixture = {
+    pid: 40404,
+    ppid: 1,
+    pgid: 40404,
+    tpgid: 40404,
+    tty: "ttys008",
+    lstart: "Sun Oct 11 17:22:30 2026",
+    command: "codex --no-daemon",
+    paneKey: "codex-tab:codex-leaf",
+    terminalHandle: "codex-terminal",
+    cwd,
+  };
+  runtime.processes = [process];
+  runtime.terminals = [terminalFor(process.paneKey!, process.terminalHandle!, { title: "Codex terminal" })];
+  runtime.worktreeAgentsOverride = [];
+  runtime.descriptorOutputs.set(process.pid, `p${process.pid}\nf21\nau\ntREG\nD0x1000010\ni11\nn${rollout}`);
+  runtime.statOutputs.set(rollout, `${0x1000010} 11\n`);
+  runtime.openerOutputs.set(rollout, `p${process.pid}\nf21\nau`);
+  runtime.transcriptHeads.set(rollout, `${JSON.stringify({ ...heads.user, payload: { ...heads.user.payload, cwd } })}\n`);
+  const terminals = backend(runtime);
+
+  const agent = await terminals.get(`orca:${process.paneKey}`);
+  assert.equal(agent?.ref.sessionId, id);
+  assert.equal(await terminals.sameProcess(agent!.ref), true);
+
+  runtime.descriptorOutputs.delete(process.pid);
+  assert.equal(await terminals.sameProcess(agent!.ref), false, "the rollout is no longer written");
 });

@@ -14,7 +14,7 @@ You can't generate any of these yourself — get them from your Hub operator:
   token was issued for, or the Hub rejects the connection
 
 Your Spoke can use Herdr, Orca, or both: Herdr supports Claude Code and Codex
-CLI; Orca supports Claude Code and `omp`, but does not list Codex. If you use
+CLI; Orca supports Claude Code, Codex CLI, and `omp`. If you use
 Herdr, install it and register your Claude Code and/or Codex CLI instances as
 Herdr agents first — see [Installing Herdr](../README.md#installing-herdr-macos-notes).
 
@@ -34,7 +34,8 @@ path that does not exist disables that backend; setting its variable to an
 empty string disables it explicitly. At least one backend must be available.
 Claude Code on Orca has the same cctag features as on Herdr. Orca also supports
 `omp` text turns, output, and status; OMP questions and approvals are reported
-in Slack but must be answered in the terminal. Codex on Orca is not listed.
+in Slack but must be answered in the terminal. Codex CLI on Orca is listed once
+it has had its first message, with approvals and `model` in the terminal.
 
 Running from a binary install instead of this checkout? Put the same
 values at `~/.config/cctag/config.env` (see the config-discovery note under

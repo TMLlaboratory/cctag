@@ -10,6 +10,7 @@
  * which uses `❯` instead) covers all of them.
  */
 
+import type { ScreenSnapshot } from "../../backend/types.js";
 import type { PermissionChoice, PermissionMenu } from "../driver.js";
 
 const NUMBERED_LINE_RE = /^\s*(?:›\s*)?(\d+)\.\s*(.+?)\s*$/;
@@ -170,4 +171,33 @@ export function parseCodexStartupPrompt(paneText: string): string | null {
     .map((l) => l.trim())
     .find((l) => l && !/^[›❯>]?\s*\d+\./.test(l) && !AWAITING_ENTER.test(l));
   return headline ? headline.slice(0, 160) : "起動時の選択待ちダイアログ";
+}
+
+/** The composer's status row: two-space indent, then `<model> <effort> · <cwd>[ · <title>]`. */
+const COMPOSER_STATUS_ROW = /^ {2}\S.* · \S/u;
+/** The optional hint row under it (`? for shortcuts`, with a right-aligned warning count). */
+const COMPOSER_HINT_ROW = /^ {2}\? for shortcuts\b/u;
+/** Codex shows the composer while a turn runs too; this row is what marks the turn. */
+const WORKING_ROW = /^• Working \(.*esc to interrupt\)$/u;
+
+/**
+ * Whether the Orca screen ends in Codex CLI's composer with no turn running and
+ * no dialog in front of it. Measured on 0.162.0 under Orca 1.4.222: the bottom
+ * is the `›` composer row, the status row, and usually the hint row. The
+ * composer row keeps its placeholder until something is typed; Orca then
+ * reports the typed text as `draft` and leaves the row as a bare `›`.
+ *
+ * A placeholder is not told apart from undetected typed text here: Codex
+ * rotates its placeholders, so matching their wording would refuse whenever it
+ * shows a new one. Orca's draft is what separates them.
+ */
+export function isCodexIdleComposer(snapshot: ScreenSnapshot): boolean {
+  if (!snapshot.complete) return false;
+  const rows = snapshot.text.split(/\r?\n/u).map((row) => row.trimEnd());
+  while (rows.length > 0 && rows.at(-1) === "") rows.pop();
+  if (rows.length > 0 && COMPOSER_HINT_ROW.test(rows.at(-1)!)) rows.pop();
+  if (rows.length < 2 || !COMPOSER_STATUS_ROW.test(rows.at(-1)!)) return false;
+  const composer = rows.at(-2)!;
+  if (!/^›(?: |$)/u.test(composer) || /^›\s*\d+\./u.test(composer)) return false;
+  return !rows.some((row) => WORKING_ROW.test(row) || AWAITING_ENTER.test(row));
 }

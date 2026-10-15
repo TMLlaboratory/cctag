@@ -3,7 +3,15 @@ import { basename } from "node:path";
 import type { AnswerChannel, Terminals } from "../../backend/index.js";
 import type { AgentInfo } from "../../backend/types.js";
 import { promptFingerprint } from "../fingerprint.js";
-import type { AgentDriver, BlockedPrompt, ModelCommandResult } from "../driver.js";
+import type {
+  AgentDriver,
+  BlockedPrompt,
+  ModelCommandResult,
+  OrcaProcessAccess,
+  OrcaProcessIdentity,
+  OrcaProcessSession,
+} from "../driver.js";
+import { descriptorMode, parseDescriptors, soleWriterIdentity, type Descriptor } from "../transcript-writer.js";
 import {
   createBlindPermissionPrompt,
   createVerifiedModelMenuPrompt,
@@ -13,6 +21,7 @@ import type { VerifiedModelMenuPrompt } from "../../backend/prompt.js";
 import {
   effortLevelKey,
   findCursorRowNum,
+  isCodexIdleComposer,
   isModelListScreen,
   isEffortListScreen,
   modelNameKey,
@@ -88,14 +97,89 @@ function splitModelAndLevel(words: string[]): { levelKey: string | null; modelWo
   return { levelKey: null, modelWords: words };
 }
 
+export const CODEX_ORCA_TERMINAL_ANSWER = "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。";
+
+export const CODEX_THREAD_SWITCHED =
+  "⚠️ 端末で Codex の別の会話に切り替わったため、このターンを終えました（部分的な出力のみ）";
+
+export const CODEX_SHARED_SERVER_NOTICE =
+  "Codex の会話の記録（rollout）が見つからないため、Orca の Codex をつなげません。まだ最初のメッセージを送っていない Codex は、端末で一度送ってから選び直してください。Codex が共有の background server で動いている場合は、Orca の設定「Run each Codex terminal on its own server」を有効にして起動し直してください";
+
+const ROLLOUT_NAME = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/iu;
+
+/** The `session_meta` payload on a rollout's first line, or null when the line is not one. */
+function sessionMeta(head: string): Record<string, unknown> | null {
+  const first = head.split(/\r?\n/u, 1)[0];
+  if (!first) return null;
+  let record: unknown;
+  try {
+    record = JSON.parse(first) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof record !== "object" || record === null || Array.isArray(record)) return null;
+  const { type, payload } = record as Record<string, unknown>;
+  if (type !== "session_meta" || typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return null;
+  }
+  return payload as Record<string, unknown>;
+}
+
+/**
+ * Ties a Codex TUI on Orca to its own rollout: the one rollout the process holds
+ * open for writing whose `session_meta` is the user's thread, written by no other
+ * process. Measured on 0.162: a TUI running its own app-server (Orca's default,
+ * `--no-daemon`) holds its thread's rollout and, once a command is reviewed, a
+ * guardian subagent's (`thread_source: "guardian_review"`), which is skipped. A
+ * TUI on the shared background server holds none — that server writes every
+ * session's rollout — so it gets no binding and is not listed. Neither does a TUI
+ * before its first message: it creates its rollout then, not at startup.
+ */
+async function codexSession(
+  process: OrcaProcessIdentity,
+  access: OrcaProcessAccess,
+): Promise<OrcaProcessSession | null> {
+  if (!process.cwd) return null;
+  const descriptors = parseDescriptors(
+    await access.runSystem("lsof", ["-a", "-p", String(process.pid), "-FftpaDin"]),
+  );
+  if (!descriptors) return null;
+
+  const threads: Array<{ writer: Descriptor; sessionId: string; meta: Record<string, unknown> }> = [];
+  for (const descriptor of descriptors) {
+    if (descriptor.pid !== process.pid || !descriptor.name) continue;
+    const sessionId = basename(descriptor.name).match(ROLLOUT_NAME)?.[1];
+    if (!sessionId) continue;
+    const mode = descriptorMode(descriptor);
+    if (descriptor.type !== "REG" || (mode !== "w" && mode !== "u")) continue;
+    const meta = sessionMeta(await access.readTranscriptHead(descriptor.name));
+    if (!meta) return null;
+    if (meta.thread_source !== "user") continue;
+    threads.push({ writer: descriptor, sessionId, meta });
+  }
+  if (threads.length !== 1) return null;
+  const { writer, sessionId, meta } = threads[0]!;
+  if (meta.id !== sessionId || meta.cwd !== process.cwd) return null;
+
+  const identity = await soleWriterIdentity(writer, process.pid, access);
+  return identity ? { sessionId, transcriptIdentity: identity } : null;
+}
+
 export const codexDriver: AgentDriver = {
   kind: "codex",
   orcaProcess: {
-    listable: false,
-    unsupportedNotice: "Orca 上の Codex は未対応です",
+    listable: true,
+    sessionUnavailableNotice: CODEX_SHARED_SERVER_NOTICE,
     matchesCommand(command) {
       const [executable] = command.trim().split(/\s+/);
       return basename(executable ?? "") === "codex";
+    },
+    async session(process, access) {
+      try {
+        return await codexSession(process, access);
+      } catch {
+        return null;
+      }
     },
   },
 
@@ -136,6 +220,7 @@ export const codexDriver: AgentDriver = {
   parseCursorLabel(snap) {
     return snap.complete ? parseCodexCursorLabel(snap.text) : null;
   },
+  isIdleComposer: isCodexIdleComposer,
 
   async answerOption(channel, value, expectedLabel) {
     // Verified empirically: unlike Claude Code's permission menu (digit
@@ -156,6 +241,10 @@ export const codexDriver: AgentDriver = {
       reply,
       submitOutcome,
     });
+    if (agent.backend === "orca") {
+      // Refused before /model is sent: Orca has no Escape-capable channel to back out of the menu.
+      return result("⚠️ Orca 上の Codex のモデルは、端末で /model から変えてください。");
+    }
     const words = argsText.trim().split(/\s+/).filter(Boolean);
     if (words.length === 0) {
       return result("⚠️ モデル名を指定してください（例: `model gpt-5.6-sol high`）。");

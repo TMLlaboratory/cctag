@@ -11,6 +11,21 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Added
+
+- Codex CLI on Orca is listed in `connect` when it runs its own app server
+  (Orca's default, "Run each Codex terminal on its own server"). cctag ties the
+  pane to the one rollout the Codex process holds open for writing, skipping
+  its guardian reviewer's, rechecks that binding before every write, and reads
+  its output and status from that rollout. A Codex on the shared background
+  server writes no rollout of its own and is not listed, nor is one that has
+  not had its first message yet (it creates its rollout then); `list` says what
+  to do. If the person switches to another Codex thread mid-turn, the Slack
+  turn ends with a notice rather than replaying that thread into Slack. Approval prompts are
+  posted as "answer in the terminal" without buttons, and `model` is refused
+  before `/model` is typed: Codex 0.162 confirms an approval on its digit alone,
+  and Orca has no way to back out of the model menu.
+
 ### Fixed
 
 - A Claude Code permission prompt that carries the auto-deny countdown (the
