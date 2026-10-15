@@ -41,9 +41,32 @@ const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
  * same prompt re-posted, and a button press failed its screen check. It is a
  * timer, not part of what is being asked, so it is dropped before the context
  * window is counted — dropped after, its coming and going shifted the window by
- * a line and changed the fingerprint anyway.
+ * a line and changed the fingerprint anyway. A pane narrower than the banner
+ * wraps it, and the rows that finish its sentence go with it.
  */
 const AUTO_DENY_COUNTDOWN_RE = /^\s*⚠\s*Claude Code will automatically deny this request in \d+:\d{2}\b/;
+const AUTO_DENY_COUNTDOWN_REST = ", to avoid blocking progress on an unattended session";
+
+function withoutAutoDenyCountdown(lines: string[]): string[] {
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const banner = AUTO_DENY_COUNTDOWN_RE.exec(lines[i]);
+    if (!banner) {
+      kept.push(lines[i]);
+      continue;
+    }
+    // Not "drop the next row": a pane wide enough for the whole banner puts the prompt's own text there.
+    let drawn = lines[i].slice(banner[0].length).trim();
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1].trim();
+      const joined = [`${drawn} ${next}`, `${drawn}${next}`].find((text) => AUTO_DENY_COUNTDOWN_REST.startsWith(text));
+      if (next === "" || joined === undefined) break;
+      drawn = joined;
+      i++;
+    }
+  }
+  return kept;
+}
 
 export function permissionAnchorIndex(paneText: string): number {
   const lines = paneText.split("\n");
@@ -54,7 +77,7 @@ export function permissionAnchorIndex(paneText: string): number {
 }
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
-  const lines = paneText.split("\n").filter((line) => !AUTO_DENY_COUNTDOWN_RE.test(line));
+  const lines = withoutAutoDenyCountdown(paneText.split("\n"));
 
   let cursorIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
