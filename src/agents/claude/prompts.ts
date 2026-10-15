@@ -32,6 +32,19 @@ const CURSOR_LINE_RE = /❯\s*\d+\./;
  */
 const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
 
+/**
+ * The line Claude Code adds to a permission prompt on an unattended session,
+ * `⚠ Claude Code will automatically deny this request in 1:36`, which redraws
+ * every second and comes and goes with terminal focus. Left in the snippet it
+ * changed the fingerprint on every poll, so one pending prompt read as a chain
+ * of prompts answered at the keyboard: each post was marked answered and the
+ * same prompt re-posted, and a button press failed its screen check. It is a
+ * timer, not part of what is being asked, so it is dropped before the context
+ * window is counted — dropped after, its coming and going shifted the window by
+ * a line and changed the fingerprint anyway.
+ */
+const AUTO_DENY_COUNTDOWN_RE = /^\s*⚠\s*Claude Code will automatically deny this request in \d+:\d{2}\b/;
+
 export function permissionAnchorIndex(paneText: string): number {
   const lines = paneText.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -41,7 +54,7 @@ export function permissionAnchorIndex(paneText: string): number {
 }
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
-  const lines = paneText.split("\n");
+  const lines = paneText.split("\n").filter((line) => !AUTO_DENY_COUNTDOWN_RE.test(line));
 
   let cursorIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {

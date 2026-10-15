@@ -6,6 +6,7 @@ import {
   looksLikeQuestionScreen,
   parseAskUserQuestionPane,
   parseCursorLabel,
+  parsePermissionMenu,
   parsePreviewQuestionPane,
   previewAnchorIndex,
 } from "./prompts.js";
@@ -1117,4 +1118,46 @@ test("no key is sent into a free-text row that already holds text, or as a digit
     (error: unknown) => error instanceof ExpectationLost && /自由記述の欄/u.test(error.userMessage ?? ""),
   );
   assert.deepEqual(onRow.sent, []);
+});
+
+test("the auto-deny countdown is not part of the permission prompt", () => {
+  // Rows as Claude Code drew them on an unattended Orca pane, 2026-10-14. The
+  // countdown redraws every second and is absent while the terminal has focus;
+  // every one of these is the same pending prompt.
+  const screen = (countdown: string | null) =>
+    [
+      " Bash command",
+      " Dump each tab via its tab URL",
+      "╌".repeat(60),
+      " │ for t in team overview showcase review-info submit; do",
+      " │   echo \"== $t\"",
+      " │ done",
+      "╌".repeat(60),
+      " │ Dangerous rm operation on possibly-empty variable path: $D/*.snap.txt",
+      ...(countdown === null
+        ? []
+        : [` ⚠ Claude Code will automatically deny this request in ${countdown}, to avoid blocking progress on an unattended session`]),
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel · Tab to amend",
+    ].join("\n");
+  const snippets = ["1:36", "1:31", null].map((countdown) => parsePermissionMenu(screen(countdown))?.snippet);
+  assert.ok(snippets[0]?.includes("Do you want to proceed?"));
+  assert.ok(!snippets[0]?.includes("automatically deny"));
+  assert.equal(snippets[0], snippets[1]);
+  assert.equal(snippets[0], snippets[2]);
+});
+
+test("a command that merely mentions the countdown text stays in the prompt", () => {
+  // Only the banner row is dropped: a command line carrying the same words is
+  // part of what the person is approving and must still reach Slack.
+  const screen = [
+    " Bash command",
+    " │ echo 'Claude Code will automatically deny this request in 1:36'",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No",
+  ].join("\n");
+  assert.ok(parsePermissionMenu(screen)?.snippet.includes("echo 'Claude Code will automatically deny"));
 });
