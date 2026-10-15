@@ -11,6 +11,15 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Fixed
+
+- A Claude Code permission prompt that carries the auto-deny countdown (the
+  dangerous `rm` prompt in auto mode, since Claude Code 2.1.281) is now one
+  prompt in Slack. The countdown redrew every second, so cctag took each redraw
+  for a new prompt: it marked the last post answered at the terminal, posted the
+  same prompt again every few seconds, and a button press stopped on a changed
+  screen. This happened on herdr and Orca alike.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added
