@@ -709,7 +709,9 @@ export class OrcaBackend implements Terminals {
     try {
       session = await this.session(process);
       if (!session) return null;
-    } catch {
+    } catch (error) {
+      // Not null: a running turn ends on null, and a binding that cannot be decided yet is not a gone process.
+      if (error instanceof BackendUnavailable) throw error;
       return null;
     }
     const worktreeAgent = worktreeAgentForPane(worktree, paneKey);

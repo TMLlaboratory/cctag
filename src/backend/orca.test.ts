@@ -2882,3 +2882,37 @@ test("a Codex binding is checked again before each write, not only at discovery"
   runtime.descriptorOutputs.delete(process.pid);
   assert.equal(await terminals.sameProcess(agent!.ref), false, "the rollout is no longer written");
 });
+
+test("a Codex rollout opened with no first line yet fails the query instead of reading as a gone agent", async () => {
+  const runtime = new FakeOrcaRuntime();
+  const heads = JSON.parse(
+    readFileSync(new URL("../agents/codex/__fixtures__/orca-rollout-heads.json", import.meta.url), "utf8"),
+  ) as { user: { payload: JsonObject }; guardian: { payload: JsonObject } };
+  const cwd = "/workspace-codex";
+  const rollout = (id: unknown) => `${HOME}/.codex/sessions/2026/10/11/rollout-2026-10-11T17-22-35-${String(id)}.jsonl`;
+  const user = rollout(heads.user.payload.id);
+  const guardian = rollout(heads.guardian.payload.id);
+  const process: ProcessFixture = {
+    pid: 40404,
+    ppid: 1,
+    pgid: 40404,
+    tpgid: 40404,
+    tty: "ttys008",
+    lstart: "Sun Oct 11 17:22:30 2026",
+    command: "codex --no-daemon",
+    paneKey: "codex-tab:codex-leaf",
+    terminalHandle: "codex-terminal",
+    cwd,
+  };
+  runtime.processes = [process];
+  runtime.terminals = [terminalFor(process.paneKey!, process.terminalHandle!, { title: "Codex terminal" })];
+  runtime.worktreeAgentsOverride = [];
+  runtime.descriptorOutputs.set(
+    process.pid,
+    `p${process.pid}\nf21\nau\ntREG\nD0x1000010\ni11\nn${user}\nf52\nau\ntREG\nD0x1000010\ni12\nn${guardian}`,
+  );
+  runtime.transcriptHeads.set(user, `${JSON.stringify({ ...heads.user, payload: { ...heads.user.payload, cwd } })}\n`);
+  runtime.transcriptHeads.set(guardian, "");
+
+  await assert.rejects(backend(runtime).get(`orca:${process.paneKey}`), BackendUnavailable);
+});

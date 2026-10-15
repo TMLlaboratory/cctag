@@ -34,6 +34,10 @@ would have to keep. Pin an exact version if that matters to you.
   for a new prompt: it marked the last post answered at the terminal, posted the
   same prompt again every few seconds, and a button press stopped on a changed
   screen. This happened on herdr and Orca alike.
+- A Slack turn on Codex CLI on Orca no longer ends with "インスタンスが終了しました"
+  when a poll lands while Codex's guardian reviewer has opened its rollout but
+  not yet written the first line. That poll now counts as a failed query and is
+  retried, instead of reading as a gone agent.
 
 ## [0.5.0] - 2026-10-12
 

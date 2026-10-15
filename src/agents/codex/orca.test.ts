@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { Terminals } from "../../backend/index.js";
-import type { AgentInfo, ScreenSnapshot } from "../../backend/types.js";
+import { BackendUnavailable, type AgentInfo, type ScreenSnapshot } from "../../backend/types.js";
 import type { OrcaProcessAccess, OrcaProcessIdentity } from "../driver.js";
 import { CODEX_SHARED_SERVER_NOTICE, codexDriver } from "./driver.js";
 
@@ -85,6 +85,21 @@ test("a Codex TUI is bound to the user's rollout it writes, skipping the guardia
     sessionId: heads.user.payload.id,
     transcriptIdentity: { path: USER, device: String(0x1000010), inode: "11" },
   });
+});
+
+test("a Codex binding is left undecided while an open rollout's first line is not written yet", async () => {
+  const open = [
+    { path: USER, fd: 21, mode: "u" as const, inode: 11 },
+    { path: GUARDIAN, fd: 52, mode: "u" as const, inode: 12 },
+  ];
+  const partial = headFor(heads.guardian).slice(0, 40);
+  for (const head of ["", partial]) {
+    await assert.rejects(
+      session(PROCESS, access({ open, heads: { [USER]: headFor(heads.user), [GUARDIAN]: head } })),
+      BackendUnavailable,
+      JSON.stringify(head),
+    );
+  }
 });
 
 test("a Codex TUI on the shared background server holds no rollout and gets no binding", async () => {
