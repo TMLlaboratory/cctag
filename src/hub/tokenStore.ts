@@ -89,6 +89,13 @@ export class TokenStore {
     return this.tokens.get(token);
   }
 
+  /** Whether any token is bound to this Slack user. Re-reads the store, as validate does. */
+  hasOwner(ownerUserId: string): boolean {
+    this.load();
+    for (const t of this.tokens.values()) if (t.ownerUserId === ownerUserId) return true;
+    return false;
+  }
+
   list(): IssuedToken[] {
     return [...this.tokens.values()];
   }
