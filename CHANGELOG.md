@@ -26,6 +26,13 @@ would have to keep. Pin an exact version if that matters to you.
   before `/model` is typed: Codex 0.162 confirms an approval on its digit alone,
   and Orca has no way to back out of the model menu.
 
+### Changed
+
+- Someone who has never been issued a token is now told so when they mention
+  cctag, with a link to the Spoke setup steps. They used to get the notice for
+  a stopped Spoke ("spokeデーモンが起動しているか確認してください"), which pointed a
+  new user at a daemon they had never set up. Takes effect once the Hub runs it.
+
 ### Fixed
 
 - A Claude Code permission prompt that carries the auto-deny countdown (the
