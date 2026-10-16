@@ -41,6 +41,10 @@ would have to keep. Pin an exact version if that matters to you.
   for a new prompt: it marked the last post answered at the terminal, posted the
   same prompt again every few seconds, and a button press stopped on a changed
   screen. This happened on herdr and Orca alike.
+- The same holds when the pane is too narrow for the countdown and it wraps:
+  the rows that finish its sentence are dropped with it. Before, the second row
+  stayed in the prompt and came and went with terminal focus, so the prompt was
+  re-posted each time focus moved.
 
 ## [0.5.0] - 2026-10-12
 
