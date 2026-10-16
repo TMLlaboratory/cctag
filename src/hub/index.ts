@@ -5,6 +5,7 @@ import Bolt from "@slack/bolt";
 import { WebSocketServer } from "ws";
 import type { IncomingFile } from "../attachments.js";
 import { TokenStore } from "./tokenStore.js";
+import { notConnectedText } from "./not-connected.js";
 import { maxFramePayload } from "./frame.js";
 import { setBounded } from "./bounded.js";
 import { undeliverableNotice } from "./undeliverable.js";
@@ -139,11 +140,13 @@ async function runServer(): Promise<void> {
     return spokesByOwner.get(ownerUserId);
   }
 
-  async function notConnectedReply(channel: string, threadTs: string): Promise<void> {
+  /** `ownerUserId` is whose Spoke was wanted; undefined when the Hub knows no owner. */
+  async function notConnectedReply(channel: string, threadTs: string, ownerUserId?: string): Promise<void> {
+    const registered = ownerUserId === undefined || tokenStore.hasOwner(ownerUserId);
     await app.client.chat.postMessage({
       channel,
       thread_ts: threadTs,
-      text: "⚠️ 起動していません。cctagを動かしている計算機のspokeデーモンが起動しているか確認してください。",
+      text: notConnectedText(registered),
     });
   }
 
@@ -407,7 +410,7 @@ async function runServer(): Promise<void> {
     const ownerUserId = threadOwner.get(key) ?? userId;
     const spoke = spokeFor(ownerUserId);
     if (!spoke) {
-      await notConnectedReply(channel, threadTs);
+      await notConnectedReply(channel, threadTs, ownerUserId);
       return;
     }
     const files = incomingFilesFrom(event as unknown as FileBearingEvent);
@@ -473,7 +476,7 @@ async function runServer(): Promise<void> {
     if (!channel || !threadTs || !terminalId) return;
     const spoke = spokeFor(actionBody.user.id);
     if (!spoke) {
-      await notConnectedReply(channel, threadTs);
+      await notConnectedReply(channel, threadTs, actionBody.user.id);
       return;
     }
     await spoke
@@ -502,7 +505,7 @@ async function runServer(): Promise<void> {
       const ownerUserId = threadOwner.get(key);
       const spoke = ownerUserId ? spokeFor(ownerUserId) : undefined;
       if (!spoke) {
-        await notConnectedReply(channel, threadTs);
+        await notConnectedReply(channel, threadTs, ownerUserId);
         return;
       }
       // Who pressed it. Slack guarantees this field, so unlike anything typed into

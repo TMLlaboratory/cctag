@@ -1149,6 +1149,70 @@ test("the auto-deny countdown is not part of the permission prompt", () => {
   assert.equal(snippets[0], snippets[2]);
 });
 
+test("the auto-deny countdown is not part of the permission prompt when a narrow pane wraps it", () => {
+  // Rows as Claude Code 2.1.300 drew them in a 73-column Orca pane in auto
+  // mode, 2026-10-16, read with `orca terminal read --screen` twice as the
+  // countdown ran.
+  const screen = (countdown: string | null) =>
+    [
+      " Bash command",
+      " Create temp dir and remove snapshot files in it",
+      "╌".repeat(73),
+      " D=$(mktemp -d); rm -f $D/*.snap.txt",
+      "╌".repeat(73),
+      " │ Dangerous rm operation on possibly-empty variable path: $D/*.snap.txt",
+      ' │ in `rm -f $D/*.snap.txt` (rewrite it as "${D:?}"/*.snap.txt or use a',
+      " │ literal path)",
+      ...(countdown === null
+        ? []
+        : [
+            ` ⚠ Claude Code will automatically deny this request in ${countdown}, to avoid`,
+            " blocking progress on an unattended session",
+          ]),
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+      " Esc to cancel · Tab to amend",
+    ].join("\n");
+  const snippets = ["1:37", "1:23", null].map((countdown) => parsePermissionMenu(screen(countdown))?.snippet);
+  assert.ok(!snippets[0]?.includes("unattended session"));
+  assert.equal(snippets[0], snippets[1]);
+  assert.equal(snippets[0], snippets[2]);
+});
+
+test("the auto-deny countdown is dropped however its wrap falls", () => {
+  // Written by hand, not captured: other widths could break the sentence at other words.
+  const screen = (countdown: string[]) =>
+    [
+      " Bash command",
+      " │ rm -f $D/*.snap.txt",
+      " │ Dangerous rm operation",
+      ...countdown,
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. No",
+    ].join("\n");
+  const unwatched = parsePermissionMenu(screen([]))?.snippet;
+  const wraps = {
+    "with an indented second row": [
+      " ⚠ Claude Code will automatically deny this request in 1:36, to avoid blocking progress on an",
+      "   unattended session",
+    ],
+    "over three rows": [
+      " ⚠ Claude Code will automatically deny this request in 1:36, to avoid",
+      " blocking progress on an unattended",
+      " session",
+    ],
+    "inside a word": [
+      " ⚠ Claude Code will automatically deny this request in 1:36, to avoid blocking progress on an unatt",
+      "ended session",
+    ],
+  };
+  for (const [name, rows] of Object.entries(wraps)) {
+    assert.equal(parsePermissionMenu(screen(rows))?.snippet, unwatched, name);
+  }
+});
+
 test("a command that merely mentions the countdown text stays in the prompt", () => {
   // Only the banner row is dropped: a command line carrying the same words is
   // part of what the person is approving and must still reach Slack.

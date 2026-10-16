@@ -26,6 +26,13 @@ would have to keep. Pin an exact version if that matters to you.
   before `/model` is typed: Codex 0.162 confirms an approval on its digit alone,
   and Orca has no way to back out of the model menu.
 
+### Changed
+
+- Someone who has never been issued a token is now told so when they mention
+  cctag, with a link to the Spoke setup steps. They used to get the notice for
+  a stopped Spoke ("spokeデーモンが起動しているか確認してください"), which pointed a
+  new user at a daemon they had never set up. Takes effect once the Hub runs it.
+
 ### Fixed
 
 - A Claude Code permission prompt that carries the auto-deny countdown (the
@@ -34,6 +41,10 @@ would have to keep. Pin an exact version if that matters to you.
   for a new prompt: it marked the last post answered at the terminal, posted the
   same prompt again every few seconds, and a button press stopped on a changed
   screen. This happened on herdr and Orca alike.
+- The same holds when the pane is too narrow for the countdown and it wraps:
+  the rows that finish its sentence are dropped with it. Before, the second row
+  stayed in the prompt and came and went with terminal focus, so the prompt was
+  re-posted each time focus moved.
 - A Slack turn on Codex CLI on Orca no longer ends with "インスタンスが終了しました"
   when a poll lands while Codex's guardian reviewer has opened its rollout but
   not yet written the first line. That poll now counts as a failed query and is
