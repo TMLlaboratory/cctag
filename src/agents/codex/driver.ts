@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 
 import type { AnswerChannel, Terminals } from "../../backend/index.js";
-import type { AgentInfo } from "../../backend/types.js";
+import { BackendUnavailable, type AgentInfo } from "../../backend/types.js";
 import { promptFingerprint } from "../fingerprint.js";
 import type {
   AgentDriver,
@@ -152,7 +152,10 @@ async function codexSession(
     if (!sessionId) continue;
     const mode = descriptorMode(descriptor);
     if (descriptor.type !== "REG" || (mode !== "w" && mode !== "u")) continue;
-    const meta = sessionMeta(await access.readTranscriptHead(descriptor.name));
+    const head = await access.readTranscriptHead(descriptor.name);
+    // Not skipped as unreadable: if it is the user's thread, skipping would bind another rollout still open.
+    if (!head.includes("\n")) throw new BackendUnavailable(`${descriptor.name}: first line not written yet`);
+    const meta = sessionMeta(head);
     if (!meta) return null;
     if (meta.thread_source !== "user") continue;
     threads.push({ writer: descriptor, sessionId, meta });
@@ -177,7 +180,8 @@ export const codexDriver: AgentDriver = {
     async session(process, access) {
       try {
         return await codexSession(process, access);
-      } catch {
+      } catch (error) {
+        if (error instanceof BackendUnavailable) throw error;
         return null;
       }
     },
