@@ -11,6 +11,8 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 ### Added
 
 - Codex CLI on Orca is listed in `connect` when it runs its own app server
@@ -397,7 +399,8 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TMLlaboratory/cctag/compare/v0.2.0...v0.3.0
