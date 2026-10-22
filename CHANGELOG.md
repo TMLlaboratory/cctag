@@ -11,6 +11,16 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-22
+
+### Security
+
+- follow-redirects, which `@slack/bolt` pulls in through axios, is updated to
+  1.16.1 past two advisories where credential headers could survive a
+  cross-origin redirect (GHSA-q3jh-wrc6-jgq8, GHSA-8r9p-f939-6h3c). Both
+  `package-lock.json` and the `bun.lock` the release binaries are built from
+  are updated. cctag's own code is unchanged.
+
 ## [0.6.0] - 2026-10-16
 
 ### Added
@@ -399,7 +409,8 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/TMLlaboratory/cctag/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/TMLlaboratory/cctag/compare/v0.3.0...v0.4.0
