@@ -1270,11 +1270,13 @@ test("screen reads are full-frame and reject non-positive line counts", async ()
   // are carried over from the stream buffer and do not make a screen incomplete.
   runtime.screen = capturedProbeScreen("screen-read-long-lived-truncated.json");
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
-  // The omp capture's cursors span Orca's full 2,000-line stream window, so its
-  // `limited` is stream carry-over; its 68 rows are under the row cap.
+  // The omp capture (68 rows, under the row cap) reports `limited`; its rows were
+  // masked without their lengths, so the character cap is covered by the
+  // synthetic cases above and the #63 capture below, not by this one.
   runtime.screen = capturedProbeScreen("screen-read-omp-limited-truncated.json");
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
-  // #63: an idle Claude Code (59 rows) whose stream held more than 120 lines.
+  // #63: an idle Claude Code (59 rows, 4,514 characters; rows masked to their
+  // lengths) whose stream held more than 120 lines.
   runtime.screen = capturedProbeScreen("screen-read-long-output-limited.json");
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
   runtime.screen = { ...capturedProbeScreen("screen-read-long-lived-truncated.json"), source: "screen-unavailable" };
@@ -1848,7 +1850,7 @@ test("Orca requires two consecutive complete positive probe reads", async () => 
   // Synthetic unexpected draft value derived from the raw p4-11-suggestion-plus-x.json capture.
   const fluctuating = { ...withProbe, draft: "unexpected" };
   // Synthetic incomplete-screen state derived from the raw p4-11-suggestion-plus-x.json capture.
-  const incomplete = { ...withProbe, truncated: true };
+  const incomplete = rowCut(withProbe);
   const restored = capturedProbeScreen("p4-12-suggestion-after-bs.json");
   runtime.screen = restored;
   runtime.screenSequence = [
