@@ -3,18 +3,19 @@
 ## Getting the checks to run
 
 ```bash
-npm install      # postinstall generates src/version.ts, which the build needs
+npm ci           # postinstall generates src/version.ts, which the build needs
 npm run typecheck
-npm test         # 178 tests, ~30s
+npm test
 npm run build
 ```
 
 Those four are exactly what CI runs on every pull request, so a green local run
 means a green CI run. There is no linter to satisfy.
 
-Nothing here needs a Slack workspace or a running herdr: every test stubs
-`HerdrClient`, and nothing in the suite constructs a real one. That is also the
-limit of what the suite can tell you — see *What tests can't cover* below.
+Nothing here needs a Slack workspace, a running herdr, or a running Orca: the
+tests drive both terminal backends through fakes of their CLIs (`herdr` and
+`orca`), and nothing in the suite starts a real one. That is also the limit of
+what the suite can tell you — see *What tests can't cover* below.
 
 `npm test` passes a glob to `node --test`, which only expands it on **Node 21+**,
 so the tests need a newer Node than the `>=20` cctag itself runs on. CI checks
@@ -47,8 +48,9 @@ Roughly half of what cctag does can only be verified against a live pane, and
 reviewers cannot check it for you:
 
 - **Anything read off the screen.** Permission and question dialogs are parsed
-  from `herdr pane read`, because neither agent writes a pending prompt to its
-  transcript until after it is answered. The rendering changes without notice —
+  from the pane (`herdr pane read`, or `orca terminal read --screen` on Orca),
+  because none of the agents writes a pending prompt to its transcript until
+  after it is answered. The rendering changes without notice —
   a multi-select question broke this way, because a checkbox appears on the
   free-text row and the fixture had been written from assumption rather than
   captured. **If you touch `src/agents/*/prompts.ts`, capture a real pane and add

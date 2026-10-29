@@ -11,6 +11,12 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Changed
+
+- CONTRIBUTING.md no longer pins the test count, lists `npm ci` as CI runs it,
+  and covers the Orca backend alongside herdr where it describes what the
+  tests fake and where screens are read from.
+
 ## [0.6.1] - 2026-10-22
 
 ### Security
