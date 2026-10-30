@@ -11,6 +11,8 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-31
+
 ### Changed
 
 - CONTRIBUTING.md no longer pins the test count, lists `npm ci` as CI runs it,
@@ -442,7 +444,8 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/TMLlaboratory/cctag/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/TMLlaboratory/cctag/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/TMLlaboratory/cctag/compare/v0.4.0...v0.5.0
