@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { WebClient } from "@slack/web-api";
-import { downloadSlackFile } from "./notifier.js";
+import { downloadSlackFile, formatThreadHistorySinceLastBotPost } from "./notifier.js";
 import { narrowedMaxFileBytes } from "../spoke/notifier.js";
 
 const CAP = 1024;
@@ -115,4 +115,80 @@ test("the Spoke keeps its own cap when the Hub's is larger or unreported", () =>
   assert.equal(narrowedMaxFileBytes(1024, undefined), 1024);
   assert.equal(narrowedMaxFileBytes(1024, 0), 1024);
   assert.equal(narrowedMaxFileBytes(1024, "1MB"), 1024);
+});
+
+const BOT = "UBOT";
+const THREAD = "1700000000.000100";
+
+type FakeMessage = { ts: string; user?: string; text: string };
+
+/**
+ * A conversations.replies that pages oldest-first like Slack's: the parent
+ * always comes first, `oldest` bounds the replies, and a cursor is the index of
+ * the next reply.
+ */
+function threadClient(replies: FakeMessage[], opts: { failOnCall?: number } = {}) {
+  const calls: { oldest?: string; cursor?: string }[] = [];
+  const client = {
+    conversations: {
+      replies: async (args: { limit: number; cursor?: string; oldest?: string }) => {
+        calls.push({ oldest: args.oldest, cursor: args.cursor });
+        if (opts.failOnCall === calls.length) throw new Error("ratelimited");
+        const inWindow = replies.filter((m) => args.oldest === undefined || Number(m.ts) >= Number(args.oldest));
+        const start = args.cursor ? Number(args.cursor) : 0;
+        const page = inWindow.slice(start, start + args.limit);
+        const next = start + args.limit < inWindow.length ? String(start + args.limit) : "";
+        const parent = { ts: THREAD, user: "UASAMI", text: "parent" };
+        return { messages: start === 0 ? [parent, ...page] : page, response_metadata: { next_cursor: next } };
+      },
+    },
+    users: { info: async ({ user }: { user: string }) => ({ user: { real_name: user } }) },
+  } as unknown as WebClient;
+  return { client, calls };
+}
+
+/** `count` replies a minute apart, starting a minute after the parent. */
+function replies(count: number, botAt: number[] = []): FakeMessage[] {
+  return Array.from({ length: count }, (_, i) => ({
+    ts: (1700000000 + 60 * (i + 1)).toFixed(6),
+    user: botAt.includes(i) ? BOT : "UKUMOI",
+    text: `m${i}`,
+  }));
+}
+
+test("log reads the tail of a thread longer than the old ten-page cap", async () => {
+  // 2,500 replies over ~42 hours: the old reader stopped at 2,000 and reported
+  // what followed the last bot post *in those* as the newest history.
+  const thread = replies(2500, [1990, 2497]);
+  const { client, calls } = threadClient(thread);
+  const lines = await formatThreadHistorySinceLastBotPost(client, "C1", THREAD, thread[2499]!.ts, BOT);
+  assert.deepEqual(lines, ["UKUMOI: m2498"]);
+  assert.equal(calls.length, 8, "one day of replies, paged, and nothing older");
+  assert.ok(calls.every((c) => c.oldest !== undefined));
+});
+
+test("log falls back to the whole thread when cctag has not posted for a week", async () => {
+  const thread = replies(3, [0]).map((m, i) => ({ ...m, ts: (1700000000 + 10 * 86_400 * (i + 1)).toFixed(6) }));
+  const { client, calls } = threadClient(thread);
+  const lines = await formatThreadHistorySinceLastBotPost(client, "C1", THREAD, thread[2]!.ts, BOT);
+  assert.deepEqual(lines, ["UKUMOI: m1"]);
+  assert.deepEqual(
+    calls.map((c) => c.oldest === undefined),
+    [false, false, true],
+  );
+});
+
+test("log leaves out a parent older than the window it read", async () => {
+  const thread = replies(3, []);
+  thread.push({ ts: (1700000000 + 30 * 86_400).toFixed(6), user: BOT, text: "done" });
+  thread.push({ ts: (1700000000 + 30 * 86_400 + 60).toFixed(6), user: "UKUMOI", text: "after" });
+  const { client } = threadClient(thread);
+  const lines = await formatThreadHistorySinceLastBotPost(client, "C1", THREAD, "1702592400.000000", BOT);
+  assert.deepEqual(lines, ["UKUMOI: after"]);
+});
+
+test("a failed page fails the whole read rather than returning a prefix", async () => {
+  const thread = replies(500, [10]);
+  const { client } = threadClient(thread, { failOnCall: 2 });
+  await assert.rejects(formatThreadHistorySinceLastBotPost(client, "C1", THREAD, thread[499]!.ts, BOT), /ratelimited/);
 });
