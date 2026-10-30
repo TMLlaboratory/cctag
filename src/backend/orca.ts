@@ -40,6 +40,9 @@ const ORCA_TIMEOUT_MS = 5_000;
 const SUBMIT_TIMEOUT_MS = 25_000;
 const PROBE_POLL_MS = 150;
 const PROBE_TIMEOUT_MS = 3_000;
+// Orca cuts a screen read to its last 120 rows (the default `--limit`) and to 32,768 characters.
+const ORCA_SCREEN_ROW_CAP = 120;
+const ORCA_SCREEN_CHAR_CAP = 32_768;
 type StableComposerRead = { draft: string | null; snapshot: ScreenSnapshot };
 
 function normalizedDraft(draft: string | null): string | null {
@@ -771,12 +774,15 @@ export class OrcaBackend implements Terminals {
         validTail &&
         terminal.source === "screen" &&
         terminal.status === "running" &&
-        // `truncated` is deliberately not read: on a screen read it is carried
-        // over from Orca's stream buffer, which sets it once any output was ever
-        // trimmed and never clears it, so a long-lived terminal reports it on
-        // every read while the screen itself is whole. `limited === false` does
-        // cover the screen (rows over the limit or characters over 32 KB).
-        terminal.limited === false,
+        typeof terminal.limited === "boolean" &&
+        // Neither `truncated` nor `limited` is trusted: on a screen read both are
+        // carried over from Orca's stream buffer, and a long-lived terminal
+        // reports them on every read while the screen itself is whole. A larger
+        // `--limit` does not clear `limited` either, since the wider stream
+        // window then trips the same 32 KB cap. Orca cuts a screen to exactly
+        // the row or character cap, so anything below both caps is whole.
+        tail.length < ORCA_SCREEN_ROW_CAP &&
+        tail.reduce((sum, line) => sum + line.length, 0) < ORCA_SCREEN_CHAR_CAP,
     };
   }
 
