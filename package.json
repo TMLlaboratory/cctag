@@ -1,6 +1,6 @@
 {
   "name": "cctag",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Slack ↔ local coding-agent TUI bridge (Claude Code / Codex CLI / omp), via herdr or Orca",
   "type": "module",
   "license": "MIT",

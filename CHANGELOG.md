@@ -11,6 +11,17 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-31
+
+### Security
+
+- body-parser and qs, which `@slack/bolt` pulls in through express, are
+  updated to 2.4.0 and 6.17.1 past two denial-of-service advisories
+  (GHSA-27r3-jxmh-p828, GHSA-6pq8-jhm2-2vcw). cctag connects to Slack over
+  Socket Mode and never serves express's HTTP endpoint, so neither path was
+  reachable. Both `package-lock.json` and the `bun.lock` the release binaries
+  are built from are updated. cctag's own code is unchanged.
+
 ## [0.6.2] - 2026-10-31
 
 ### Changed
@@ -444,7 +455,8 @@ actually starts.
 - A permission prompt's quoted context no longer reaches past the rule that
   bounds it, which used to paste unrelated output into the Slack code block.
 
-[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/TMLlaboratory/cctag/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/TMLlaboratory/cctag/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/TMLlaboratory/cctag/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/TMLlaboratory/cctag/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/TMLlaboratory/cctag/compare/v0.5.0...v0.6.0
