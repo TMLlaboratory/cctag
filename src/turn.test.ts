@@ -2524,3 +2524,84 @@ test("a Codex approval on Orca is posted as a terminal-only notice, without butt
     engine.abortAll();
   }
 });
+
+/** A Claude transcript for session `s1` under `cwd`, as fakeAgent reports it. */
+function claudeTranscriptFor(cwd: string): string {
+  const path = claudeDriver.locateTranscript(cwd, "s1");
+  assert.ok(path);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ type: "user", message: { role: "user", content: "earlier" } })}\n`);
+  return path;
+}
+
+test("an idle pane that never records the prompt is reported as not received, not as done", async () => {
+  // The reported failure: `claude --resume` stalled on a sign-in dialog before
+  // drawing anything, herdr called the pane idle, and the thread was told
+  // "完了（テキスト応答なし）" while the transcript never saw the message.
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-never-received-"));
+  const transcriptPath = claudeTranscriptFor(cwd);
+  const { notifier, posts, updates } = fakeNotifier();
+  const terminals = fakeBackend(() => "idle", () => "", {
+    async get() {
+      return { ...fakeAgent("idle"), cwd };
+    },
+  });
+  const engine = new TurnEngine(
+    terminals,
+    notifier,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 }, firstRecordGraceMs: 150 },
+    { list: () => [fakePairing()] },
+  );
+  try {
+    await engine.startTurn(fakePairing(), "U1", "hello");
+    await sleep(60);
+    assert.equal(engine.isBusy(PANE), true, "still inside the grace: the first record may just be late");
+    for (let i = 0; i < 50 && engine.isBusy(PANE); i++) await sleep(20);
+    assert.equal(engine.isBusy(PANE), false);
+    assert.ok(posts.some((p) => p.includes("受け取った記録がありません")), posts.join("\n"));
+    assert.match(updates.at(-1)?.text ?? "", /届いていない可能性/);
+  } finally {
+    engine.abortAll();
+    rmSync(dirname(transcriptPath), { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a prompt recorded inside the grace ends as a normal completion", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-received-late-"));
+  const transcriptPath = claudeTranscriptFor(cwd);
+  const { notifier, posts, updates } = fakeNotifier();
+  const terminals = fakeBackend(() => "idle", () => "", {
+    async get() {
+      return { ...fakeAgent("idle"), cwd };
+    },
+  });
+  const engine = new TurnEngine(
+    terminals,
+    notifier,
+    { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 }, firstRecordGraceMs: 2_000 },
+    { list: () => [fakePairing()] },
+  );
+  try {
+    await engine.startTurn(fakePairing(), "U1", "hello");
+    await sleep(60);
+    appendFileSync(
+      transcriptPath,
+      [
+        { type: "user", timestamp: new Date().toISOString(), message: { role: "user", content: "hello" } },
+        { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stop_reason: "end_turn" } },
+        { type: "system", subtype: "turn_duration", timestamp: new Date().toISOString() },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(""),
+    );
+    for (let i = 0; i < 50 && engine.isBusy(PANE); i++) await sleep(20);
+    assert.equal(engine.isBusy(PANE), false, "a recorded prompt on an idle pane settles without waiting out the grace");
+    assert.ok(!posts.some((p) => p.includes("受け取った記録がありません")), posts.join("\n"));
+    assert.doesNotMatch(updates.at(-1)?.text ?? "", /届いていない可能性/);
+  } finally {
+    engine.abortAll();
+    rmSync(dirname(transcriptPath), { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

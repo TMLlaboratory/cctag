@@ -182,6 +182,17 @@ interface TurnState {
    * carries the turn's open/closed state, so it must not outlive it.
    */
   settle: SettleTracker;
+  /**
+   * When this Slack turn's prompt was sent, until its transcript first grows;
+   * undefined once it has, and for a turn with no transcript to watch.
+   *
+   * An idle pane whose transcript never moved has not answered — it never got
+   * the prompt. Measured 2026-10-27: `claude --resume` stalled on a sign-in
+   * dialog before drawing anything, herdr reported the pane `idle`, and the
+   * turn was closed as "完了（テキスト応答なし）" eleven seconds in while the
+   * session's transcript held no trace of the message.
+   */
+  awaitingFirstRecordSince?: number;
   /** OMP's consecutive-screen and one-notice-per-fingerprint memory. */
   ompStatus: OmpStatusMemory | null;
   ompNoticeText?: string;
@@ -233,6 +244,8 @@ export interface TurnEngineOptions {
    * holder of this object has to see that narrowing (see spoke/index.ts).
    */
   limits: AttachmentLimits;
+  /** Overrides FIRST_RECORD_GRACE_MS; for tests. */
+  firstRecordGraceMs?: number;
 }
 
 export interface StartTurnOptions {
@@ -255,6 +268,11 @@ export interface StartTurnOptions {
  * empty, which is why over-retrying is safe and under-retrying is not.
  */
 const SUBMIT_RETRIES_WITH_IMAGES = 6;
+/** How long an idle pane may leave a just-sent prompt unrecorded before cctag says it never arrived. */
+export const FIRST_RECORD_GRACE_MS = 30_000;
+const PROMPT_NOT_RECEIVED =
+  "⚠️ エージェントがこのメッセージを受け取った記録がありません（transcriptに何も書かれていません）。" +
+  "エージェントが起動途中や認証待ちで、まだ入力を受け付けていない可能性があります。端末を確かめて、動き出してからもう一度送ってください。";
 
 /**
  * How many backend queries in a row may fail before a turn gives up on its terminal.
@@ -503,6 +521,7 @@ export class TurnEngine {
         lease,
         promptId: null,
         ompStatus: driver.kind === "omp" ? createOmpStatusMemory() : null,
+        awaitingFirstRecordSince: tPath && driver.kind !== "omp" ? Date.now() : undefined,
       };
       this.turns.set(paneId, state);
 
@@ -1266,6 +1285,8 @@ export class TurnEngine {
           state.transcriptPath =
             agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
           state.offset = 0;
+          // A new session is the agent acting on the prompt (`/clear`, a resume).
+          state.awaitingFirstRecordSince = undefined;
           // Session-local lifecycle and screen evidence must not leak to this transcript.
           state.settle = new SettleTracker();
           state.previousStatus = "working";
@@ -1299,7 +1320,10 @@ export class TurnEngine {
         state.writes.ingest(output);
         state.settle.observe(output.lifecycle ?? []);
         // Transcript growth proves the agent is alive and working.
-        if (grew) state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
+        if (grew) {
+          state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
+          state.awaitingFirstRecordSince = undefined;
+        }
       }
 
       if (state.phase === "running") {
@@ -1478,6 +1502,12 @@ export class TurnEngine {
       }
 
       if (status === "idle" || status === "done") {
+        if (state.awaitingFirstRecordSince !== undefined) {
+          // The agent may simply not have written its first record yet.
+          if (Date.now() - state.awaitingFirstRecordSince < (this.opts.firstRecordGraceMs ?? FIRST_RECORD_GRACE_MS)) continue;
+          await this.finalize(state, PROMPT_NOT_RECEIVED);
+          return;
+        }
         await this.finalize(state);
         return;
       }
@@ -1534,7 +1564,11 @@ export class TurnEngine {
     if (warning) {
       await this.notifier.postReply(state.pairing.channel, state.pairing.threadTs ?? "", warning);
     }
-    const label = text ? doneStatusText(elapsed, state.toolCounts) : `✅ 完了 (${elapsed}s)（テキスト応答なし）`;
+    const label = text
+      ? doneStatusText(elapsed, state.toolCounts)
+      : state.awaitingFirstRecordSince !== undefined
+        ? `⚠️ 届いていない可能性があります (${elapsed}s)`
+        : `✅ 完了 (${elapsed}s)（テキスト応答なし）`;
     await state.statusHandle.update(label).catch(() => {});
     // After the status update, not before: uploading several MB can take a
     // while, and the status line is an already-posted message being edited in

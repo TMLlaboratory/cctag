@@ -29,6 +29,14 @@ would have to keep. Pin an exact version if that matters to you.
   window that holds a cctag post — and a page that fails to load fails the
   command with an error instead of passing on a partial history. Takes effect
   once the Hub runs it.
+- A message to an agent that never received it is no longer reported as done.
+  A `claude --resume` stalled on a sign-in dialog before drawing anything, the
+  terminal reported the pane idle, and the thread was told "完了（テキスト応答なし）"
+  eleven seconds in although the session's transcript held no trace of the
+  message. When a pane goes idle while the transcript has not grown since the
+  prompt was sent, cctag now waits up to 30 seconds for the first record and,
+  if none comes, says the message may not have arrived and to check the
+  terminal.
 - A message to a long-lived Orca terminal is no longer refused with "the screen
   could not be read completely" while the whole screen was read. Orca's
   `limited` flag on a screen read also reports that the terminal's stream
