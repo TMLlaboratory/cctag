@@ -17,6 +17,15 @@ would have to keep. Pin an exact version if that matters to you.
   and covers the Orca backend alongside herdr where it describes what the
   tests fake and where screens are read from.
 
+### Fixed
+
+- A message to a long-lived Orca terminal is no longer refused with "the screen
+  could not be read completely" while the whole screen was read. Orca's
+  `limited` flag on a screen read also reports that the terminal's stream
+  buffer outgrew the read window, so cctag no longer reads it and instead checks
+  the returned screen against Orca's own cuts (120 rows, 32,768 characters)
+  (#63).
+
 ## [0.6.1] - 2026-10-22
 
 ### Security

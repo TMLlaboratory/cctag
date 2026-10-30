@@ -529,6 +529,12 @@ function capturedProbeScreen(name: string): JsonObject {
   return terminal;
 }
 
+// Orca cuts an over-tall screen to its last 120 rows, so a 120-row tail reads as cut.
+function rowCut(screen: JsonObject): JsonObject {
+  const tail = screen.tail as string[];
+  return { ...screen, tail: [...Array.from({ length: 120 - tail.length }, () => ""), ...tail] };
+}
+
 function capturedOmpScreen(name: string): JsonObject {
   const fixture = JSON.parse(
     readFileSync(new URL(`../agents/omp/__fixtures__/${name}`, import.meta.url), "utf8"),
@@ -1051,7 +1057,7 @@ test("OMP working, waiting, draft, and incomplete screens never send input", asy
     {
       name: "incomplete",
       // Synthetic incomplete variant derived from the raw idle.screen.json capture.
-      screen: { ...capturedOmpScreen("idle.screen.json"), limited: true },
+      screen: rowCut(capturedOmpScreen("idle.screen.json")),
       reason: "incomplete-screen",
     },
   ];
@@ -1249,15 +1255,30 @@ test("screen reads are full-frame and reject non-positive line counts", async ()
   assert.deepEqual(readCall.args.slice(0, 5), ["terminal", "read", "--terminal", HANDLE, "--screen"]);
   assert.equal(readCall.args.includes("--limit"), false, "screen reads must not send a zero or truncating limit");
 
-  // Synthetic completeness variants of the raw terminalReadCapture.
-  runtime.screen = { ...runtime.screen, limited: true };
+  // Synthetic completeness variants of the raw terminalReadCapture: a screen
+  // Orca cut comes back with exactly 120 rows or exactly 32,768 characters.
+  const screenRows = (rows: string[]) => ({ ...runtime.screen, limited: true, tail: rows });
+  runtime.screen = screenRows(Array.from({ length: 120 }, () => "row"));
   assert.equal((await terminals.read(TARGET, 40, "history")).complete, false);
-  // Raw reads from long-lived terminals (rows masked): a stream-buffer `truncated`
-  // alone does not make a screen incomplete; `limited` still does.
+  runtime.screen = screenRows(Array.from({ length: 119 }, () => "row"));
+  assert.equal((await terminals.read(TARGET, 40, "history")).complete, true);
+  runtime.screen = screenRows(["x".repeat(16_384), "x".repeat(16_384)]);
+  assert.equal((await terminals.read(TARGET, 40, "history")).complete, false);
+  runtime.screen = screenRows(["x".repeat(16_384), "x".repeat(16_383)]);
+  assert.equal((await terminals.read(TARGET, 40, "history")).complete, true);
+  // Raw reads from long-lived terminals (rows masked): `truncated` and `limited`
+  // are carried over from the stream buffer and do not make a screen incomplete.
   runtime.screen = capturedProbeScreen("screen-read-long-lived-truncated.json");
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
+  // The omp capture (68 rows, under the row cap) reports `limited`; its rows were
+  // masked without their lengths, so the character cap is covered by the
+  // synthetic cases above and the #63 capture below, not by this one.
   runtime.screen = capturedProbeScreen("screen-read-omp-limited-truncated.json");
-  assert.equal((await terminals.read(TARGET, 40, "screen")).complete, false);
+  assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
+  // #63: an idle Claude Code (59 rows, 4,514 characters; rows masked to their
+  // lengths) whose stream held more than 120 lines.
+  runtime.screen = capturedProbeScreen("screen-read-long-output-limited.json");
+  assert.equal((await terminals.read(TARGET, 40, "screen")).complete, true);
   runtime.screen = { ...capturedProbeScreen("screen-read-long-lived-truncated.json"), source: "screen-unavailable" };
   assert.equal((await terminals.read(TARGET, 40, "screen")).complete, false);
   // Synthetic malformed screen records; these are not raw captured CLI outputs.
@@ -1630,8 +1651,8 @@ test("Orca submit refuses all five unsafe outcomes without accepted input", asyn
       reason: "incomplete-screen",
       sendAttempts: 0,
       prepare: (runtime) => {
-        // Synthetic limited-screen variant derived from idle-composer.screen.json.
-        runtime.screen = { ...idle(), limited: true };
+        // Synthetic row-cut variant derived from idle-composer.screen.json.
+        runtime.screen = rowCut(idle());
         return currentRef();
       },
     },
@@ -1829,7 +1850,7 @@ test("Orca requires two consecutive complete positive probe reads", async () => 
   // Synthetic unexpected draft value derived from the raw p4-11-suggestion-plus-x.json capture.
   const fluctuating = { ...withProbe, draft: "unexpected" };
   // Synthetic incomplete-screen state derived from the raw p4-11-suggestion-plus-x.json capture.
-  const incomplete = { ...withProbe, truncated: true };
+  const incomplete = rowCut(withProbe);
   const restored = capturedProbeScreen("p4-12-suggestion-after-bs.json");
   runtime.screen = restored;
   runtime.screenSequence = [
@@ -2488,10 +2509,7 @@ test("Orca Claude multi-select refuses incomplete or mismatched reviews without 
     },
     {
       name: "incomplete screen",
-      make: () => ({
-        ...capturedClaudeScreen("ask-user-question-multiselect-review.screen.json"),
-        limited: true,
-      }),
+      make: () => rowCut(capturedClaudeScreen("ask-user-question-multiselect-review.screen.json")),
     },
     {
       name: "cursor on Cancel",
@@ -2730,8 +2748,8 @@ test("Orca composer BackTab is one raw write after process, screen, idle, and dr
     {
       name: "incomplete screen",
       prepare: (runtime) => {
-        // Synthetic limited-screen variant derived from idle-composer.screen.json.
-        runtime.screen = { ...idle(), limited: true };
+        // Synthetic row-cut variant derived from idle-composer.screen.json.
+        runtime.screen = rowCut(idle());
         return currentRef();
       },
     },
