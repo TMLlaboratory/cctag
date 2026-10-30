@@ -236,6 +236,45 @@ export async function resolveUserMentions(
   });
 }
 
+/**
+ * How far back `log` looks for cctag's last post, widest last (null = the whole
+ * thread). conversations.replies only pages oldest-first, so reading a long
+ * thread from its start to find a recent post costs every page before it; a
+ * window bounded by `oldest` usually finds the post in one call.
+ */
+const HISTORY_WINDOWS_S: readonly (number | null)[] = [86_400, 7 * 86_400, null];
+const HISTORY_PAGE_SIZE = 200;
+const HISTORY_MAX_PAGES = 50;
+
+/**
+ * Every reply in the thread from `oldest` on, or an error — never a prefix.
+ *
+ * A prefix is the failure this exists to prevent. The old reader stopped at ten
+ * pages, and also on any failed page, and returned what it had: on a two-month
+ * lab thread (2026-10-27) the tail of that prefix was a message from the day
+ * before, and `log` handed it to the agent as the latest history while the two
+ * messages actually since cctag's last post never arrived.
+ */
+async function threadRepliesSince(
+  client: WebClient,
+  channel: string,
+  threadTs: string,
+  oldest: string | undefined,
+): Promise<RepliesMessage[]> {
+  const messages: RepliesMessage[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < HISTORY_MAX_PAGES; page++) {
+    const res = await client.conversations.replies({ channel, ts: threadTs, limit: HISTORY_PAGE_SIZE, cursor, oldest });
+    messages.push(...((res.messages ?? []) as RepliesMessage[]));
+    cursor = res.response_metadata?.next_cursor || undefined;
+    if (!cursor) {
+      // The parent comes back even when it predates `oldest`.
+      return oldest === undefined ? messages : messages.filter((m) => Number(m.ts) >= Number(oldest));
+    }
+  }
+  throw new Error(`スレッドが長すぎて読み切れませんでした（${HISTORY_MAX_PAGES * HISTORY_PAGE_SIZE}件超）`);
+}
+
 export async function formatThreadHistorySinceLastBotPost(
   client: WebClient,
   channel: string,
@@ -243,27 +282,15 @@ export async function formatThreadHistorySinceLastBotPost(
   excludeTs: string,
   botUserId: string | undefined,
 ): Promise<string[]> {
-  // conversations.replies returns oldest-first and paginates forward toward
-  // the newest messages — a single un-paginated call on a thread with more
-  // than one page of history would silently omit the most recent messages
-  // (and possibly cctag's own last post), which is exactly the tail this
-  // function needs. Page up to a generous cap rather than assume one page
-  // covers a real lab-usage thread.
-  const messages: RepliesMessage[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < 10; page++) {
-    const res = await client.conversations.replies({ channel, ts: threadTs, limit: 200, cursor }).catch(() => null);
-    if (!res) break;
-    messages.push(...((res.messages ?? []) as RepliesMessage[]));
-    cursor = res.response_metadata?.next_cursor || undefined;
-    if (!cursor) break;
-  }
-
+  let messages: RepliesMessage[] = [];
   let lastBotIdx = -1;
-  if (botUserId) {
-    for (let i = 0; i < messages.length; i++) {
+  for (const windowS of botUserId ? HISTORY_WINDOWS_S : [null]) {
+    const oldest = windowS === null ? undefined : (Number(excludeTs) - windowS).toFixed(6);
+    messages = await threadRepliesSince(client, channel, threadTs, oldest);
+    for (let i = 0; botUserId && i < messages.length; i++) {
       if (messages[i].user === botUserId) lastBotIdx = i;
     }
+    if (lastBotIdx >= 0) break;
   }
 
   const nameCache = new Map<string, string>();

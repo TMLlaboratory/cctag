@@ -19,6 +19,16 @@ would have to keep. Pin an exact version if that matters to you.
 
 ### Fixed
 
+- `log` on a long thread now hands the agent the messages since cctag's last
+  post. It read the thread from its start, stopped after ten pages (2,000
+  messages) or at the first page that failed, and treated what it had as the
+  whole thread: on a two-month lab thread, the agent got a message from the day
+  before as the newest history, and the two messages actually since cctag's
+  last post never reached it. It now reads back from the `log` message — the
+  last day, then the last week, then the whole thread, stopping at the first
+  window that holds a cctag post — and a page that fails to load fails the
+  command with an error instead of passing on a partial history. Takes effect
+  once the Hub runs it.
 - A message to an agent that never received it is no longer reported as done.
   A `claude --resume` stalled on a sign-in dialog before drawing anything, the
   terminal reported the pane idle, and the thread was told "完了（テキスト応答なし）"
