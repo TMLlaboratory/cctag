@@ -33,7 +33,7 @@ owns and can discard, not the one you have been working in.
 | Agents | Vendor's own | Varies | Claude Code, Codex CLI, and oh-my-pi (`omp`) |
 | Externally-shared channels | **Does not work** | Varies | **Works** |
 
-The supported agent/backend combinations differ; see [the support matrix](../README.md#terminal-backends-herdr-and-orca).
+The supported agent/backend combinations differ; see [the support matrix](../README.md#terminal-backends-herdr-orca-and-herdr-core).
 
 ## Buzz: closest in spirit, opposite on exactly this point
 

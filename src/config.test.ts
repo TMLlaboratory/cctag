@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   CONFIG_TEMPLATE,
   REQUIRED_ENV_KEYS,
@@ -170,6 +172,7 @@ test("the embedded config template stays in sync with every key required() deman
 
 test("backend config resolves injectable defaults and environment overrides", () => {
   const checked: string[] = [];
+  const hcDefault = join(homedir(), ".local", "bin", "hc");
   assert.deepEqual(
     resolveBackendConfig({}, (path) => {
       checked.push(path);
@@ -178,23 +181,31 @@ test("backend config resolves injectable defaults and environment overrides", ()
     {
       herdr: { bin: "/opt/homebrew/bin/herdr" },
       orca: { bin: "/opt/homebrew/bin/orca" },
+      "herdr-core": { bin: hcDefault },
     },
   );
-  assert.deepEqual(checked, ["/opt/homebrew/bin/herdr", "/opt/homebrew/bin/orca"]);
+  assert.deepEqual(checked, ["/opt/homebrew/bin/herdr", "/opt/homebrew/bin/orca", hcDefault]);
 
   assert.deepEqual(
-    resolveBackendConfig({ CCTAG_HERDR_BIN: "/custom/herdr", CCTAG_ORCA_BIN: "" }, (path) => path === "/custom/herdr"),
-    { herdr: { bin: "/custom/herdr" }, orca: null },
+    resolveBackendConfig(
+      { CCTAG_HERDR_BIN: "/custom/herdr", CCTAG_ORCA_BIN: "", CCTAG_HC_BIN: "/custom/hc" },
+      (path) => path === "/custom/herdr" || path === "/custom/hc",
+    ),
+    { herdr: { bin: "/custom/herdr" }, orca: null, "herdr-core": { bin: "/custom/hc" } },
   );
 });
 
-test("missing backends disable individually and both disabled refuse startup", () => {
+test("missing backends disable individually and all disabled refuse startup", () => {
   assert.deepEqual(
     resolveBackendConfig({}, (path) => path === "/opt/homebrew/bin/orca"),
-    { herdr: null, orca: { bin: "/opt/homebrew/bin/orca" } },
+    { herdr: null, orca: { bin: "/opt/homebrew/bin/orca" }, "herdr-core": null },
+  );
+  assert.deepEqual(
+    resolveBackendConfig({ CCTAG_HERDR_BIN: "", CCTAG_ORCA_BIN: "", CCTAG_HC_BIN: "/custom/hc" }, () => true),
+    { herdr: null, orca: null, "herdr-core": { bin: "/custom/hc" } },
   );
   assert.throws(
-    () => resolveBackendConfig({ CCTAG_HERDR_BIN: "", CCTAG_ORCA_BIN: "" }, () => true),
+    () => resolveBackendConfig({ CCTAG_HERDR_BIN: "", CCTAG_ORCA_BIN: "", CCTAG_HC_BIN: "" }, () => true),
     /enable at least one backend/,
   );
   assert.throws(() => resolveBackendConfig({}, () => false), /enable at least one backend/);

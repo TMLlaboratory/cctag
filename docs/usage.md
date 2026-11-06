@@ -8,7 +8,7 @@ bot:
 
 | Command | Who | What it does |
 |---|---|---|
-| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca), Codex CLI (Herdr / Orca), `omp` (Orca) |
+| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca / herdr-core), Codex CLI (Herdr / Orca), `omp` (Orca) |
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |

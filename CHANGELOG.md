@@ -11,6 +11,18 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Added
+
+- A herdr-core backend. cctag drives Claude Code in
+  [herdr-core](https://github.com/herdrdev/herdr-core) terminals — the core
+  behind the Herdr app, separate from the herdr TUI — through `hc`
+  (`CCTAG_HC_BIN`, default `~/.local/bin/hc`). Its rows appear under
+  `herdr-core · <directory>` in `@cctag connect`, and its targets carry an
+  `hc:` prefix, so herdr and Orca pairings are unchanged. cctag never starts the
+  core. A free-text answer to a multi-select question is answered in the
+  terminal there, because `hc` cannot type text without pressing Enter. Codex
+  CLI and `omp` on herdr-core are not supported yet.
+
 ## [0.6.3] - 2026-10-31
 
 ### Security

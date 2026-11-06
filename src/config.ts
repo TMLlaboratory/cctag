@@ -298,11 +298,12 @@ export interface BackendExecutable {
 export interface BackendConfig {
   herdr: BackendExecutable | null;
   orca: BackendExecutable | null;
+  "herdr-core": BackendExecutable | null;
 }
 
 /** Resolves configured binaries and keeps filesystem checks injectable in tests. */
 export function resolveBackendConfig(
-  environment: { CCTAG_HERDR_BIN?: string; CCTAG_ORCA_BIN?: string } = process.env,
+  environment: { CCTAG_HERDR_BIN?: string; CCTAG_ORCA_BIN?: string; CCTAG_HC_BIN?: string } = process.env,
   exists: (path: string) => boolean = existsSync,
 ): BackendConfig {
   const resolve = (configured: string | undefined, fallback: string): BackendExecutable | null => {
@@ -313,9 +314,11 @@ export function resolveBackendConfig(
   const backends = {
     herdr: resolve(environment.CCTAG_HERDR_BIN, "/opt/homebrew/bin/herdr"),
     orca: resolve(environment.CCTAG_ORCA_BIN, "/opt/homebrew/bin/orca"),
+    // herdr-core's official installer puts hc in ~/.local/bin, not in a Homebrew prefix.
+    "herdr-core": resolve(environment.CCTAG_HC_BIN, join(homedir(), ".local", "bin", "hc")),
   };
-  if (!backends.herdr && !backends.orca) {
-    throw new Error("No Herdr or Orca executable is available; enable at least one backend.");
+  if (!backends.herdr && !backends.orca && !backends["herdr-core"]) {
+    throw new Error("No Herdr, Orca or herdr-core executable is available; enable at least one backend.");
   }
   return backends;
 }
