@@ -418,7 +418,7 @@ export class TurnEngine {
       if (lease.cancelled) return;
       const driver = driverFor(agent.agent);
       const backend = backendForTarget(agent.ref.target);
-      if (backend === "orca" && hasUnsendableC0Controls(text)) {
+      if (backend !== "herdr" && hasUnsendableC0Controls(text)) {
         await this.notifier.postReply(
           pairing.channel,
           pairing.threadTs ?? "",
@@ -555,7 +555,7 @@ export class TurnEngine {
             .postReply(pairing.channel, pairing.threadTs ?? "", draftStashedText(backend))
             .catch(() => {});
         }
-        if (backend === "orca" && outcome.status === "accepted") {
+        if (backend !== "herdr" && outcome.status === "accepted") {
           await statusHandle.update(`📨 ${backend} は入力を受け付けました。ターン開始を確認しています…`).catch(() => {});
         }
       } catch (err) {
@@ -944,7 +944,7 @@ export class TurnEngine {
       return { ok: false, reason: "not-pending" };
     }
 
-    if (state.backend === "orca" && hasUnsendableC0Controls(freeText)) {
+    if (state.backend !== "herdr" && hasUnsendableC0Controls(freeText)) {
       throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
     }
     state.answering = true;

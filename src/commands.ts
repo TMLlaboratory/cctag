@@ -755,12 +755,13 @@ export class CommandHandler {
       }
     }
 
+    const pairedBackend = backendForTarget(agent.ref.target);
     this.pairingStore.add({
       key: PairingStore.threadKey(channel, threadTs),
       channel,
       threadTs,
       paneId: agent.ref.target,
-      ...(backendForTarget(agent.ref.target) === "orca" ? { backend: "orca" } : {}),
+      ...(pairedBackend !== "herdr" ? { backend: pairedBackend } : {}),
       terminalId: agent.terminalId,
       cwd: agent.cwd,
       agent: agent.agent,

@@ -17,8 +17,9 @@ export function transcriptPath(cwd: string, sessionId: string): string {
 /**
  * Locates a Claude Code session's transcript.
  *
- * Preferred path: herdr reported a session id (via the `herdr-agent-state.sh`
- * SessionStart hook), so the file is an exact join — no scanning needed.
+ * Preferred path: the backend reported a session id — herdr via the
+ * `herdr-agent-state.sh` SessionStart hook, herdr-core via the
+ * `~/.claude/sessions/<pid>.json` record — so the file is an exact join.
  *
  * Fallback (session id unavailable — e.g. the hook never fired: not yet
  * trusted, or something on PATH intercepted the `python3` it shells out to):

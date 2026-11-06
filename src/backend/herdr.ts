@@ -57,8 +57,9 @@ function normalizeStatus(raw: string): AgentStatus {
 }
 
 function normalizeAgent(raw: RawAgent): AgentInfo {
-  if (backendForTarget(raw.pane_id) === "orca") {
-    throw new BackendUnavailable(`herdr target collision: reserved orca: namespace returned as ${raw.pane_id}`);
+  const reserved = backendForTarget(raw.pane_id);
+  if (reserved !== "herdr") {
+    throw new BackendUnavailable(`herdr target collision: reserved ${reserved} namespace returned as ${raw.pane_id}`);
   }
   return {
     ref: { target: raw.pane_id, pid: null, processStartedAt: null },
@@ -82,7 +83,8 @@ function evidenceStatus(evidence: StatusEvidence): AgentStatus {
 }
 
 function assertHerdrTarget(target: string): void {
-  if (backendForTarget(target) === "orca") throw new UnknownTarget(`No Orca backend is available for target ${target}`);
+  const backend = backendForTarget(target);
+  if (backend !== "herdr") throw new UnknownTarget(`No ${backend} backend is available for target ${target}`);
 }
 
 
