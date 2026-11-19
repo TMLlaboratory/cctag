@@ -23,6 +23,17 @@ would have to keep. Pin an exact version if that matters to you.
   terminal there, because `hc` cannot type text without pressing Enter. Codex
   CLI and `omp` on herdr-core are not supported yet.
 
+### Fixed
+
+- A permission prompt in auto mode is again read as one prompt while its
+  countdown runs. By 2.1.325, Claude Code had reworded the countdown to "will
+  automatically block this request in 1:56, to avoid holding up an unattended
+  session", which the 2.1.281 wording no longer matched, so each poll saw a new
+  prompt: the Slack post was marked answered at the terminal and posted again,
+  and a button press stopped on its screen check. The countdown is now
+  recognized by its shape (a ⚠ row with an m:ss timer), not its words. The
+  parser is shared, so this applies to herdr and Orca as well.
+
 ## [0.6.3] - 2026-10-31
 
 ### Security
