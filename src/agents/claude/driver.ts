@@ -63,6 +63,7 @@ function assertAnswerNotAborted(signal?: AbortSignal): void {
 const CURSOR_ON_FREE_TEXT = "カーソルが自由記述の欄にあるので、送っていません。端末で答えてください";
 const CURSOR_MOVED = "カーソルが最初の選択肢から動いているので、送っていません。端末で答えてください";
 const FREE_TEXT_EDITED = "自由記述の欄に入力途中の文があるので、送っていません。端末で確かめてください";
+const HC_MULTI_SELECT_FREE_TEXT = "herdr-core では、複数選択の質問に自由記述で答えられないため、送っていません。端末で答えてください";
 
 /**
  * The live classic dialog as it is now, read before an answer's first key.
@@ -573,9 +574,16 @@ export const claudeDriver: AgentDriver = {
   async answerQuestionFreeText(terminals, channel, ref, info, text, signal) {
     // Navigate down to the "Type something" row (the free-text row must be
     // reached via arrows and then have its placeholder replaced before Enter).
-    const isOrca = backendForTarget(ref.target) === "orca";
-    if (isOrca && hasUnsendableC0Controls(text)) {
+    const backend = backendForTarget(ref.target);
+    const isOrca = backend === "orca";
+    if (backend !== "herdr" && hasUnsendableC0Controls(text)) {
       throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
+    }
+    // hc cannot type the text without also pressing Enter, and on a
+    // multi-select dialog that Enter unticks the row (see below). Refuse before
+    // the first key so the dialog is left as the person last saw it.
+    if (backend === "herdr-core" && info.multiSelect) {
+      throw new ExpectationLost("herdr-core cannot answer multi-select free text", HC_MULTI_SELECT_FREE_TEXT);
     }
     const dialog = await liveDialog(terminals, ref.target);
     if (dialog?.freeTextEdited) throw new ExpectationLost("the free-text row already holds text", FREE_TEXT_EDITED);

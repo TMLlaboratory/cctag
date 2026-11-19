@@ -131,6 +131,42 @@ identity. For Codex and `omp`, it also verifies the identity of the transcript o
 for writing. A pane whose agent or session cannot be verified is omitted rather
 than guessed.
 
+### herdr-core: the same terminals the Herdr app shows
+
+[herdr-core](https://github.com/herdrdev/herdr-core) is a headless terminal
+server; the Herdr app is one of its clients and `hc` is another. It is a
+separate product from the herdr TUI and does not share agents with it. cctag
+drives it with `hc` (`CCTAG_HC_BIN`, default `~/.local/bin/hc`), so a person
+watching the Herdr app sees cctag's input arrive in the same terminal. Targets
+carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
+
+- **Discovery.** `hc ls` lists terminals; cctag offers local ones whose program
+  reports itself as `claude-code`, and skips other machines' terminals
+  (`machine/t7`), which belong to the Spoke on that machine. For each, the
+  foreground process id leads to `~/.claude/sessions/<pid>.json`, where Claude
+  Code records its session id and the directory its transcript is filed under.
+  A terminal without that record is not offered.
+- **Status.** The core takes status only from what the program reports (OSC
+  7501), not from the screen. Claude Code reports `blocked` while a question
+  or an approval is up, and `done` after a turn. A program that reports nothing
+  — Claude Code on its folder-trust screen, for one — has no status, which
+  cctag treats as unknown.
+- **Writes.** A message goes through `hc send`, which pastes the text and
+  presses Enter once nobody has typed for about three seconds, and refuses a
+  `blocked` program. Answers press named keys with `hc keys` (digits, arrows,
+  Enter, Esc, Shift+Tab). `hc` has no way to type text without pressing Enter,
+  so free text is pasted with its Enter through `hc send --force`; a free-text
+  answer to a multi-select question, which has to be typed and *not* submitted,
+  is refused before any key is sent. A Slack image arrives as a real attachment
+  (`[Image #1]`), as on herdr, and the paste-then-Enter of `hc send` was not
+  swallowed by the conversion, so the Enter retry described in 5.8 is not used
+  on herdr-core.
+- **Starting the core.** Any `hc` command starts a stopped core, and a core
+  passes the environment of whoever started it to every terminal. cctag
+  therefore connects to the core's socket first and runs nothing when no core
+  listens, and it drops `HC_TERMINAL_ID` / `HC_SCOPE` so a Spoke running inside
+  an hc terminal does not get its messages wrapped in `<hc from=…>`.
+
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from

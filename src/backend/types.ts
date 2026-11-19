@@ -1,6 +1,6 @@
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type BackendName = "herdr" | "orca";
+export type BackendName = "herdr" | "orca" | "herdr-core";
 export const WRITE_OUTCOME_UNKNOWN_MESSAGE = "送信できたか確認できません。端末を確かめてください";
 export const UNSENDABLE_TEXT_MESSAGE = "入力に送信できない制御文字が含まれています。制御文字を除いてください。";
 

@@ -7,11 +7,11 @@ export interface Pairing {
   key: string; // `${channel}:${threadTs}` for thread pairings, `${channel}` for channel pairings
   channel: string;
   threadTs?: string;
-  // The backend target used for terminal operations. Its `orca:` prefix is
-  // authoritative; an unprefixed target is Herdr.
+  // The backend target used for terminal operations. Its `orca:` or `hc:`
+  // prefix is authoritative; an unprefixed target is Herdr.
   paneId: string;
   /** Optional persistence tag derived from paneId; it is never used to route. */
-  backend?: "orca";
+  backend?: "orca" | "herdr-core";
   // Display/debug only, snapshotted at pairing time — never used to address
   // Terminals. A pane's id doesn't change when its CLI restarts, so this can
   // become stale without affecting the pairing.
@@ -45,7 +45,8 @@ export class PairingStore {
   }
   private static withTargetBackend(pairing: Pairing): Pairing {
     const normalized = { ...pairing };
-    if (backendForTarget(pairing.paneId) === "orca") normalized.backend = "orca";
+    const backend = backendForTarget(pairing.paneId);
+    if (backend !== "herdr") normalized.backend = backend;
     else delete normalized.backend;
     return normalized;
   }

@@ -2,6 +2,7 @@ import Bolt from "@slack/bolt";
 import type { Config } from "../config.js";
 import { HerdrBackend } from "../backend/herdr.js";
 import { createOrcaBackend } from "../backend/orca.js";
+import { HcBackend } from "../backend/herdr-core.js";
 import { createTerminals } from "../backend/index.js";
 import { PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
@@ -21,8 +22,9 @@ export async function buildApp(config: Config) {
   const backends = {
     herdr: config.backends.herdr ? new HerdrBackend(config.backends.herdr.bin) : null,
     orca: config.backends.orca ? createOrcaBackend(config.backends.orca.bin) : null,
+    "herdr-core": config.backends["herdr-core"] ? new HcBackend(config.backends["herdr-core"].bin) : null,
   };
-  const enabledBackends = (["herdr", "orca"] as const).filter((backend) => backends[backend] !== null);
+  const enabledBackends = (["herdr", "orca", "herdr-core"] as const).filter((backend) => backends[backend] !== null);
   const terminals = createTerminals(backends);
   const pairingStore = new PairingStore();
 
