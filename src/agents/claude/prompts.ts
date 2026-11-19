@@ -37,25 +37,41 @@ const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
  * session (`⚠ Claude Code will automatically block this request in 1:56, to
  * avoid holding up an unattended session` on 2.1.325), which redraws every
  * second and comes and goes with terminal focus. It is recognized by its shape
- * — a row that starts with ⚠ and carries an m:ss timer — rather than by its
- * words: the 2.1.281 wording ("deny … blocking progress") stopped matching once
- * Claude Code reworded it (by 2.1.325), and every pending prompt read as a new
- * one again. Command rows do not start with ⚠, so a command that prints the
- * same words is not taken for it.
+ * — a `⚠ Claude Code …` row carrying an m:ss timer — rather than by the rest
+ * of its words: the 2.1.281 wording ("deny … blocking progress") stopped
+ * matching once Claude Code reworded it (by 2.1.325), and every pending prompt
+ * read as a new one again.
+ *
+ * Not searched for anywhere on the screen: the description row above the
+ * command is the agent's own text, and a match there would have dropped the
+ * command rows under it from what the approver sees. Only the rows between the
+ * last command or rule row and the options — Claude Code's own banner and
+ * question — are looked at, and the question itself is kept.
  */
-const COUNTDOWN_BANNER_RE = /^\s*⚠\s.*\b\d+:\d{2}\b/;
+const COUNTDOWN_BANNER_RE = /^\s*⚠\s*Claude Code\b.*\b\d+:\d{2}\b/;
+const COMMAND_OR_RULE_ROW_RE = /^\s*[│╌─━]/;
 
 function withoutCountdownBanner(lines: string[]): string[] {
-  const kept: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!COUNTDOWN_BANNER_RE.test(lines[i])) {
-      kept.push(lines[i]);
-      continue;
+  let options = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CURSOR_LINE_RE.test(lines[i])) {
+      options = i;
+      break;
     }
-    // Not "drop the next row": with no blank row between, the next row is the prompt's own question.
-    while (i + 2 < lines.length && lines[i + 1].trim() !== "" && !NUMBERED_LINE_RE.test(lines[i + 2])) i++;
   }
-  return kept;
+  while (options > 0 && NUMBERED_LINE_RE.test(lines[options - 1])) options--;
+  if (options <= 0) return lines;
+
+  let tail = options;
+  while (tail > 0 && !COMMAND_OR_RULE_ROW_RE.test(lines[tail - 1])) tail--;
+  let question = options - 1;
+  while (question >= tail && lines[question].trim() === "") question--;
+
+  const banner = lines.findIndex((line, i) => i >= tail && i < options && COUNTDOWN_BANNER_RE.test(line));
+  if (banner === -1) return lines;
+  let end = banner + 1;
+  while (end < question && lines[end].trim() !== "") end++;
+  return [...lines.slice(0, banner), ...lines.slice(end)];
 }
 
 export function permissionAnchorIndex(paneText: string): number {
