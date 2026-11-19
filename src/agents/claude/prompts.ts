@@ -33,37 +33,27 @@ const CURSOR_LINE_RE = /❯\s*\d+\./;
 const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
 
 /**
- * The line Claude Code adds to a permission prompt on an unattended session,
- * `⚠ Claude Code will automatically deny this request in 1:36`, which redraws
- * every second and comes and goes with terminal focus. Left in the snippet it
- * changed the fingerprint on every poll, so one pending prompt read as a chain
- * of prompts answered at the keyboard: each post was marked answered and the
- * same prompt re-posted, and a button press failed its screen check. It is a
- * timer, not part of what is being asked, so it is dropped before the context
- * window is counted — dropped after, its coming and going shifted the window by
- * a line and changed the fingerprint anyway. A pane narrower than the banner
- * wraps it, and the rows that finish its sentence go with it.
+ * The countdown Claude Code adds to a permission prompt on an unattended
+ * session (`⚠ Claude Code will automatically block this request in 1:56, to
+ * avoid holding up an unattended session` on 2.1.325), which redraws every
+ * second and comes and goes with terminal focus. It is recognized by its shape
+ * — a row that starts with ⚠ and carries an m:ss timer — rather than by its
+ * words: the 2.1.281 wording ("deny … blocking progress") stopped matching once
+ * Claude Code reworded it (by 2.1.325), and every pending prompt read as a new
+ * one again. Command rows do not start with ⚠, so a command that prints the
+ * same words is not taken for it.
  */
-const AUTO_DENY_COUNTDOWN_RE = /^\s*⚠\s*Claude Code will automatically deny this request in \d+:\d{2}\b/;
-const AUTO_DENY_COUNTDOWN_REST = ", to avoid blocking progress on an unattended session";
+const COUNTDOWN_BANNER_RE = /^\s*⚠\s.*\b\d+:\d{2}\b/;
 
-function withoutAutoDenyCountdown(lines: string[]): string[] {
+function withoutCountdownBanner(lines: string[]): string[] {
   const kept: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const banner = AUTO_DENY_COUNTDOWN_RE.exec(lines[i]);
-    if (!banner) {
+    if (!COUNTDOWN_BANNER_RE.test(lines[i])) {
       kept.push(lines[i]);
       continue;
     }
-    // Not "drop the next row": a pane wide enough for the whole banner puts the prompt's own text there.
-    let drawn = lines[i].slice(banner[0].length).trim();
-    while (i + 1 < lines.length) {
-      const next = lines[i + 1].trim();
-      const joined = [`${drawn} ${next}`, `${drawn}${next}`].find((text) => AUTO_DENY_COUNTDOWN_REST.startsWith(text));
-      if (next === "" || joined === undefined) break;
-      drawn = joined;
-      i++;
-    }
+    // Not "drop the next row": with no blank row between, the next row is the prompt's own question.
+    while (i + 2 < lines.length && lines[i + 1].trim() !== "" && !NUMBERED_LINE_RE.test(lines[i + 2])) i++;
   }
   return kept;
 }
@@ -77,7 +67,7 @@ export function permissionAnchorIndex(paneText: string): number {
 }
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
-  const lines = withoutAutoDenyCountdown(paneText.split("\n"));
+  const lines = withoutCountdownBanner(paneText.split("\n"));
 
   let cursorIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
