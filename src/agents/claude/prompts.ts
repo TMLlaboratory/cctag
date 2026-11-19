@@ -64,6 +64,7 @@ function withoutCountdownBanner(lines: string[]): string[] {
 
   let tail = options;
   while (tail > 0 && !COMMAND_OR_RULE_ROW_RE.test(lines[tail - 1])) tail--;
+  if (tail === 0) return lines;
   let question = options - 1;
   while (question >= tail && lines[question].trim() === "") question--;
 
@@ -71,6 +72,8 @@ function withoutCountdownBanner(lines: string[]): string[] {
   if (banner === -1) return lines;
   let end = banner + 1;
   while (end < question && lines[end].trim() !== "") end++;
+  // Only the block right above the question: a row left between is not the banner's to drop.
+  if (lines.slice(end, Math.max(end, question)).some((line) => line.trim() !== "")) return lines;
   return [...lines.slice(0, banner), ...lines.slice(end)];
 }
 

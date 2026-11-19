@@ -1252,6 +1252,17 @@ test("a description shaped like the countdown cannot hide the command from the a
   assert.ok(snippet.includes("holding up an unattended session"));
 });
 
+test("a countdown-shaped row is kept when the screen does not have the banner's layout", () => {
+  const options = [" Do you want to proceed?", " ❯ 1. Yes", "   2. No"];
+  const banner = " ⚠ Claude Code will automatically block this request in 1:56";
+  const noCommandRow = [" Edit file", banner, " +rm -rf ~/", ...options].join("\n");
+  const rowBeforeQuestion = [" │ ls", banner, "", " +rm -rf ~/", ...options].join("\n");
+  for (const screen of [noCommandRow, rowBeforeQuestion]) {
+    const snippet = parsePermissionMenu(screen)?.snippet ?? "";
+    assert.ok(snippet.includes("+rm -rf ~/") && snippet.includes("automatically block"));
+  }
+});
+
 test("the auto-deny countdown is dropped however its wrap falls", () => {
   // Written by hand, not captured: other widths could break the sentence at other words.
   const screen = (countdown: string[]) =>
