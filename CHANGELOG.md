@@ -24,10 +24,23 @@ would have to keep. Pin an exact version if that matters to you.
   CLI and `omp` on herdr-core are not supported yet.
 - Claude Code messages on herdr and herdr-core can temporarily stash a verified
   single-line draft. Slack reports that exact restoration cannot be verified
-  from the screen. Model switches and image attachments require a verified empty
-  composer on these backends.
+  from the screen. Model switches and herdr-core messages with image attachments
+  require a verified empty composer. Legacy herdr refuses Claude Code messages
+  with image attachments before writing to the terminal. Send images at the
+  terminal or resend the Slack message without them.
 
 ### Fixed
+
+- The captured default (manual) and auto permission modes pass the guarded
+  composer check on herdr and herdr-core with a valid visible footer. A paint
+  with no footer text is refused. There is no live capture of that layout.
+  If a herdr-core session lacks the required process
+  information, Slack asks the user to update Claude Code or type at the terminal.
+  Legacy herdr checks the foreground process during guarded submission and
+  model readback, so ordinary status polling needs only agent metadata. The
+  guarded model and message paths distinguish confirmed agent, terminal, or
+  session changes from missing identity evidence. If only one observation
+  contains a session ID, the write is refused as unverified.
 
 - A permission prompt in auto mode is again read as one prompt while its
   countdown runs. By 2.1.325, Claude Code had reworded the countdown to "will

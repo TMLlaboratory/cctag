@@ -312,7 +312,7 @@ export class CommandHandler {
               submitRefusedText(error.reason, backend, error.composer),
             );
           } else if (error instanceof WriteOutcomeUnknown) {
-            await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(error));
+            await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(error, backend));
           } else {
             throw error;
           }

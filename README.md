@@ -140,7 +140,7 @@ must be available.
 
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
-| Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ everything in the table above, except a free-text answer to a multi-select question, which is answered in the terminal |
+| Claude Code | ✅ Send images at the terminal. Other features in the table above are supported. | ✅ everything in the table above | ✅ everything in the table above, except a free-text answer to a multi-select question, which is answered in the terminal |
 | Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal | — |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) | — |
 
@@ -157,14 +157,21 @@ to the core; the transcript is found from `~/.claude/sessions/<pid>.json`,
 which Claude Code writes for each running session. `hc` can press named keys
 but cannot paste arbitrary text without Enter, so a free-text answer to a multi-select question is
 refused with a note to answer in the terminal.
+If a Claude Code session record lacks the process information needed for
+guarded input, update Claude Code or enter the message in the terminal.
 
 On herdr and herdr-core, cctag checks the foreground Claude Code process and
-the visible composer before sending. When it verifies a single-line draft, it
-stashes it and tests the composer for hidden whitespace before sending.
+the visible composer before sending. The captured default (manual) and auto
+modes pass the composer check with a visible footer. cctag refuses to send
+when the footer has no visible text. That layout has no live capture.
+When cctag verifies a single-line draft, it stashes it and tests the composer
+for hidden whitespace before sending.
 If anything remains visible after stashing, the terminal needs a check.
 After a stashed send, Slack reports that exact restoration cannot be verified
-from the screen. Model changes and messages with image attachments require an
-empty composer. Complete any model-switch confirmation at the terminal.
+from the screen. Model changes and herdr-core messages with image attachments
+require an empty composer. For Claude Code on the legacy herdr TUI, send images
+at the terminal or resend the Slack message without images. Complete any
+model-switch confirmation at the terminal.
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the

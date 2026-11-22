@@ -326,7 +326,7 @@ test("an accepted core send with unverified restoration remains under turn monit
       return { ...fakeAgent("working", "herdr-core"), ref: { target, pid: 42, processStartedAt: 1 } };
     },
     async submit() {
-      return { status: "accepted", draftStashed: true, draftRestoration: "unverified" };
+      return { status: "accepted", draftStashed: true };
     },
   }, "herdr-core");
   const engine = engineFor(terminals, notifier, 600_000);
@@ -951,6 +951,32 @@ test("Orca rejects original C0 text before downloading attachments", async () =>
     assert.equal(engine.isBusy(target), false);
   } finally {
     engine.abortAll();
+  }
+});
+
+test("a Slack image on legacy Herdr Claude produces an actionable refusal before terminal input", async () => {
+  const home = mkdtempSync(join(tmpdir(), "cctag-herdr-image-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  const backend = new HerdrBackend(join(home, "no-herdr-cli"));
+  const terminals = fakeBackend(() => "idle", () => "", { submit: backend.submit.bind(backend) });
+  const { notifier, updates } = fakeNotifier();
+  const engine = engineFor(terminals, {
+    ...notifier,
+    async fetchIncomingFile() { return "iVBORw0KGgo="; },
+  }, 600_000);
+  try {
+    await engine.startTurn(fakePairing(), "U1", "これを見て", {
+      files: [{ id: "F1", name: "screen.png", mimetype: "image/png", size: 8 }],
+    });
+    assert.equal(updates.length, 1);
+    assert.match(updates[0]!.text, /画像の自動変換.*端末から画像を送るか、画像を外して Slack から送り直してください/u);
+    assert.equal(engine.isBusy(PANE), false);
+  } finally {
+    engine.abortAll();
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

@@ -263,7 +263,7 @@ test("old Claude session files still support list and pairing lookup, while writ
     await assert.rejects(backend.submit(agent.ref, "go", CTX), (error) => {
       assert.ok(error instanceof SubmitRefused);
       assert.equal(error.reason, "agent-unverified");
-      assert.match(submitRefusedText(error.reason, "herdr-core"), /プロセス情報が不足.*端末から入力/u);
+      assert.match(submitRefusedText(error.reason, "herdr-core"), /プロセス情報が不足.*Claude Code を新しい版に更新するか、端末から入力/u);
       return true;
     });
     assert.deepEqual(writes(fake), []);
@@ -378,7 +378,7 @@ test("core rechecks a middle caret, stashes and sends once without claiming exac
     paints: [...preStash, PAINTS["caret-middle"]!, STASHED, ...STASH_SEND, PAINTS["review-trailing"]!],
   }, async (backend, fake) => {
     assert.deepEqual(await backend.submit(await submitRef(backend), "go", CTX), {
-      status: "started", draftStashed: true, draftRestoration: "unverified",
+      status: "started", draftStashed: true,
     });
     assert.deepEqual(writes(fake), [
       ["keys", "--json", "--", "t1", "x"],
@@ -455,7 +455,7 @@ test("core preserves accepted and unknown delivery outcomes independently of res
     paints: [...STASH_PAINTS, ...STASH_SEND], send: { started: false },
   }, async (backend, fake) => {
     assert.deepEqual(await backend.submit(await submitRef(backend), "go", CTX), {
-      status: "accepted", draftStashed: true, draftRestoration: "unverified",
+      status: "accepted", draftStashed: true,
     });
     assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s", "x", "backspace", "go"]);
   });
@@ -464,7 +464,7 @@ test("core preserves accepted and unknown delivery outcomes independently of res
     send: { error: { kind: "unavailable", message: "transport lost" } },
   }, async (backend, fake) => {
     await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
-      (error) => error instanceof WriteOutcomeUnknown && error.composer.submitUncertain === true && error.composer.draftRestored === false);
+      (error) => error instanceof WriteOutcomeUnknown && error.composer.submitUncertain === true && error.composer.stash === "stashed");
     assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s", "x", "backspace", "go"]);
   });
 });

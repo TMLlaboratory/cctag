@@ -147,6 +147,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   Code records its session id and the directory its transcript is filed under.
   A terminal without that record is not offered. Guarded writes also require
   the native PID and process start time, which older session records may omit.
+  If they are missing, Slack asks the user to update Claude Code or type at
+  the terminal.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question
   or an approval is up, and `done` after a turn. A program that reports nothing
@@ -154,7 +156,19 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   cctag treats as unknown.
 - **Writes.** For Claude Code on herdr and herdr-core, cctag checks a complete
   visible composer and the current foreground process before each write in
-  the message submission sequence.
+  the message submission sequence. The captured default (manual) and auto
+  modes have matching full-width rules, an inverse-video caret, and valid
+  visible footer text. Each footer row must begin with at least two spaces
+  followed by visible text. A paint with no footer text is refused. Only a
+  synthetic test covers that layout. The captured `/model` dropdown is also
+  refused because the footer area contains a selection marker.
+  Legacy herdr gets the PID and process start time during guarded submission
+  and model readback. Guarded model and message submission report a change
+  when agent kind or terminal instance is known to differ, or when both known
+  session IDs differ. A session ID present in only one observation, or missing
+  foreground process proof, makes the identity unverified. If both session IDs
+  are absent, the remaining terminal and foreground checks still apply.
+  Ordinary status polling reads agent metadata.
   A one-key probe distinguishes a suggestion from a typed draft. A verified
   draft is stashed with Ctrl+S. At the first screen with the stash marker,
   any visible text stops the send before another key is written. An initial
@@ -171,10 +185,10 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   Enter, Esc, Shift+Tab). `hc` cannot paste arbitrary text without Enter,
   so free text is pasted with its Enter through `hc send --force`; a free-text
   answer to a multi-select question, which has to be typed and *not* submitted,
-  is refused before any key is sent. A Slack image arrives as a real attachment
-  (`[Image #1]`), as on herdr, and the paste-then-Enter of `hc send` was not
-  swallowed by the conversion, so the Enter retry described in 5.8 is not used
-  on herdr-core.
+  is refused before any key is sent. On herdr-core, a Slack image is converted
+  to `[Image #1]`. In the observed run, `hc send` submitted it with one Enter.
+  Legacy herdr refuses Claude Code messages with images before writing to the
+  terminal for the reason described in section 5.8.
 - **Starting the core.** Any `hc` command starts a stopped core, and a core
   passes the environment of whoever started it to every terminal. cctag
   therefore connects to the core's socket first and runs nothing when no core
@@ -440,10 +454,10 @@ The path→attachment conversion is asynchronous and the Enter is absorbed while
 it runs. A prompt with only non-image paths submits immediately, so this is
 specific to images (measured: 500ms–1000ms to convert a 2.8MB PNG).
 
-Claude Code submissions can restore an earlier draft as soon as the Enter
-lands. cctag sends no second Enter on that path because a delayed retry could
-submit the restored draft. If image conversion consumes the first Enter,
-check the visible composer and complete the send at the terminal.
+Claude Code submissions can restore an earlier draft as soon as Enter lands.
+A delayed retry could submit the restored draft. Legacy herdr refuses Slack
+messages with images before writing to Claude Code and asks the user to send
+the images at the terminal or resend the Slack message without them.
 
 ### Outbound: two routes
 

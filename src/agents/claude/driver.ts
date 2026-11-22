@@ -8,6 +8,7 @@ import {
   ExpectationLost,
   hasUnsendableC0Controls,
   SubmitRefused,
+  legacySessionRefusal,
   UNSENDABLE_TEXT_MESSAGE,
 } from "../../backend/types.js";
 import type { AgentInfo, AgentRef, ScreenSnapshot } from "../../backend/types.js";
@@ -302,6 +303,23 @@ async function runClaudeSlashCommand(
 ): Promise<ModelCommandResult> {
   const backend = backendForTarget(agent.ref.target);
   const guarded = backend === "herdr-core" || backend === "herdr";
+  const foreground = backend === "herdr" ? "foreground" : undefined;
+  if (foreground) {
+    const current = await terminals.get(agent.ref.target, foreground).catch(() => null);
+    const expectedTerminal = agent.ref.terminalInstance;
+    const currentTerminal = current?.ref.terminalInstance;
+    if (current && (current.agent !== agent.agent ||
+      (expectedTerminal && currentTerminal && currentTerminal !== expectedTerminal))) {
+      throw new SubmitRefused("agent-changed", "herdr agent no longer matches");
+    }
+    const sessionRefusal = current && legacySessionRefusal(agent.sessionId, current.sessionId);
+    if (sessionRefusal === "agent-changed") throw new SubmitRefused(sessionRefusal, "herdr session no longer matches");
+    if (!current || !expectedTerminal || !currentTerminal || sessionRefusal ||
+      current.ref.pid === null || current.ref.processStartedAt === null) {
+      throw new SubmitRefused("foreground-unverified", "herdr foreground process could not be verified");
+    }
+    agent = current;
+  }
   const readResult = () => backend === "herdr"
     ? terminals.read(agent.ref.target, 40, "history")
     : terminals.read(agent.ref.target, 0, "screen");
@@ -324,7 +342,7 @@ async function runClaudeSlashCommand(
     for (let i = 0; i < 10; i++) {
       await sleep(600);
       const pane = await readResult().catch(() => null);
-      const current = await terminals.get(agent.ref.target).catch(() => null);
+      const current = await terminals.get(agent.ref.target, foreground).catch(() => null);
       if (!pane?.complete || !current || current.ref.pid === null || current.ref.processStartedAt === null) continue;
       if (current.ref.pid !== agent.ref.pid ||
         current.ref.processStartedAt !== agent.ref.processStartedAt || current.sessionId !== agent.sessionId ||

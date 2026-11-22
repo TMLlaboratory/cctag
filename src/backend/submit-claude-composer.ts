@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { ClaudeComposer } from "../agents/claude/composer.js";
 import { classifyComposerProbe, composerProbeKey } from "./composer-probe.js";
 import type { SubmitContext, SubmitOutcome } from "./index.js";
-import { EMPTY_SUBMIT_COMPOSER_STATE, hasUnsendableC0Controls, SubmitRefused, WriteOutcomeUnknown, type SubmitComposerState } from "./types.js";
+import { EMPTY_SUBMIT_COMPOSER_STATE, hasUnsendableC0Controls, SubmitRefused, type SubmitComposerState } from "./types.js";
 
 export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops: {
   read(): Promise<ClaudeComposer | null>;
@@ -108,16 +108,5 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
   }
   await recheck(ready, changed, ready.draft !== "");
   notCancelled();
-  let outcome: SubmitOutcome;
-  try {
-    outcome = await ops.send(composer);
-  } catch (err) {
-    if (err instanceof WriteOutcomeUnknown && composer.stash === "stashed") {
-      throw new WriteOutcomeUnknown(err, { ...err.composer, draftRestored: false });
-    }
-    throw err;
-  }
-  // Readback cannot distinguish the original text from the same text with a hidden trailing space.
-  if (outcome.draftStashed) outcome.draftRestoration = "unverified";
-  return outcome;
+  return ops.send(composer);
 }

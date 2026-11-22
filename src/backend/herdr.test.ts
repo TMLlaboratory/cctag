@@ -58,12 +58,11 @@ if (args[0] === "status" && args[1] === "server") {
   process.stdout.write(JSON.stringify({ result: { pane: { terminal_id: "raw-terminal-id", scroll: { offset_from_bottom: 0 } } } }));
 } else if (args[0] === "pane" && args[1] === "process-info" && socket) {
   const pid = ${process.pid};
-  const foreground = [{ pid, name: "claude" }];
   if (fs.readFileSync(${JSON.stringify(callsFile)}, "utf8").includes('"agent","prompt",${JSON.stringify(paneId)},"typed message"')) {
-    foreground.unshift({ pid: pid + 1, name: "caffeinate" });
+    process.exit(1);
   }
   process.stdout.write(JSON.stringify({ result: { process_info: {
-    pane_id: ${JSON.stringify(paneId)}, foreground_process_group_id: pid, foreground_processes: foreground
+    pane_id: ${JSON.stringify(paneId)}, foreground_process_group_id: pid, foreground_processes: [{ pid, name: "claude" }]
   } } }));
 } else if (args[0] === "agent" && args[1] === "list") {
   process.stdout.write(JSON.stringify({ result: { agents: [agent("working")] } }));
@@ -282,15 +281,16 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
   assert.equal(HERDR_PAINTS["review-home-empty"], HERDR_PAINTS["review-home-space"]);
   const probeSuggestion = ["suggestion", "suggestion", "suggestion-x", "suggestion-x", "suggestion-backspace"];
   const paints = [
+    "review-home-empty", "review-home-empty", "review-home-empty",
     "review-home-empty", "review-home-empty", "review-empty-probed", "review-empty-probed",
     "review-empty-restored", "review-empty-restored",
     "review-home-space", "review-home-space", "review-hidden-probed", "review-hidden-probed", "review-hidden-restored",
-    "suggestion", "suggestion",
+    "suggestion",
     ...probeSuggestion, "suggestion-backspace",
     ...probeSuggestion, "typed",
     "typed", "typed", "typed-x", "typed-x", "typed-backspace", "typed-backspace",
     "review-stashed", "review-stashed", "review-stashed-probed", "review-stashed-probed", "review-stashed", "review-stashed",
-    "empty",
+    "empty", "empty",
   ];
   let readCount = 0;
   const server = createServer((socket) => {
@@ -302,7 +302,7 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
       assert.equal(typeof text, "string");
       socket.end(JSON.stringify({
         id: request.id, result: { type: "pane_read", read: {
-          pane_id: REF.target, source: "visible", format: "ansi", text, truncated: readCount === paints.length,
+          pane_id: REF.target, source: "visible", format: "ansi", text, truncated: readCount === paints.length - 1,
         } },
       }) + "\n");
     });
@@ -317,22 +317,35 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
     const backend = new HerdrBackend(cli.bin);
     const agent = await backend.get(REF.target);
     assert.ok(agent);
+    assert.equal(agent.ref.pid, null);
+    assert.deepEqual(cli.calls(), [["agent", "get", REF.target]]);
     const ctx = { ...submitContext(5), driver: claudeDriver };
-    assert.deepEqual(await backend.submit(agent.ref, "/model haiku", ctx), { status: "accepted", draftStashed: false });
     await assert.rejects(backend.submit(agent.ref, "image prompt", { ...ctx, hasImages: true }),
+      (error) => error instanceof SubmitRefused && error.reason === "legacy-claude-images");
+    assert.deepEqual(cli.calls(), [["agent", "get", REF.target]]);
+    await assert.rejects(backend.submit({ ...agent.ref, terminalInstance: "replaced", sessionId: null }, "replaced terminal", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    await assert.rejects(backend.submit({ ...agent.ref, sessionId: null }, "unverified session", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "foreground-unverified");
+    await assert.rejects(backend.submit({ ...agent.ref, sessionId: "replaced" }, "different session", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    await assert.rejects(backend.submit({ ...agent.ref, pid: process.pid, processStartedAt: 1 }, "replaced process", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    assert.deepEqual(await backend.submit(agent.ref, "/model haiku", ctx), { status: "accepted", draftStashed: false });
+    await assert.rejects(backend.submit(agent.ref, "hidden text", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "draft" && error.composer.probe === null);
-    for (const [text, hasImages] of [["/model haiku", false], ["image prompt", true]] as const) {
-      await assert.rejects(backend.submit(agent.ref, text, { ...ctx, hasImages }),
-        (error) => error instanceof SubmitRefused && error.reason === "draft");
-    }
+    await assert.rejects(backend.submit(agent.ref, "/model haiku", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "draft");
     assert.deepEqual(await backend.submit(agent.ref, "replace suggestion", ctx), { status: "accepted", draftStashed: false });
     await assert.rejects(backend.submit(agent.ref, "changed suggestion", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "draft");
     assert.deepEqual(await backend.submit(agent.ref, "typed message", ctx), {
-      status: "accepted", draftStashed: true, draftRestoration: "unverified",
+      status: "accepted", draftStashed: true,
     });
     await assert.rejects(backend.submit(agent.ref, "blocked", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "incomplete-screen");
+    await assert.rejects(backend.submit(agent.ref, "unverified foreground", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "foreground-unverified");
     assert.deepEqual(cli.calls().filter((args) => ["prompt", "send-keys"].includes(args[1]!)), [
       ["pane", "send-keys", REF.target, "right", "x"],
       ["pane", "send-keys", REF.target, "backspace"],

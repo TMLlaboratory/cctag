@@ -58,7 +58,6 @@ export interface SubmitComposerState {
   readonly probe: "x" | "y" | null;
   readonly stash: "untouched" | "uncertain" | "stashed";
   readonly submitUncertain: boolean;
-  readonly draftRestored?: boolean;
 }
 
 export const EMPTY_SUBMIT_COMPOSER_STATE: SubmitComposerState = {
@@ -85,7 +84,9 @@ export class SubmitRefused extends Error {
       | "gate"
       | "incomplete-screen"
       | "agent-unverified"
+      | "foreground-unverified"
       | "agent-changed"
+      | "legacy-claude-images"
       | "cancelled"
       | "unsafe-text",
     message: string,
@@ -93,6 +94,11 @@ export class SubmitRefused extends Error {
   ) {
     super(message);
   }
+}
+
+export function legacySessionRefusal(expected: string | null | undefined, current: string | null) {
+  if ((expected || null) === (current || null)) return null;
+  return expected && current ? "agent-changed" : "foreground-unverified";
 }
 
 export class ExpectationLost extends Error {

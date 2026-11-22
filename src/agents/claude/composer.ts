@@ -36,8 +36,10 @@ function parseFrame(lines: string[], index: number, cols: number, column?: numbe
   const row = lines[index];
   const upper = stripVTControlCharacters(lines[index - 1] ?? "");
   const lower = stripVTControlCharacters(lines[index + 1] ?? "");
-  const footer = lines.slice(index + 2).map(stripVTControlCharacters).join("\n");
-  if (!row || !RULE.test(upper) || upper.length !== cols || lower !== upper || !footer.includes("(shift+tab to cycle)")) return null;
+  if (!row || !RULE.test(upper) || upper.length !== cols || lower !== upper) return null;
+  const footer = lines.slice(index + 2).map(stripVTControlCharacters).join("\n").trimEnd();
+  if (footer.split("\n").some((line) => !/^ {2,}\S/u.test(line)) ||
+    /(?:^|\s)❯|esc to (?:close|exit)/iu.test(footer)) return null;
   if (!row.startsWith("❯\u00a0")) return null;
   const parts = row.slice(2).split(REVERSE);
   if (parts.length !== 2) return null;

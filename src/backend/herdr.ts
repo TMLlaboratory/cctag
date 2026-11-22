@@ -20,6 +20,7 @@ import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } f
 import {
   BackendUnavailable,
   SubmitRefused,
+  legacySessionRefusal,
   WriteOutcomeUnknown,
   type AgentInfo,
   type AgentRef,
@@ -66,11 +67,12 @@ function normalizeAgent(raw: RawAgent): AgentInfo {
   if (reserved !== "herdr") {
     throw new BackendUnavailable(`herdr target collision: reserved ${reserved} namespace returned as ${raw.pane_id}`);
   }
+  const sessionId = raw.agent_session?.kind === "id" ? raw.agent_session.value : null;
   return {
-    ref: { target: raw.pane_id, pid: null, processStartedAt: null, terminalInstance: raw.terminal_id },
+    ref: { target: raw.pane_id, pid: null, processStartedAt: null, terminalInstance: raw.terminal_id, sessionId },
     backend: "herdr",
     agent: raw.agent as AgentInfo["agent"],
-    sessionId: raw.agent_session?.kind === "id" ? raw.agent_session.value : null,
+    sessionId,
     cwd: raw.cwd,
     evidence: { kind: "classified", status: normalizeStatus(raw.agent_status) },
     terminalTitle: raw.terminal_title_stripped?.trim() || null,
@@ -131,22 +133,21 @@ export class HerdrBackend implements Terminals {
     }
   }
 
-  async get(target: string): Promise<AgentInfo | null> {
-    return this.lookupAgent(target, false);
+  async get(target: string, proof?: "foreground"): Promise<AgentInfo | null> {
+    const agent = await this.lookupAgent(target);
+    if (proof === "foreground" && agent?.agent === "claude") {
+      const foreground = await this.foregroundClaude(target, false).catch(() => null);
+      if (foreground) agent.ref = { ...agent.ref, ...foreground };
+    }
+    return agent;
   }
 
-  private async lookupAgent(target: string, requireOnlyClaude: boolean, env?: NodeJS.ProcessEnv): Promise<AgentInfo | null> {
+  private async lookupAgent(target: string, env?: NodeJS.ProcessEnv): Promise<AgentInfo | null> {
     assertHerdrTarget(target);
     try {
       const json = (await this.run(["agent", "get", target], env)) as { result?: { agent?: RawAgent } };
       const agent = json.result?.agent;
-      if (!agent) return null;
-      const info = normalizeAgent(agent);
-      if (info.agent === "claude") {
-        const process = await this.foregroundClaude(target, requireOnlyClaude, env).catch(() => null);
-        if (process) info.ref = { ...info.ref, ...process, sessionId: info.sessionId };
-      }
-      return info;
+      return agent ? normalizeAgent(agent) : null;
     } catch (err) {
       if (err instanceof HerdrCliError && NOT_FOUND.test(err.stderr ?? err.message)) return null;
       if (err instanceof BackendUnavailable) throw err;
@@ -295,6 +296,7 @@ export class HerdrBackend implements Terminals {
   }
 
   private async submitClaude(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    if (ctx.hasImages) throw new SubmitRefused("legacy-claude-images", "Claude image conversion can consume Enter");
     const target = ref.target;
     assertHerdrTarget(target);
     const server = await this.run(["status", "server", "--json"]).catch(() => null) as {
@@ -305,6 +307,7 @@ export class HerdrBackend implements Terminals {
     const env: NodeJS.ProcessEnv = { ...process.env, HERDR_SOCKET_PATH: socket };
     delete env.HERDR_CLIENT_SOCKET_PATH;
     delete env.HERDR_SESSION;
+    let foreground: Pick<AgentRef, "pid" | "processStartedAt"> | null = ref.pid === null ? null : ref;
     return submitClaudeComposer(text, ctx, {
       read: async () => {
         const layout = (await this.run(["pane", "layout", "--pane", target], env)) as {
@@ -315,19 +318,35 @@ export class HerdrBackend implements Terminals {
         const pane = (await this.run(["pane", "get", target], env)) as {
           result?: { pane?: { terminal_id?: string; scroll?: { offset_from_bottom?: number } } };
         };
-        if (pane.result?.pane?.terminal_id !== ref.terminalInstance ||
-          pane.result?.pane?.scroll?.offset_from_bottom !== 0) return null;
+        const terminalInstance = pane.result?.pane?.terminal_id;
+        if (terminalInstance && ref.terminalInstance && terminalInstance !== ref.terminalInstance) {
+          throw new SubmitRefused("agent-changed", "herdr terminal no longer matches");
+        }
+        if (!terminalInstance || !ref.terminalInstance || pane.result?.pane?.scroll?.offset_from_bottom !== 0) return null;
         const ansi = await readHerdrVisibleAnsi(socket, target);
         if (!ansi) return null;
-        const current = await this.lookupAgent(target, true, env).catch(() => null);
-        if (!current || current.agent !== "claude" || ref.pid === null || ref.processStartedAt === null ||
-          !ref.terminalInstance || current.terminalId !== ref.terminalInstance || current.ref.pid !== ref.pid ||
-          current.ref.processStartedAt !== ref.processStartedAt || current.sessionId !== ref.sessionId) {
+        const current = await this.lookupAgent(target, env).catch(() => {
+          throw new SubmitRefused("foreground-unverified", "herdr agent lookup failed");
+        });
+        if (!current) throw new SubmitRefused("foreground-unverified", "herdr agent lookup returned no agent");
+        const sessionRefusal = legacySessionRefusal(ref.sessionId, current.sessionId);
+        if (current.agent !== "claude" ||
+          (ref.terminalInstance && current.terminalId && current.terminalId !== ref.terminalInstance) ||
+          sessionRefusal === "agent-changed") {
           throw new SubmitRefused("agent-changed", "herdr foreground no longer matches");
+        }
+        if (!ref.terminalInstance || !current.terminalId || sessionRefusal) {
+          throw new SubmitRefused("foreground-unverified", "herdr agent identity could not be verified");
         }
         const status = evidenceStatus(current.evidence);
         if (status === "blocked") throw new SubmitRefused("gate", "herdr reports a blocked agent");
         if (status !== "idle" && status !== "done") throw new SubmitRefused("not-idle", "herdr agent is not idle");
+        const observed = await this.foregroundClaude(target, true, env).catch(() => null);
+        if (!observed) throw new SubmitRefused("foreground-unverified", "herdr foreground process could not be verified");
+        if (foreground && (observed.pid !== foreground.pid || observed.processStartedAt !== foreground.processStartedAt)) {
+          throw new SubmitRefused("agent-changed", "herdr foreground no longer matches");
+        }
+        foreground = observed;
         return parseClaudeHerdrComposer(ansi, width - 1);
       },
       key: async (...keys) => { await runHerdrRaw(this.bin, ["pane", "send-keys", target, ...keys], env); },

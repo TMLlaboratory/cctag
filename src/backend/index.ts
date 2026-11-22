@@ -8,7 +8,6 @@ export * from "./types.js";
 export interface SubmitOutcome {
   status: "started" | "accepted";
   draftStashed: boolean;
-  draftRestoration?: "verified" | "unverified";
 }
 
 export interface SubmitContext {
@@ -46,7 +45,7 @@ export interface ComposerChannel {
 
 export interface Terminals {
   list(): Promise<ListResult>;
-  get(target: string): Promise<AgentInfo | null>;
+  get(target: string, proof?: "foreground"): Promise<AgentInfo | null>;
   exists(target: string): Promise<boolean>;
   read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot>;
   submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome>;
@@ -119,8 +118,8 @@ export function createTerminals(backends: TerminalBackends): Terminals {
       }
       return { agents, failures, complete, notices };
     },
-    async get(target: string): Promise<AgentInfo | null> {
-      const agent = await backendFor(target).get(target);
+    async get(target: string, proof?: "foreground"): Promise<AgentInfo | null> {
+      const agent = await backendFor(target).get(target, proof);
       if (backendForTarget(target) === "herdr" && agent && backendForTarget(agent.ref.target) !== "herdr") {
         throw new BackendUnavailable(collisionMessage(agent));
       }

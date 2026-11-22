@@ -569,7 +569,7 @@ export class TurnEngine {
           return;
         }
         if (err instanceof WriteOutcomeUnknown) {
-          await statusHandle.update(writeOutcomeUnknownText(err)).catch(() => {});
+          await statusHandle.update(writeOutcomeUnknownText(err, backend)).catch(() => {});
           return;
         }
         await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
