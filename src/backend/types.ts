@@ -39,6 +39,7 @@ export interface AgentInfo {
   transcriptIdentity?: TranscriptIdentity;
   cwd: string;
   evidence: StatusEvidence;
+  turn?: number;
   /** Raw Orca worktree state for picker icons only; not status evidence. */
   pickerState?: string | null;
   terminalTitle: string | null;
@@ -51,6 +52,7 @@ export interface ScreenSnapshot {
   text: string;
   draft: string | null;
   complete: boolean;
+  observedPrompt?: { kind: "question" | "permission" | "model" | "effort"; fingerprint: string };
 }
 
 export interface SubmitComposerState {

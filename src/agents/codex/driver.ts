@@ -98,6 +98,9 @@ function splitModelAndLevel(words: string[]): { levelKey: string | null; modelWo
 }
 
 export const CODEX_ORCA_TERMINAL_ANSWER = "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。";
+export const HC_CODEX_WRITE_NOTICE = "⚠️ herdr-core 上の Codex には Slack から入力できません。端末で操作してください。";
+export const HC_CODEX_UNBOUND_NOTICE =
+  "⚠️ herdr-core 上の Codex の現在の会話を確認できません。接続候補への表示と結果の投稿は保留します。";
 
 export const CODEX_THREAD_SWITCHED =
   "⚠️ 端末で Codex の別の会話に切り替わったため、このターンを終えました（部分的な出力のみ）";
@@ -205,8 +208,8 @@ export const codexDriver: AgentDriver = {
   parseStartupPrompt: parseCodexStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
-    // Codex has no AskUserQuestion-equivalent tool and no plan mode — every
-    // blocked prompt is a command-approval (or directory-trust) menu.
+    // Herdr's existing answer flow uses numbered approval menus. hc inspects
+    // question forms separately, without granting an answer capability.
     const menu = parseCodexMenu(paneText);
     if (!menu) {
       return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-then-enter") };
@@ -235,16 +238,14 @@ export const codexDriver: AgentDriver = {
     await channel.confirm(expectedLabel);
   },
 
-  // No answerQuestionFreeText / answerPlanFeedback / resolvePlanFile — Codex
-  // has no AskUserQuestion tool and no plan-file concept.
-
-  modes: null, // no Shift+Tab ring, no plan mode
+  modes: null,
 
   async runModelCommand(terminals, agent, argsText): Promise<ModelCommandResult> {
     const result = (reply: string, submitOutcome: ModelCommandResult["submitOutcome"] = null) => ({
       reply,
       submitOutcome,
     });
+    if (agent.backend === "herdr-core") return result(HC_CODEX_WRITE_NOTICE);
     if (agent.backend === "orca") {
       // Refused before /model is sent: Orca has no Escape-capable channel to back out of the menu.
       return result("⚠️ Orca 上の Codex のモデルは、端末で /model から変えてください。");

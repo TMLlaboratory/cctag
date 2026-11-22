@@ -20,7 +20,7 @@ import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -1951,6 +1951,65 @@ test("an incomplete list from either backend prevents automatic outbox uploads",
   }
 });
 
+test("outbox ownership checks persisted hc pairings hidden from the picker", async (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "cctag-hidden-outbox-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const outbox = join(cwd, ".cctag", "outbox");
+  mkdirSync(outbox, { recursive: true });
+  writeFileSync(join(outbox, "artifact.txt"), "synthetic artifact");
+  const otherCwd = join(cwd, "other");
+  mkdirSync(otherCwd);
+  const alias = join(cwd, "alias");
+  symlinkSync(cwd, alias, "dir");
+  const pairing = fakePairing();
+  const hidden = { ...pairing, key: "C2:2.1", paneId: "hc:t2", cwd: otherCwd };
+  const codex: AgentInfo = {
+    ...fakeAgent("idle", "herdr-core"),
+    ref: { target: hidden.paneId, pid: null, processStartedAt: null },
+    agent: "codex",
+    sessionId: null,
+    cwd: otherCwd,
+  };
+
+  for (const scenario of [
+    { name: "same cwd", agent: { ...codex, cwd }, live: true, uploads: [] },
+    { name: "same cwd through an alias", agent: { ...codex, cwd: alias }, live: true, uploads: [] },
+    { name: "unknown foreground cwd", agent: { ...codex, cwd: "" }, live: true, uploads: [] },
+    { name: "live without agent", agent: null, live: true, uploads: [] },
+    { name: "lookup failed", agent: null, live: true, lookupFailed: true, uploads: [] },
+    { name: "disjoint cwd", agent: codex, live: true, uploads: ["artifact.txt"] },
+    { name: "gone", agent: null, live: false, uploads: ["artifact.txt"] },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const uploads: string[] = [];
+      const { notifier, posts } = fakeNotifier();
+      notifier.uploadFile = async (_channel, _thread, args) => { uploads.push(args.filename); };
+      const terminals = fakeBackend(() => "idle", () => "", {
+        async list() {
+          return { agents: [{ ...fakeAgent("idle"), cwd }], failures: [], complete: true, notices: [] };
+        },
+        async get(target) {
+          assert.equal(target, hidden.paneId);
+          if (scenario.lookupFailed) throw new Error("backend unavailable");
+          return scenario.agent;
+        },
+        async exists(target) {
+          assert.equal(target, hidden.paneId);
+          return scenario.live;
+        },
+      });
+      const engine = new TurnEngine(
+        terminals, notifier,
+        { turnTimeoutMs: 600_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 } },
+        { list: () => [pairing, hidden] },
+      );
+      await engine.uploadOutboxAdditions(pairing, cwd, {}, []);
+      assert.deepEqual(uploads, scenario.uploads);
+      assert.equal(posts.some((post) => post.includes("自動添付を見送りました")), uploads.length === 0);
+    });
+  }
+});
+
 // --- multi-select questions -------------------------------------------------
 
 /** A multi-select dialog as Claude Code 2.1.251 draws it (checkbox on every
@@ -2519,6 +2578,7 @@ test("a Codex approval on Orca is posted as a terminal-only notice, without butt
     const notice = () => posts.findIndex((post) => post.includes("端末で答えてください"));
     for (let i = 0; i < 50 && notice() < 0; i++) await sleep(20);
     assert.ok(notice() >= 0, `posted: ${JSON.stringify(posts)}`);
+    assert.equal(posts[notice()], "⚠️ Orca 上の Codex の確認には Slack から答えられません。端末で答えてください。");
     assert.equal(JSON.stringify(postedBlocks).includes('"actions"'), false);
   } finally {
     engine.abortAll();

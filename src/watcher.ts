@@ -1,4 +1,4 @@
-import type { AgentKind, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
+import type { AgentInfo, AgentKind, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
 import type { Terminals } from "./backend/index.js";
 import { backendForTarget } from "./backend/target.js";
 import type { Pairing, PairingStore } from "./pairing.js";
@@ -27,6 +27,7 @@ import { promptFingerprint } from "./agents/fingerprint.js";
 import { chunkForSlack, markdownToMrkdwn } from "./slack/mrkdwn.js";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { createOmpStatusMemory, resolveOmpStatus, type OmpStatusResolution } from "./agents/omp/status.js";
+import { HC_CODEX_UNBOUND_NOTICE } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,6 +117,7 @@ const AGENTLESS_GRACE_MS = 5 * 60_000;
 
 export class BackgroundWatcher {
   private watches = new Map<string, WatchState>(); // key: paneId
+  private hcCodexNotices = new Map<string, string>(); // key: pairing key
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
@@ -161,6 +163,10 @@ export class BackgroundWatcher {
   private async tick(): Promise<void> {
     const pairings = this.pairingStore.list().filter((pairing) => backendForTarget(pairing.paneId) === this.backend);
     const liveKeys = new Set(pairings.map((p) => p.paneId));
+    const pairingKeys = new Set(pairings.map((p) => p.key));
+    for (const key of this.hcCodexNotices.keys()) {
+      if (!pairingKeys.has(key)) this.hcCodexNotices.delete(key);
+    }
     for (const key of this.watches.keys()) {
       if (!liveKeys.has(key)) {
         this.watches.delete(key);
@@ -221,6 +227,13 @@ export class BackgroundWatcher {
     }
 
     const agent = await this.terminals.get(pairing.paneId);
+    if (agent?.backend === "herdr-core" && agent.agent === "codex") {
+      this.agentlessPanes.delete(pairing.paneId);
+      this.watches.delete(pairing.paneId);
+      await this.noteHcCodexStatus(pairing, agent);
+      return;
+    }
+    this.hcCodexNotices.delete(pairing.key);
     if (!agent) {
       // "No agent" is not "no pane". Quitting the CLI to restart it in the same
       // pane leaves a shell prompt: get returns null while exists still returns
@@ -579,16 +592,26 @@ export class BackgroundWatcher {
     state.lastStatus = status;
   }
 
-  /**
-   * Drops a pairing and tells the thread why, clearing every per-pane bit of
-   * state with it.
-   *
-   * Shared by the two ways a pairing stops being usable — the pane closed, or
-   * the pane outlived its agent by AGENTLESS_GRACE_MS — because forgetting one
-   * of these maps is what leaves a watch running against a pane that no longer
-   * has a pairing. The Slack post is best-effort: the local state must end up
-   * consistent whether or not the thread can be reached.
-   */
+  private async noteHcCodexStatus(pairing: Pairing, agent: AgentInfo): Promise<void> {
+    const status = classifiedStatus(agent.evidence);
+    let fingerprint = `${agent.turn ?? ""}:${status}`;
+    let text = HC_CODEX_UNBOUND_NOTICE;
+    if (status === "blocked") {
+      const screen = await this.terminals.read(pairing.paneId, 0, "screen").catch(() => null);
+      const prompt = screen?.observedPrompt;
+      fingerprint += `:${prompt?.fingerprint ?? ""}`;
+      const label = prompt?.kind === "question" ? "質問" : prompt?.kind === "permission" ? "承認" : "入力";
+      text = `⚠️ herdr-core 上の Codex が${label}を待っています。端末で答えてください。`;
+    } else if (status === "working") {
+      text = `⚙️ herdr-core 上の Codex が作業中です。\n${text}`;
+    } else if (status === "done") {
+      text = `✅ herdr-core 上の Codex のターンが完了しました。\n${text}`;
+    }
+    if (this.hcCodexNotices.get(pairing.key) === fingerprint) return;
+    await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", text);
+    this.hcCodexNotices.set(pairing.key, fingerprint);
+  }
+
   private async noteOmpBindingLoss(pairing: Pairing, state: WatchState): Promise<void> {
     this.agentlessPanes.delete(pairing.paneId);
     state.ompBindingLost = true;
@@ -627,6 +650,10 @@ export class BackgroundWatcher {
     return true;
   }
 
+  /**
+   * Shared by the two ways a pairing stops being usable: the pane closed,
+   * or it outlived its agent by AGENTLESS_GRACE_MS.
+   */
   private async unpair(pairing: Pairing, logLine: string, message: string): Promise<void> {
     this.pairingStore.remove(pairing.key);
     this.watches.delete(pairing.paneId);

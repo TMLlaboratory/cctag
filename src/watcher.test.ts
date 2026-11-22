@@ -229,6 +229,7 @@ test("a pane that has gone away is reported once and unpaired", async () => {
 
     const notices = replies.filter((r) => r.includes("インスタンスが見つかりません"));
     assert.equal(notices.length, 1, `reported exactly once, got ${notices.length}`);
+    assert.equal(notices[0], "⚠️ 接続先のインスタンスが見つかりません（ターミナルが閉じられた可能性があります）。ペアリングを解除しました。`@cctag connect` で再接続してください。");
     assert.equal(store.list().length, 0, "the dead pairing must not linger");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -306,6 +307,7 @@ test("a pane still agentless after the grace period is unpaired and reported onc
 
     const notices = replies.filter((r) => r.includes("終了したままです"));
     assert.equal(notices.length, 1, `reported exactly once, got ${notices.length}`);
+    assert.equal(notices[0], "⚠️ ペアリング先のエージェントが1分以上終了したままです（ターミナルは開いていますが、エージェントが動いていません）。ペアリングを解除しました。`@cctag connect` で再接続してください。");
     assert.equal(store.list().length, 0, "the stale pairing must be dropped");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -2390,6 +2392,53 @@ test("watcher ownership follows target prefixes despite mismatched persisted tag
 
     assert.equal(removals, 0);
     assert.deepEqual(replies, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a live unbound hc Codex pairing reports status without publishing the pane or falling back to a rollout", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-watch-"));
+  const target = "hc:t1";
+  const store = storeWithPairing(dir, { ...fakePairing(), paneId: target, backend: "herdr-core" });
+  const { notifier, replies } = fakeNotifier();
+  let status: AgentStatus = "working";
+  let turn = 1;
+  const terminals = fakeTerminals(() => ({
+    ...fakeAgent(),
+    backend: "herdr-core",
+    agent: "codex",
+    ref: { target, pid: 10, processStartedAt: null },
+    evidence: { kind: "classified", status },
+    turn,
+    sessionId: null,
+    cwd: dir,
+  }));
+  terminals.read = async () => ({
+    text: "PRIVATE PANE TEXT", complete: true, draft: null,
+    observedPrompt: { kind: "question", fingerprint: "same question" },
+  });
+  const watcher = new BackgroundWatcher("herdr-core", terminals, store, idleEngine, notifier, 10, 10);
+  try {
+    await watcher["tick"]();
+    status = "blocked";
+    await watcher["tick"]();
+    await watcher["tick"]();
+    turn++;
+    await watcher["tick"]();
+    status = "done";
+    await watcher["tick"]();
+    await watcher["tick"]();
+    turn++;
+    await watcher["tick"]();
+    assert.equal(replies.length, 5);
+    assert.match(replies[0], /作業中/);
+    assert.match(replies[1], /質問を待っています。端末で答えて/);
+    assert.equal(replies[2], replies[1]);
+    assert.match(replies[3], /完了/);
+    assert.equal(replies[4], replies[3]);
+    assert.doesNotMatch(replies.join(), /PRIVATE PANE TEXT/);
+    assert.equal(store.list().length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

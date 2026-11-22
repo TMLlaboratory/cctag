@@ -52,9 +52,10 @@ import {
 } from "./slack/blocks.js";
 import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
-import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED } from "./agents/codex/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED, HC_CODEX_UNBOUND_NOTICE, HC_CODEX_WRITE_NOTICE } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -418,6 +419,10 @@ export class TurnEngine {
       if (lease.cancelled) return;
       const driver = driverFor(agent.agent);
       const backend = backendForTarget(agent.ref.target);
+      if (backend === "herdr-core" && agent.agent === "codex") {
+        await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", HC_CODEX_WRITE_NOTICE);
+        return;
+      }
       if (backend !== "herdr" && hasUnsendableC0Controls(text)) {
         await this.notifier.postReply(
           pairing.channel,
@@ -648,6 +653,7 @@ export class TurnEngine {
    * terminal-only.
    */
   async adoptBlockedTerminal(pairing: Pairing, handoff: BlockedTerminalHandoff): Promise<boolean> {
+    if (handoff.backend === "herdr-core" && handoff.driver.kind === "codex") return false;
     const paneId = pairing.paneId;
     // Same claim as startTurn() — a Slack-initiated turn could start for this
     // pane in the window between the watcher's check and this method actually
@@ -1259,6 +1265,10 @@ export class TurnEngine {
         );
         return;
       }
+      if (state.backend === "herdr-core" && agent.agent === "codex") {
+        await state.statusHandle.update(HC_CODEX_UNBOUND_NOTICE).catch(() => {});
+        return;
+      }
       if (state.driver.kind === "omp" && agent.agent !== "omp") {
         state.collected = [];
         state.writes = new WrittenFileTracker();
@@ -1636,9 +1646,26 @@ export class TurnEngine {
       };
     }
     const cwdByPane = new Map(result.agents.map((a) => [a.ref.target, a.cwd]));
-    const sharing = this.pairings.list().filter((p) => p.key !== pairing.key && cwdByPane.get(p.paneId) === cwd);
-    if (sharing.length === 0) return { sole: true };
-    return { sole: false, reason: "同じディレクトリに接続されたスレッドが他にもあり、どのスレッド宛てか判別できません" };
+    for (const other of this.pairings.list()) {
+      if (other.key === pairing.key || !other.paneId) continue;
+      const listedCwd = cwdByPane.get(other.paneId);
+      let sharesCwd = listedCwd === cwd;
+      if (!listedCwd) {
+        // The picker can omit a live pane, and the stored cwd may predate a terminal-side switch.
+        try {
+          const live = await this.terminals.get(other.paneId);
+          if (!live && !(await this.terminals.exists(other.paneId))) continue;
+          if (!live || !isAbsolute(live.cwd)) throw new Error("live cwd unavailable");
+          sharesCwd = live.cwd === cwd || (await realpath(live.cwd)) === (await realpath(cwd));
+        } catch {
+          return { sole: false, reason: "他の接続先の作業ディレクトリを確認できず、宛先スレッドを特定できませんでした" };
+        }
+      }
+      if (sharesCwd) {
+        return { sole: false, reason: "同じディレクトリに接続されたスレッドが他にもあり、どのスレッド宛てか判別できません" };
+      }
+    }
+    return { sole: true };
   }
 
   private async uploadAttachments(

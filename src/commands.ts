@@ -12,6 +12,7 @@ import type { TurnEngine } from "./turn.js";
 import type { Notifier } from "./notifier.js";
 import { agentPickerBlocks } from "./slack/blocks.js";
 import { driverFor, type AgentDriver, type ModelCommandResult } from "./agents/driver.js";
+import { HC_CODEX_UNBOUND_NOTICE } from "./agents/codex/driver.js";
 import { classifiedStatus } from "./settle.js";
 
 
@@ -724,6 +725,10 @@ export class CommandHandler {
     const agent = await this.terminals.get(paneId);
     if (!agent) {
       await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
+      return;
+    }
+    if (agent.backend === "herdr-core" && agent.agent === "codex") {
+      await this.notifier.postReply(channel, threadTs, HC_CODEX_UNBOUND_NOTICE);
       return;
     }
 

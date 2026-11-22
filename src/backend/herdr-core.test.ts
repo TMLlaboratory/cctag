@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeDriver } from "../agents/claude/driver.js";
+import { codexDriver, parseCodexModelMenuPrompt } from "../agents/codex/driver.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import type { SubmitContext } from "./index.js";
@@ -14,14 +15,20 @@ import { BackendUnavailable, ExpectationLost, SubmitRefused, WriteOutcomeUnknown
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
+const CODEX_QUESTION = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-question.screen.json", import.meta.url), "utf8")).text;
+const MODEL_SCREEN = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-model.screen.json", import.meta.url), "utf8")).text;
 
 interface FakeTerminal {
   address: string;
   agent?: string;
   state?: string;
   status?: string | null;
+  kind?: string;
   pid?: number;
+  foregroundName?: string;
+  foregroundCwd?: string | null;
   name?: string | null;
+  turn?: number;
   title?: string;
 }
 
@@ -72,8 +79,9 @@ if (args[0] === "ls") {
   const t = find(ops[0]);
   out({
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
-    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: "claude" },
-    status: t.status === undefined ? null : { app: t.agent, state: t.status },
+    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: t.foregroundCwd === undefined ? "/moved/here" : t.foregroundCwd, name: t.foregroundName ?? "claude" },
+    status: t.status === undefined ? null : { app: t.agent, state: t.status, kind: t.kind },
+    turn: t.turn,
   });
 } else if (args[0] === "read") {
   find(ops[0]);
@@ -173,7 +181,7 @@ test("lists local Claude Code terminals with the session id and cwd Claude Code 
 });
 
 test("notes agents that report a status but are not Claude Code", async () => {
-  await withCore([{ address: "t1", agent: "codex", status: "idle" }], {}, async (backend) => {
+  await withCore([{ address: "t1", agent: "omp", status: "idle" }], {}, async (backend) => {
     const result = await backend.list();
     assert.deepEqual(result.agents, []);
     assert.deepEqual(result.notices, [HC_UNSUPPORTED_AGENTS_NOTICE]);
@@ -212,10 +220,11 @@ test("a stopped core is reported as unavailable and hc is never run, so cctag ca
   }
 });
 
-test("hc runs without the Spoke's own HC_TERMINAL_ID and HC_SCOPE", async () => {
-  const saved = { id: process.env.HC_TERMINAL_ID, scope: process.env.HC_SCOPE };
+test("hc runs without the Spoke's own HC_TERMINAL_ID, HC_SCOPE or HC_TERMINAL_SOCKET", async () => {
+  const saved = { id: process.env.HC_TERMINAL_ID, scope: process.env.HC_SCOPE, socket: process.env.HC_TERMINAL_SOCKET };
   process.env.HC_TERMINAL_ID = "t99";
   process.env.HC_SCOPE = "scope";
+  process.env.HC_TERMINAL_SOCKET = "/old/terminal.sock";
   try {
     await withCore([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }], {}, async (backend, fake) => {
       await backend.submit(ref("t1"), "hello", CTX);
@@ -228,6 +237,8 @@ test("hc runs without the Spoke's own HC_TERMINAL_ID and HC_SCOPE", async () => 
     else process.env.HC_TERMINAL_ID = saved.id;
     if (saved.scope === undefined) delete process.env.HC_SCOPE;
     else process.env.HC_SCOPE = saved.scope;
+    if (saved.socket === undefined) delete process.env.HC_TERMINAL_SOCKET;
+    else process.env.HC_TERMINAL_SOCKET = saved.socket;
   }
 });
 
@@ -292,7 +303,7 @@ test("an answer checks the prompt is still on screen, then presses keys by hc's 
     await channel.move("Down", 2);
     await channel.digit(1, false);
     await channel.confirm("Amber");
-    const writes = fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args);
+    const writes = fake.calls().filter((call) => call.args[0] === "keys" || call.args[0] === "send").map((call) => call.args);
     assert.deepEqual(writes, [
       ["keys", "--json", "--", "t1", "down", "down"],
       ["keys", "--json", "--", "t1", "1"],
@@ -310,7 +321,7 @@ test("typed text is pasted together with its Enter, and nothing else may follow 
     await channel.text("Cが好き");
     await channel.confirm("Cが好き");
     assert.deepEqual(
-      fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args),
+      fake.calls().filter((call) => call.args[0] === "keys" || call.args[0] === "send").map((call) => call.args),
       [
         ["keys", "--json", "--", "t1", "down", "down"],
         ["send", "--force", "--json", "--", "t1", "Cが好き"],
@@ -329,7 +340,7 @@ test("an answer is refused when the prompt on screen is no longer the verified o
   await withCore([{ address: "t1" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
     const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
     await assert.rejects(channel.digit(1), ExpectationLost);
-    assert.deepEqual(fake.calls().filter((call) => call.args[0] !== "read"), []);
+    assert.deepEqual(fake.calls().filter((call) => call.args[0] === "keys" || call.args[0] === "send"), []);
   });
 });
 
@@ -338,7 +349,7 @@ test("Shift+Tab and blind y/n answers use hc's key names", async () => {
     await backend.openComposer(ref("t1"), claudeDriver).backTab();
     await backend.openBlind(ref("t1"), { form: "key-then-enter" } as never).answer("y");
     assert.deepEqual(
-      fake.calls().map((call) => call.args),
+      fake.calls().filter((call) => call.args[0] === "keys").map((call) => call.args),
       [
         ["keys", "--json", "--", "t1", "shift+tab"],
         ["keys", "--json", "--", "t1", "y"],
@@ -374,11 +385,62 @@ test("plan feedback moves to the option, then pastes the feedback with its Enter
     const channel = backend.openAnswer(ref("t1"), prompt);
     await claudeDriver.answerPlanFeedback!(channel, 3, "改行1つだけにして");
     assert.deepEqual(
-      fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args),
+      fake.calls().filter((call) => call.args[0] === "keys" || call.args[0] === "send").map((call) => call.args),
       [
         ["keys", "--json", "--", "t1", "3"],
         ["send", "--force", "--json", "--", "t1", "改行1つだけにして"],
       ],
     );
   });
+});
+
+test("hc Codex stays live and unbound, and every backend input path refuses", async () => {
+  await withCore([{ address: "t1", agent: "codex", status: "blocked", kind: "question", pid: 101, turn: 4 }], { screens: [CODEX_QUESTION] }, async (backend, fake) => {
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    assert.equal(agent.agent, "codex");
+    assert.equal(agent.turn, 4);
+    assert.equal(agent.cwd, "/moved/here");
+    const snapshot = await backend.read("hc:t1", 200, "history");
+    assert.equal(snapshot.text, "");
+    assert.equal(snapshot.complete, false);
+    assert.equal(snapshot.observedPrompt?.kind, "question");
+    assert.equal(fake.calls().find(({ args }) => args[0] === "read")?.args.includes("--lines"), false);
+    assert.equal((await codexDriver.runModelCommand(backend, agent, "gpt-6.2-sol")).submitOutcome, null);
+    assert.equal(agent?.sessionId, null);
+    assert.equal(agent?.transcriptIdentity, undefined);
+    assert.equal(await backend.exists("hc:t1"), true);
+    assert.equal((await backend.list()).agents.length, 0);
+    assert.match((await backend.list()).notices.join(), /現在の会話/);
+    const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
+    await assert.rejects(backend.submit(ref("t1"), "try to send", CTX), SubmitRefused);
+    await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), ExpectationLost);
+    const answer = backend.openAnswer(ref("t1"), prompt);
+    await assert.rejects(answer.move("Down", 1), ExpectationLost);
+    await assert.rejects(answer.confirm("Amber"), ExpectationLost);
+    await assert.rejects(backend.openBlind(ref("t1"), { driver: claudeDriver, form: "key-confirms" } as never).answer("y"), ExpectationLost);
+    await assert.rejects(backend.openComposer(ref("t1"), claudeDriver).backTab(), ExpectationLost);
+    const model = parseCodexModelMenuPrompt(MODEL_SCREEN);
+    assert.ok(model);
+    await assert.rejects(backend.openModelAnswer(ref("t1"), model).escape(), ExpectationLost);
+    assert.deepEqual(fake.calls().filter(({ args }) => args[0] === "send" || args[0] === "keys"), []);
+  });
+});
+
+test("a Codex foreground executable triggers refusal without app metadata", async () => {
+  await withCore(
+    [{ address: "t1", pid: 101, foregroundName: "/opt/homebrew/bin/codex", foregroundCwd: null }],
+    { screens: [CODEX_QUESTION] },
+    async (backend, fake) => {
+      const agent = await backend.get("hc:t1");
+      assert.equal(agent?.agent, "codex");
+      assert.equal(agent?.cwd, "", "the terminal creation cwd does not establish live ownership");
+      assert.equal((await backend.list()).agents.length, 0);
+      assert.equal((await backend.read("hc:t1", 200, "history")).text, "");
+      await assert.rejects(backend.submit(ref("t1"), "try to send", CTX), SubmitRefused);
+      const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
+      await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), ExpectationLost);
+      assert.deepEqual(fake.calls().filter(({ args }) => args[0] === "send" || args[0] === "keys"), []);
+    },
+  );
 });

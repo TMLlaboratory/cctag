@@ -10,6 +10,7 @@
  * which uses `❯` instead) covers all of them.
  */
 
+import { createHash } from "node:crypto";
 import type { ScreenSnapshot } from "../../backend/types.js";
 import type { PermissionChoice, PermissionMenu } from "../driver.js";
 
@@ -91,6 +92,41 @@ export function isModelListScreen(paneText: string): boolean {
 /** True while the pane is showing the reasoning-effort list for a chosen model. */
 export function isEffortListScreen(paneText: string): boolean {
   return /Select Reasoning Level for/.test(paneText);
+}
+
+export function inspectHcCodexPrompt(
+  snapshot: ScreenSnapshot,
+  blockedKind?: "question" | "permission",
+): { kind: "question" | "permission" | "model" | "effort"; fingerprint: string } | null {
+  if (!snapshot.complete) return null;
+  const rows = snapshot.text.trimEnd().split("\n");
+  const footer = rows.at(-1)?.trim() ?? "";
+  let kind: "question" | "permission" | "model" | "effort";
+  let header: RegExp;
+  if (blockedKind === "question" && /^(?:tab to add notes|tab or esc to clear notes) \| enter to submit (?:answer|all)\b/.test(footer)) {
+    kind = "question";
+    header = /^\s*Question \d+\/\d+ \(\d+ unanswered\)$/;
+  } else if (blockedKind === "permission" && footer === "Press enter to confirm or esc to cancel") {
+    kind = "permission";
+    header = /^\s*Would you like to run the following command\?$/;
+  } else if (!blockedKind && footer === "enter select · esc back") {
+    kind = "model";
+    header = /^\s*Select Model and Effort$/;
+  } else if (!blockedKind && footer === "enter default · s session · esc back") {
+    kind = "effort";
+    header = /^\s*Select Reasoning Level for \S/;
+  } else {
+    return null;
+  }
+  const start = rows.map((row) => header.test(row)).lastIndexOf(true);
+  if (start < 0) return null;
+  const body = rows.slice(start);
+  const menu = parseCodexMenu(body.join("\n"));
+  if (!menu) return null;
+  const content = body.slice(0, body.findIndex((row) => NUMBERED_LINE_RE.test(row))).join("\n")
+    .replace(/ \(\d+ unanswered\)$/m, "");
+  const fingerprint = createHash("sha256").update(JSON.stringify([kind, content, menu.choices])).digest("hex");
+  return { kind, fingerprint };
 }
 
 /** Extracts the bare level name from an effort-row label, e.g.

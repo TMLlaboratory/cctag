@@ -120,6 +120,42 @@ test("connect stores Orca's namespaced target and backend without its PID", asyn
   assert.equal("pid" in stored[0], false);
 });
 
+test("an old Claude picker action cannot move a pairing to unbound hc Codex", async () => {
+  const target = "hc:t1";
+  const existing = { ...BUTTON_PAIRING, paneId: target, backend: "herdr-core", agent: "claude" };
+  const agent: AgentInfo = {
+    ref: { target, pid: null, processStartedAt: null, agentKind: "codex" },
+    backend: "herdr-core",
+    agent: "codex",
+    sessionId: null,
+    cwd: "/private/codex-project",
+    evidence: { kind: "classified", status: "idle" },
+    terminalTitle: null,
+    terminalId: "t1",
+    displayId: "t1",
+  };
+  const mutations: string[] = [];
+  const replies: string[] = [];
+  const handler = new CommandHandler(
+    { async get(id: string) { assert.equal(id, target); return agent; } } as Terminals,
+    {
+      byPane: () => existing,
+      remove: () => mutations.push("remove"),
+      add: () => mutations.push("add"),
+    } as unknown as PairingStore,
+    {} as TurnEngine,
+    { async postReply(_channel, _thread, text) { replies.push(text); } } as Notifier,
+    OWNER,
+  );
+
+  await handler.handlePairSelect({ channel: "C2", threadTs: "2.1", userId: OWNER, terminalId: target });
+
+  assert.deepEqual(mutations, []);
+  assert.equal(replies.length, 1);
+  assert.match(replies[0], /現在の会話/);
+  assert.doesNotMatch(replies[0], /接続しました|private/);
+});
+
 test("connect's empty picker lists enabled backends and Orca diagnostics", async () => {
   const result = {
     agents: [],

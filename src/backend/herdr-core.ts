@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDriver } from "../agents/driver.js";
+import { HC_CODEX_UNBOUND_NOTICE, HC_CODEX_WRITE_NOTICE } from "../agents/codex/driver.js";
+import { inspectHcCodexPrompt } from "../agents/codex/prompts.js";
 import type {
   AnswerChannel,
   BlindChannel,
@@ -38,17 +40,17 @@ const CLAUDE_APP = "claude-code";
 export const HC_TYPED_TEXT_UNSUPPORTED =
   "herdr-core では、文字を入力したまま送信せずに次の操作へ進めないため、この回答は送れません。端末で答えてください。";
 export const HC_UNSUPPORTED_AGENTS_NOTICE =
-  "herdr-core 上の Claude Code 以外のエージェント（Codex・omp など）には、まだ接続できません。";
+  "herdr-core 上の omp などのエージェントには、まだ接続できません。";
 
 /** What `hc get --json` returns; only the fields cctag reads. */
 interface HcTerminal {
   address: string;
   name?: string | null;
-  cwd: string;
   state: string;
+  turn?: number;
   title?: string | null;
   foreground?: { pid?: number; cwd?: string; name?: string } | null;
-  status?: { app?: string | null; state?: string | null } | null;
+  status?: { app?: string | null; state?: string | null; kind?: string | null } | null;
 }
 
 /** What `hc ls --json` returns per terminal. */
@@ -114,6 +116,10 @@ function normalizeStatus(raw: string | null | undefined): AgentStatus {
   return raw && KNOWN_STATUSES.has(raw as AgentStatus) ? (raw as AgentStatus) : "unknown";
 }
 
+function isCodex(terminal: HcTerminal): boolean {
+  return terminal.status?.app === "codex" || basename(terminal.foreground?.name ?? "") === "codex";
+}
+
 export interface HcBackendOptions {
   socket?: string;
   sessionsDir?: string;
@@ -173,7 +179,7 @@ export class HcBackend implements Terminals {
     try {
       return JSON.parse(stdout) as T;
     } catch {
-      throw new BackendUnavailable(`hc returned non-JSON output: ${stdout.slice(0, 200)}`);
+      throw new BackendUnavailable(`hc ${command[0]} returned non-JSON output`);
     }
   }
 
@@ -189,7 +195,25 @@ export class HcBackend implements Terminals {
 
   private async agentFrom(terminal: HcTerminal): Promise<AgentInfo | null> {
     const pid = terminal.foreground?.pid;
-    if (terminal.state !== "live" || typeof pid !== "number") return null;
+    if (terminal.state !== "live") return null;
+    if (isCodex(terminal)) {
+      // A writer may still own the previous rollout after /new.
+      const status = normalizeStatus(terminal.status?.state);
+      return {
+        ref: { target: `${PREFIX}${terminal.address}`, pid: null, processStartedAt: null, agentKind: "codex" },
+        backend: "herdr-core",
+        agent: "codex",
+        sessionId: null,
+        // hc's top-level cwd only records where the terminal was created.
+        cwd: terminal.foreground?.cwd ?? "",
+        evidence: { kind: "classified", status },
+        turn: terminal.turn,
+        terminalTitle: null,
+        terminalId: terminal.address,
+        displayId: terminal.name ?? terminal.address,
+      };
+    }
+    if (typeof pid !== "number") return null;
     const session = await claudeSession(pid, this.sessionsDir);
     if (!session) return null;
     return {
@@ -214,23 +238,28 @@ export class HcBackend implements Terminals {
     }
     // Remote machines' terminals (`machine/t7`) belong to the Spoke on that machine.
     const local = listed.filter((t) => t.state === "live" && !t.address.includes("/"));
-    const notices = local.some((t) => t.agent !== CLAUDE_APP && t.status !== undefined) ? [HC_UNSUPPORTED_AGENTS_NOTICE] : [];
+    const notices: string[] = [];
+    if (local.some((t) => t.agent !== CLAUDE_APP && t.agent !== "codex" && t.status !== undefined)) {
+      notices.push(HC_UNSUPPORTED_AGENTS_NOTICE);
+    }
     const failures: ListResult["failures"] = [];
-    const agents = (
-      await Promise.all(
-        local
-          .filter((t) => t.agent === CLAUDE_APP)
-          .map(async (t) => {
-            try {
-              const terminal = await this.terminal(t.address);
-              return terminal ? await this.agentFrom(terminal) : null;
-            } catch (err) {
-              failures.push({ backend: "herdr-core", reason: `${t.address}: ${errorMessage(err)}` });
-              return null;
-            }
-          }),
-      )
-    ).filter((agent): agent is AgentInfo => agent !== null);
+    const discovered = await Promise.all(
+      local
+        .filter((t) => t.agent === CLAUDE_APP)
+        .map(async (t) => {
+          try {
+            const terminal = await this.terminal(t.address);
+            return terminal ? await this.agentFrom(terminal) : null;
+          } catch (err) {
+            failures.push({ backend: "herdr-core", reason: `${t.address}: ${errorMessage(err)}` });
+            return null;
+          }
+        }),
+    );
+    if (local.some((t) => t.agent === "codex") || discovered.some((a) => a?.agent === "codex")) {
+      notices.push(HC_CODEX_UNBOUND_NOTICE);
+    }
+    const agents = discovered.filter((agent): agent is AgentInfo => agent?.agent === "claude");
     return { agents, failures, complete: failures.length === 0, notices };
   }
 
@@ -246,12 +275,45 @@ export class HcBackend implements Terminals {
 
   async read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
     const command = region === "history" && lines > 0 ? ["read", "--lines", String(lines)] : ["read"];
-    const result = await this.json<{ text?: string; complete?: boolean }>(command, [addressOf(target)]);
-    return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
+    const address = addressOf(target);
+    const before = await this.terminal(address);
+    const result = await this.json<{ text?: string; complete?: boolean }>(
+      before && isCodex(before) ? ["read"] : command,
+      [address],
+    );
+    const after = await this.terminal(address);
+    const snapshot = { text: result.text ?? "", draft: null, complete: result.complete === true };
+    const beforeCodex = before && isCodex(before);
+    const afterCodex = after && isCodex(after);
+    if (beforeCodex || afterCodex) {
+      const status = after?.status;
+      const kind = status?.kind;
+      const stable = beforeCodex && afterCodex &&
+        typeof before.foreground?.pid === "number" && before.foreground.pid === after.foreground?.pid &&
+        before.status?.state === status?.state && before.status?.kind === kind;
+      const prompt = !stable ? null : status?.state === "blocked"
+        ? (kind === "question" || kind === "permission" ? inspectHcCodexPrompt(snapshot, kind) : null)
+        : inspectHcCodexPrompt(snapshot);
+      return { text: "", draft: null, complete: false, ...(prompt ? { observedPrompt: prompt } : {}) };
+    }
+    return { ...snapshot, text: stripSidePane(snapshot.text) };
   }
 
-  async submit(ref: AgentRef, text: string, _ctx: SubmitContext): Promise<SubmitOutcome> {
+  private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<void> {
+    const refused = () => new ExpectationLost(HC_CODEX_WRITE_NOTICE, HC_CODEX_WRITE_NOTICE);
+    if (ref.agentKind === "codex" || driver?.kind === "codex") throw refused();
+    const terminal = await this.terminal(addressOf(ref.target));
+    if (!terminal || terminal.state !== "live" || isCodex(terminal)) throw refused();
+  }
+
+  async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
     let result: { started?: boolean };
+    try {
+      await this.assertWritable(ref, ctx.driver);
+    } catch (err) {
+      if (err instanceof ExpectationLost) throw new SubmitRefused("gate", err.message);
+      throw err;
+    }
     try {
       result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
     } catch (err) {
@@ -304,6 +366,7 @@ export class HcBackend implements Terminals {
     };
     const write = async (action: () => Promise<void>, terminal = false): Promise<void> => {
       assertActive();
+      await this.assertWritable(ref, prompt.driver);
       if (firstWrite) await assertFingerprint();
       await action();
       firstWrite = false;
@@ -354,17 +417,20 @@ export class HcBackend implements Terminals {
     const address = addressOf(ref.target);
     return {
       answer: async (choice) => {
+        await this.assertWritable(ref, prompt.driver);
         await this.json(["keys"], [address, choice]);
         if (prompt.form === "key-confirms") return;
+        await this.assertWritable(ref, prompt.driver);
         await this.json(["keys"], [address, "enter"]);
       },
     };
   }
 
-  openComposer(ref: AgentRef, _driver: AgentDriver): ComposerChannel {
+  openComposer(ref: AgentRef, driver: AgentDriver): ComposerChannel {
     const address = addressOf(ref.target);
     return {
       backTab: async () => {
+        await this.assertWritable(ref, driver);
         await this.json(["keys"], [address, "shift+tab"]);
       },
     };

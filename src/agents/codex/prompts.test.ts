@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { inspectHcCodexPrompt } from "./prompts.js";
 import { codexDriver, parseCodexModelMenuPrompt } from "./driver.js";
 
 // Captured verbatim in D-codex-11a-permissions-menu-restore-screen.json and
@@ -65,4 +67,19 @@ test("only the Codex /model stage parser creates model-menu capabilities", () =>
   if (approval.kind === "permission") {
     assert.equal("capability" in approval.verified, false);
   }
+});
+
+test("hc Codex classifies measured prompts without granting capabilities", () => {
+  const read = (name: string) => JSON.parse(readFileSync(new URL(`./__fixtures__/hc-${name}.screen.json`, import.meta.url), "utf8")).text;
+  const question = inspectHcCodexPrompt(snapshot(read("question")), "question");
+  assert.equal(question?.kind, "question");
+  const nextQuestion = inspectHcCodexPrompt(snapshot(read("question-next")), "question");
+  assert.equal(nextQuestion?.kind, "question");
+  assert.notEqual(question?.fingerprint, nextQuestion.fingerprint);
+  assert.deepEqual(question, inspectHcCodexPrompt(snapshot(read("question").replace("› 1.", "  1.").replace("  2.", "› 2.")), "question"));
+  assert.equal(inspectHcCodexPrompt(snapshot(read("question")), "permission"), null);
+  assert.equal(inspectHcCodexPrompt({ ...snapshot(read("question")), complete: false }, "question"), null);
+  assert.equal(inspectHcCodexPrompt(snapshot(read("approval")), "permission")?.kind, "permission");
+  assert.equal(inspectHcCodexPrompt(snapshot(read("model")))?.kind, "model");
+  assert.equal(inspectHcCodexPrompt(snapshot(read("model-effort")))?.kind, "effort");
 });
