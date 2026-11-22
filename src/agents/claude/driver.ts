@@ -326,7 +326,7 @@ async function runClaudeSlashCommand(
     if (menu && menu.choices.length > 0) {
       const parsed = driver.parseBlockedPane(paneText);
       if (parsed.kind === "question" || parsed.kind === "permission") {
-        await terminals.openAnswer(agent.ref, parsed.verified).digit(Number(menu.choices[0].num));
+        await terminals.openAnswer(agent.ref, parsed.verified, { allowIdle: true }).digit(Number(menu.choices[0].num));
       }
       continue;
     }

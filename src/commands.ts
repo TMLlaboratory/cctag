@@ -4,6 +4,7 @@ import {
   ExpectationLost,
   SubmitRefused,
   WriteOutcomeUnknown,
+  type AgentInfo,
 } from "./backend/types.js";
 import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
@@ -314,6 +315,8 @@ export class CommandHandler {
             );
           } else if (error instanceof WriteOutcomeUnknown) {
             await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(error));
+          } else if (backend === "herdr-core" && error instanceof ExpectationLost) {
+            await this.notifier.postReply(channel, threadTs, error.userMessage ?? EXPECTATION_LOST_REPLY);
           } else {
             throw error;
           }
@@ -363,7 +366,7 @@ export class CommandHandler {
         );
         return;
       }
-      await this.runModeCommand(channel, threadTs, pairing.paneId, driver, target);
+      await this.runModeCommand(channel, threadTs, pairing.paneId, agent, driver, target);
       return;
     }
 
@@ -401,7 +404,7 @@ export class CommandHandler {
         // `plan` is just `mode plan` — cycle to plan mode via Shift+Tab
         // rather than the `/plan` slash command, so all four modes share
         // one reliable mechanism.
-        await this.runModeCommand(channel, threadTs, pairing.paneId, driver, "plan");
+        await this.runModeCommand(channel, threadTs, pairing.paneId, agent, driver, "plan");
         return;
       }
       case "connect": {
@@ -582,6 +585,7 @@ export class CommandHandler {
     channel: string,
     threadTs: string,
     paneId: string,
+    observed: AgentInfo,
     driver: AgentDriver,
     target: string,
   ): Promise<void> {
@@ -594,7 +598,7 @@ export class CommandHandler {
       return;
     }
     try {
-      const agent = await this.terminals.get(paneId);
+      const agent = observed.backend === "herdr-core" ? observed : await this.terminals.get(paneId);
       if (!agent) {
         await this.notifier.postReply(channel, threadTs, "⚠️ インスタンスが見つかりません。");
         return;
@@ -635,6 +639,9 @@ export class CommandHandler {
           `⚠️ モード「${target}」に切り替えられませんでした（このバージョンの ${driver.displayName} には無い可能性があります）。元のモードに戻しました。現在: ${current ?? "不明"}`,
         );
       }
+    } catch (error) {
+      if (observed.backend !== "herdr-core" || !(error instanceof ExpectationLost)) throw error;
+      await this.notifier.postReply(channel, threadTs, error.userMessage ?? EXPECTATION_LOST_REPLY);
     } finally {
       lease.release();
     }

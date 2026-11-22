@@ -2405,6 +2405,7 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
   let status: AgentStatus = "working";
   let turn = 1;
   let promptKind: "question" | "input" | "trust" = "question";
+  let fingerprint: string | undefined;
   const terminals = fakeTerminals(() => ({
     ...fakeAgent(),
     backend: "herdr-core",
@@ -2417,18 +2418,24 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
   }));
   terminals.read = async () => ({
     text: "PRIVATE PANE TEXT", complete: true, draft: null,
-    observedPrompt: { kind: promptKind, fingerprint: promptKind, turn },
+    observedPrompt: { kind: promptKind, fingerprint: fingerprint ?? promptKind, turn },
   });
   const watcher = new BackgroundWatcher("herdr-core", terminals, store, idleEngine, notifier, 10, 10);
   try {
     await watcher["tick"]();
     status = "blocked";
     await watcher["tick"]();
+    status = "working";
+    await watcher["tick"]();
+    status = "blocked";
     await watcher["tick"]();
     turn++;
     await watcher["tick"]();
     status = "done";
     await watcher["tick"]();
+    status = "idle";
+    await watcher["tick"]();
+    status = "done";
     await watcher["tick"]();
     turn++;
     await watcher["tick"]();
@@ -2442,13 +2449,37 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
     promptKind = "input";
     await watcher["tick"]();
     assert.match(replies[5], /入力を待っています。端末で答えて/);
+    promptKind = "question";
+    await watcher["tick"]();
+    assert.equal(replies.length, 6);
+    fingerprint = "next-question";
+    await watcher["tick"]();
+    fingerprint = undefined;
+    await watcher["tick"]();
+    assert.equal(replies.length, 7);
+    assert.match(replies[6], /質問を待っています/);
     status = "unknown";
     promptKind = "trust";
     await watcher["tick"]();
     await watcher["tick"]();
-    assert.equal(replies.length, 7);
-    assert.match(replies[6], /フォルダの信頼確認を待っています。端末で答えて/);
+    assert.equal(replies.length, 8);
+    assert.match(replies[7], /フォルダの信頼確認を待っています。端末で答えて/);
     assert.doesNotMatch(replies.join(), /PRIVATE PANE TEXT/);
+    turn++;
+    status = "idle";
+    await watcher["tick"]();
+    status = "working";
+    await watcher["tick"]();
+    status = "done";
+    await watcher["tick"]();
+    status = "idle";
+    await watcher["tick"]();
+    status = "done";
+    await watcher["tick"]();
+    assert.equal(replies.length, 11);
+    assert.doesNotMatch(replies[8], /作業中|完了/);
+    assert.match(replies[9], /作業中/);
+    assert.match(replies[10], /完了/);
     assert.equal(store.list().length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });

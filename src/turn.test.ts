@@ -6,6 +6,7 @@ import type { AnswerChannel, Terminals } from "./backend/index.js";
 import {
   ExpectationLost,
   SubmitRefused,
+  UnknownTarget,
   UNSENDABLE_TEXT_MESSAGE,
   WriteOutcomeUnknown,
   type AgentInfo,
@@ -1953,10 +1954,10 @@ test("outbox ownership checks persisted hc pairings hidden from the picker", asy
   const alias = join(cwd, "alias");
   symlinkSync(cwd, alias, "dir");
   const pairing = fakePairing();
-  const hidden = { ...pairing, key: "C2:2.1", paneId: "hc:t2", cwd: otherCwd };
+  const hiddenHc = { ...pairing, key: "C2:2.1", paneId: "hc:t2", cwd: otherCwd };
   const codex: AgentInfo = {
     ...fakeAgent("idle", "herdr-core"),
-    ref: { target: hidden.paneId, pid: null, processStartedAt: null },
+    ref: { target: hiddenHc.paneId, pid: null, processStartedAt: null },
     agent: "codex",
     sessionId: null,
     cwd: otherCwd,
@@ -1968,19 +1969,29 @@ test("outbox ownership checks persisted hc pairings hidden from the picker", asy
     { name: "unknown foreground cwd", agent: { ...codex, cwd: "" }, live: true, uploads: [] },
     { name: "live without agent", agent: null, live: true, uploads: [] },
     { name: "lookup failed", agent: null, live: true, lookupFailed: true, uploads: [] },
+    { name: "hc backend disabled", agent: null, live: true, disabled: true, uploads: ["artifact.txt"] },
     { name: "disjoint cwd", agent: codex, live: true, uploads: ["artifact.txt"] },
     { name: "gone", agent: null, live: false, uploads: ["artifact.txt"] },
+    { name: "disabled backend", target: "orca:disabled", agent: null, live: true, lookupFailed: true, uploads: ["artifact.txt"] },
+    { name: "lost omp binding", target: "w1:p2", agent: null, live: true, uploads: ["artifact.txt"] },
+    { name: "listed non-hc collision", target: "w1:p2", listed: true, agent: null, live: true, uploads: [] },
   ]) {
     await t.test(scenario.name, async () => {
+      const hidden = { ...hiddenHc, paneId: scenario.target ?? hiddenHc.paneId };
+      const lookedUp: string[] = [];
       const uploads: string[] = [];
       const { notifier, posts } = fakeNotifier();
       notifier.uploadFile = async (_channel, _thread, args) => { uploads.push(args.filename); };
       const terminals = fakeBackend(() => "idle", () => "", {
         async list() {
-          return { agents: [{ ...fakeAgent("idle"), cwd }], failures: [], complete: true, notices: [] };
+          const agent = { ...fakeAgent("idle"), cwd };
+          const agents = scenario.listed ? [agent, { ...agent, ref: { ...agent.ref, target: hidden.paneId } }] : [agent];
+          return { agents, failures: [], complete: true, notices: [] };
         },
         async get(target) {
+          lookedUp.push(target);
           assert.equal(target, hidden.paneId);
+          if (scenario.disabled) throw new UnknownTarget("backend disabled");
           if (scenario.lookupFailed) throw new Error("backend unavailable");
           return scenario.agent;
         },
@@ -1995,6 +2006,7 @@ test("outbox ownership checks persisted hc pairings hidden from the picker", asy
         { list: () => [pairing, hidden] },
       );
       await engine.uploadOutboxAdditions(pairing, cwd, {}, []);
+      assert.deepEqual(lookedUp, scenario.target ? [] : [hidden.paneId]);
       assert.deepEqual(uploads, scenario.uploads);
       assert.equal(posts.some((post) => post.includes("自動添付を見送りました")), uploads.length === 0);
     });

@@ -117,7 +117,7 @@ const AGENTLESS_GRACE_MS = 5 * 60_000;
 
 export class BackgroundWatcher {
   private watches = new Map<string, WatchState>(); // key: paneId
-  private hcCodexNotices = new Map<string, { turn?: number; kind: string; fingerprint?: string }>();
+  private hcCodexNotices = new Map<string, { turn?: number; keys: Set<string> }>();
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
@@ -596,19 +596,25 @@ export class BackgroundWatcher {
     const status = classifiedStatus(agent.evidence);
     const previous = this.hcCodexNotices.get(pairing.key);
     let turn = agent.turn;
-    let kind: string = status;
-    let fingerprint: string | undefined;
+    let key: string = status;
     let text = HC_CODEX_UNBOUND_NOTICE;
     if (status === "blocked" || status === "unknown") {
       const screen = await this.terminals.read(pairing.paneId, 0, "screen").catch(() => null);
       const prompt = screen?.observedPrompt;
       if (!prompt || prompt.kind === "model" || prompt.kind === "effort") {
-        if (screen?.codexTrustExited && previous?.kind === "trust") this.hcCodexNotices.delete(pairing.key);
+        if (screen?.codexTrustExited) previous?.keys.delete("trust");
         return;
       }
-      ({ kind, turn, fingerprint } = prompt);
-      if (kind === "input" && previous?.turn === turn &&
-          (previous?.kind === "question" || previous?.kind === "permission")) return;
+      turn = prompt.turn;
+      key = prompt.kind === "input" || prompt.kind === "trust" ? prompt.kind : `prompt:${prompt.fingerprint}`;
+      if (previous && previous.turn === turn) {
+        const hasVerifiedPrompt = [...previous.keys].some((seen) => seen.startsWith("prompt:"));
+        if (key === "input" && hasVerifiedPrompt) return;
+        if (key.startsWith("prompt:") && !hasVerifiedPrompt && previous.keys.has("input")) {
+          previous.keys.add(key);
+          return;
+        }
+      }
       const label = prompt.kind === "question" ? "質問" : prompt.kind === "permission" ? "承認" :
         prompt.kind === "trust" ? "フォルダの信頼確認" : "入力";
       text = `⚠️ herdr-core 上の Codex が${label}を待っています。端末で答えてください。`;
@@ -617,9 +623,11 @@ export class BackgroundWatcher {
     } else if (status === "done") {
       text = `✅ herdr-core 上の Codex のターンが完了しました。\n${text}`;
     }
-    if (previous && previous.turn === turn && previous.kind === kind && previous.fingerprint === fingerprint) return;
+    const keys = previous && previous.turn === turn ? previous.keys : new Set<string>();
+    if (keys.has(key) || (key === "idle" && keys.has("done"))) return;
     await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", text);
-    this.hcCodexNotices.set(pairing.key, { turn, kind, fingerprint });
+    keys.add(key);
+    this.hcCodexNotices.set(pairing.key, { turn, keys });
   }
 
   private async noteOmpBindingLoss(pairing: Pairing, state: WatchState): Promise<void> {

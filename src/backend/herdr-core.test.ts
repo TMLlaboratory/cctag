@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { setImmediate as nextTask, setTimeout as delay } from "node:timers/promises";
 import { WrittenFileTracker } from "../attachments.js";
 import type { Notifier } from "../notifier.js";
 import type { Pairing } from "../pairing.js";
@@ -15,7 +15,7 @@ import { agentPickerBlocks } from "../slack/blocks.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import type { SubmitContext } from "./index.js";
-import type { VerifiedPrompt } from "./prompt.js";
+import type { BlindPermissionPrompt, VerifiedPrompt } from "./prompt.js";
 import { BackendUnavailable, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
 
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
@@ -40,6 +40,7 @@ interface FakeTerminal {
   name?: string | null;
   turn?: number;
   title?: string;
+  getError?: boolean;
 }
 
 interface Fake {
@@ -78,7 +79,9 @@ function fakeHc(
   mkdirSync(sessionsDir);
   for (const t of terminals) {
     if (t.pid !== undefined) {
-      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({ pid: t.pid, sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}` }));
+      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({
+        pid: t.pid, sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}`, startedAt: t.pid * 1000,
+      }));
     }
   }
   const script = `#!${process.execPath}
@@ -100,6 +103,7 @@ if (args[0] === "ls") {
   const file = ${JSON.stringify(terminalOverride)};
   const t = { ...find(ops[0]), ...(fs.existsSync(${JSON.stringify(readCount)}) ? afterRead : {}),
     ...(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {}) };
+  if (t.getError) fail("unavailable", "terminal unavailable", 5);
   out({
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
     foreground: t.pid === undefined ? null : { pid: t.pid, cwd: t.foregroundCwd === undefined ? "/moved/here" : t.foregroundCwd, name: t.foregroundName ?? "claude" },
@@ -175,7 +179,7 @@ const PAIRING: Pairing = {
 };
 
 function ref(address: string): AgentRef {
-  return { target: `hc:${address}`, pid: null, processStartedAt: null };
+  return { target: `hc:${address}`, pid: 101, sessionId: "session-101", processStartedAt: 101_000 };
 }
 
 function verified(screen: string): VerifiedPrompt {
@@ -186,7 +190,7 @@ function verified(screen: string): VerifiedPrompt {
 
 function testEngine(backend: HcBackend, notifier: Notifier): TurnEngine {
   return new TurnEngine(backend, notifier, {
-    turnTimeoutMs: 60_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 },
+    turnTimeoutMs: 60_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 2 },
   }, { list: () => [PAIRING] });
 }
 
@@ -199,14 +203,25 @@ test("an adopted hc turn reads after a status update and never publishes the rep
     await t.test(scenario.name, async () => {
       await withCore([CLAUDE], { screens: [scenario.screen] }, async (backend, fake) => {
         const messages: { text: string; blocks?: unknown[] }[] = [];
+        const uploads: string[] = [];
+        const writes = new WrittenFileTracker();
+        if (scenario.replace) {
+          const path = join(fake.sessionsDir, "partial.txt");
+          writeFileSync(path, "partial attachment");
+          writes.ingest({
+            sendFileRequests: [{ toolUseId: "file", paths: [path] }],
+            toolOutcomes: [{ toolUseId: "file", ok: true }],
+          });
+        }
         let seen: () => void;
         const notice = new Promise<void>((resolve) => { seen = resolve; });
         const record = (text: string, blocks?: unknown[]) => {
           messages.push({ text, blocks });
-          if (scenario.notice.test(text)) seen();
+          if (!scenario.replace && scenario.notice.test(text)) seen();
         };
         const notifier: Notifier = {
           async postReply(_c, _t, text) { record(text); },
+          async uploadFile(_c, _t, file) { uploads.push(file.filename); seen(); },
           async postMessage(_c, _t, text, blocks) {
             record(text, blocks);
             return {
@@ -214,6 +229,9 @@ test("an adopted hc turn reads after a status update and never publishes the rep
                 if (scenario.replace && update.includes("実行中")) {
                   await delay(5);
                   fake.setTerminal({ agent: "codex", foregroundName: "codex", status: "idle" });
+                  const outbox = join(fake.sessionsDir, ".cctag", "outbox");
+                  mkdirSync(outbox, { recursive: true });
+                  writeFileSync(join(outbox, "replacement.txt"), "replacement attachment");
                 }
                 record(update, nextBlocks);
               },
@@ -224,15 +242,22 @@ test("an adopted hc turn reads after a status update and never publishes the rep
         try {
           assert.equal(await engine.adoptBlockedTerminal(PAIRING, {
             backend: "herdr-core", driver: claudeDriver, sessionId: "session-101", transcriptPath: "",
-            offset: 0, collected: [], paneId: PAIRING.paneId, ref: ref("t1"), cwd: PAIRING.cwd,
-            outboxBaseline: {}, writes: new WrittenFileTracker(),
+            offset: 0, collected: scenario.replace ? ["Partial Claude response"] : [],
+            paneId: PAIRING.paneId, ref: ref("t1"), cwd: fake.sessionsDir,
+            outboxBaseline: {}, writes,
           }), true);
           await Promise.race([notice, delay(4_000, undefined, { ref: false }).then(() => assert.fail("expected notice"))]);
+          await nextTask();
           const calls = fake.calls().map(({ args }) => args);
           assert.deepEqual(calls.map(([command]) => command), scenario.replace ? ["get"] : ["get", "read"]);
           if (!scenario.replace) assert.deepEqual(calls[1], ["read", "--json", "--", "t1"]);
           const output = JSON.stringify(messages);
           assert.doesNotMatch(output, /PRIVATE SCREEN/);
+          if (scenario.replace) {
+            assert.match(output, scenario.notice);
+            assert.match(output, /Partial Claude response/);
+            assert.deepEqual(uploads, ["partial.txt"]);
+          }
           if (scenario.screen === QUESTION_SCREEN.text) assert.match(output, /action_id/);
           else assert.doesNotMatch(output, /action_id/);
         } finally {
@@ -296,6 +321,46 @@ test("a session-backed status-null Claude startup is checked before submit", asy
   });
 });
 
+test("an unreadable hc poll preserves the posted question until there is evidence it changed", async () => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text, "PRIVATE SCREEN", QUESTION_SCREEN.text] }, async (backend) => {
+    const questions: (unknown[] | undefined)[] = [];
+    const questionUpdates: string[] = [];
+    const engine = testEngine(backend, {
+      async postReply() {},
+      async postMessage(_c, _t, text, blocks) {
+        if (text.startsWith("❓")) {
+          questions.push(blocks);
+          return { async update(update) { questionUpdates.push(update); } };
+        }
+        return { async update() {} };
+      },
+    });
+    const read = backend.read.bind(backend);
+    let count = 0;
+    let observed: () => void;
+    const thirdRead = new Promise<void>((resolve) => { observed = resolve; });
+    backend.read = async (...args) => {
+      const screen = await read(...args);
+      if (++count === 3) observed();
+      return screen;
+    };
+    try {
+      assert.equal(await engine.adoptBlockedTerminal(PAIRING, {
+        backend: "herdr-core", driver: claudeDriver, sessionId: "session-101", transcriptPath: "",
+        offset: 0, collected: [], paneId: PAIRING.paneId, ref: ref("t1"), cwd: PAIRING.cwd,
+        outboxBaseline: {}, writes: new WrittenFileTracker(),
+      }), true);
+      await Promise.race([thirdRead, delay(20_000, undefined, { ref: false }).then(() => assert.fail("expected three polls"))]);
+      await nextTask();
+      assert.equal(questions.length, 1);
+      assert.match(JSON.stringify(questions), /action_id/);
+      assert.deepEqual(questionUpdates, []);
+    } finally {
+      engine.abortAll();
+    }
+  });
+});
+
 test("lists local Claude Code terminals with the session id and cwd Claude Code recorded", async () => {
   await withCore(
     [
@@ -335,6 +400,21 @@ test("a terminal whose Claude Code has no session record is not offered", async 
     assert.deepEqual((await backend.list()).agents, []);
     assert.equal(await backend.get("hc:t1"), null);
     assert.equal(await backend.exists("hc:t1"), true);
+  });
+});
+
+test("a failed optional Codex discovery does not make the picker incomplete", async () => {
+  await withCore([CLAUDE, { address: "t2", agent: "zsh", getError: true }], {}, async (backend, fake) => {
+    const listing = await backend.list();
+    assert.equal(listing.complete, true);
+    assert.deepEqual(listing.failures, []);
+    assert.deepEqual(listing.agents.map((agent) => agent.ref.target), ["hc:t1"]);
+    assert.ok(fake.calls().some(({ args }) => args[0] === "get" && args.at(-1) === "t2"));
+
+    fake.setTerminal({ getError: true });
+    const failed = await backend.list();
+    assert.equal(failed.complete, false);
+    assert.deepEqual(failed.failures, [{ backend: "herdr-core", reason: "t1: terminal unavailable" }]);
   });
 });
 
@@ -386,7 +466,7 @@ test("hc runs without the Spoke's own HC_TERMINAL_ID, HC_SCOPE or HC_TERMINAL_SO
 });
 
 test("a message that starts with a hyphen is sent as text, not read as a flag", async () => {
-  await withCore([{ address: "t1" }], {}, async (backend, fake) => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
     await backend.submit(ref("t1"), "--force", CTX);
     await backend.submit(ref("t1"), "-1 for that", CTX);
     assert.deepEqual(
@@ -400,19 +480,19 @@ test("a message that starts with a hyphen is sent as text, not read as a flag", 
 });
 
 test("submit reports whether the agent started a turn", async () => {
-  await withCore([{ address: "t1" }], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
+  await withCore([CLAUDE], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
     assert.deepEqual(await backend.submit(ref("t1"), "go", CTX), { status: "started", draftStashed: false });
   });
-  await withCore([{ address: "t1" }], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
+  await withCore([CLAUDE], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
     assert.deepEqual(await backend.submit(ref("t1"), "/model", CTX), { status: "accepted", draftStashed: false });
   });
 });
 
 test("submit turns hc's refusal of a blocked terminal into a gate refusal, and other failures into an unknown outcome", async () => {
-  await withCore([{ address: "t1" }], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
+  await withCore([CLAUDE], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
     await assert.rejects(backend.submit(ref("t1"), "go", CTX), (err: unknown) => err instanceof SubmitRefused && err.reason === "gate");
   });
-  await withCore([{ address: "t1" }], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
+  await withCore([CLAUDE], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
     await assert.rejects(backend.submit(ref("t1"), "go", CTX), WriteOutcomeUnknown);
   });
 });
@@ -543,7 +623,7 @@ test("an answer checks the prompt is still on screen, then presses keys by hc's 
       ["keys", "--json", "--", "t1", "enter"],
     ]);
     assert.equal(fake.calls().filter((call) => call.args[0] === "read").length, 1);
-    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "get", "keys", "get", "keys", "get", "keys"]);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "keys", "get", "keys", "get", "keys"]);
   });
 });
 
@@ -551,7 +631,7 @@ test("a matching answer fingerprint on an incomplete hc screen authorizes no inp
   await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text], incomplete: true }, async (backend, fake) => {
     const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
     await assert.rejects(channel.digit(1), ExpectationLost);
-    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read"]);
   });
 });
 
@@ -587,9 +667,9 @@ test("an answer is refused when the prompt on screen is no longer the verified o
 });
 
 test("Shift+Tab and blind y/n answers use hc's key names", async () => {
-  await withCore([{ address: "t1" }], {}, async (backend, fake) => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
     await backend.openComposer(ref("t1"), claudeDriver).backTab();
-    await backend.openBlind(ref("t1"), { form: "key-then-enter" } as never).answer("y");
+    await backend.openBlind(ref("t1"), { driver: claudeDriver, form: "key-then-enter" } as BlindPermissionPrompt).answer("y");
     assert.deepEqual(
       fake.calls().filter((call) => call.args[0] === "keys").map((call) => call.args),
       [
@@ -654,12 +734,7 @@ test("hc Codex stays live and unbound, and every backend input path refuses", as
     assert.equal(await backend.exists("hc:t1"), true);
     assert.equal((await backend.list()).agents.length, 0);
     assert.match((await backend.list()).notices.join(), /現在の会話/);
-    const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
     await assert.rejects(backend.submit(ref("t1"), "try to send", CTX), SubmitRefused);
-    await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), ExpectationLost);
-    const answer = backend.openAnswer(ref("t1"), prompt);
-    await assert.rejects(answer.move("Down", 1), ExpectationLost);
-    await assert.rejects(answer.confirm("Amber"), ExpectationLost);
     await assert.rejects(backend.openBlind(ref("t1"), { driver: claudeDriver, form: "key-confirms" } as never).answer("y"), ExpectationLost);
     await assert.rejects(backend.openComposer(ref("t1"), claudeDriver).backTab(), ExpectationLost);
     const model = parseCodexModelMenuPrompt(MODEL_SCREEN);
@@ -686,9 +761,107 @@ test("a Codex foreground executable triggers refusal without app metadata", asyn
       assert.match(JSON.stringify(agentPickerBlocks(listing, ["herdr-core"])), /現在の会話/);
       assert.equal((await backend.read("hc:t1", 200, "history")).text, "");
       await assert.rejects(backend.submit(ref("t1"), "try to send", CTX), SubmitRefused);
-      const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
-      await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), ExpectationLost);
       assert.deepEqual(fake.calls().filter(({ args }) => args[0] === "send" || args[0] === "keys"), []);
     },
   );
+});
+
+test("hc checks the current foreground after verifying the answer fingerprint", async (t) => {
+  for (const scenario of [
+    { name: "Codex app report", terminal: { agent: "codex" }, notice: /Codex/ },
+    { name: "Codex executable", terminal: { status: null, foregroundName: "/opt/homebrew/bin/codex" }, notice: /Codex/ },
+    { name: "shell with stale Claude app report", terminal: { foregroundName: "zsh" }, notice: /前景で Claude Code/ },
+    { name: "unknown executable", terminal: { status: null, foregroundName: "env" }, notice: /前景で Claude Code/ },
+    { name: "another Claude process", terminal: { pid: 202 }, notice: /セッションが切り替わりました/ },
+  ]) {
+    await t.test(scenario.name, async () => {
+      await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+        writeFileSync(join(fake.sessionsDir, "202.json"), JSON.stringify({
+          pid: 202, sessionId: "session-202", cwd: PAIRING.cwd, startedAt: 202_000,
+        }));
+        const agent = await backend.get("hc:t1");
+        assert.ok(agent);
+        assert.deepEqual(agent.ref, ref("t1"));
+        const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
+        const driver = {
+          ...claudeDriver,
+          parseBlockedPane(text: string) {
+            const parsed = claudeDriver.parseBlockedPane(text);
+            assert.equal(verified(text).fingerprint, prompt.fingerprint);
+            fake.setTerminal(scenario.terminal);
+            return parsed;
+          },
+        };
+        const stale = (error: unknown) => error instanceof ExpectationLost &&
+          scenario.notice.test(error.userMessage ?? "");
+        await assert.rejects(backend.openAnswer(agent.ref, { ...prompt, driver }).digit(1), stale);
+        assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "get", "read", "get"]);
+        await assert.rejects(backend.openComposer(ref("t1"), claudeDriver).backTab(), stale);
+        const blind = { driver: claudeDriver, form: "key-then-enter" } as BlindPermissionPrompt;
+        await assert.rejects(backend.openBlind(ref("t1"), blind).answer("y"), stale);
+        await assert.rejects(backend.submit(ref("t1"), "/model", CTX), (error: unknown) =>
+          error instanceof SubmitRefused && error.reason === "agent-unverified" && scenario.notice.test(error.message));
+        assert.deepEqual(fake.calls().filter(({ args }) => args[0] === "send" || args[0] === "keys"), []);
+      });
+    });
+  }
+});
+
+test("a compound hc answer refuses a later forced send if the blocked state clears", async () => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+    const answer = backend.openAnswer(ref("t1"), verified(PLAN_SCREEN.text));
+    await answer.digit(3, false);
+    await answer.text("feedback");
+    fake.setTerminal({ status: "idle" });
+    await assert.rejects(answer.confirm("Tell Claude what to change"), (error: unknown) =>
+      error instanceof ExpectationLost && /入力待ち状態が変わりました/.test(error.userMessage ?? ""));
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "keys", "get"]);
+  });
+});
+
+test("a compound hc answer refuses a later Enter if Claude's native start time changes", async () => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+    const answer = backend.openAnswer(ref("t1"), verified(PLAN_SCREEN.text));
+    await answer.digit(3, false);
+    writeFileSync(join(fake.sessionsDir, "101.json"), JSON.stringify({
+      pid: 101, sessionId: "session-101", cwd: PAIRING.cwd, startedAt: 102_000,
+    }));
+    await assert.rejects(answer.confirm("Tell Claude what to change"), (error: unknown) =>
+      error instanceof ExpectationLost && /セッションが切り替わりました/.test(error.userMessage ?? ""));
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "keys", "get"]);
+  });
+});
+
+test("a blocked hc answer refuses stale paint when the terminal is already idle", async () => {
+  await withCore([{ ...CLAUDE, status: "idle" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+    const prompt = verified(PLAN_SCREEN.text);
+    await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), (error: unknown) =>
+      error instanceof ExpectationLost && /入力待ち状態が変わりました/.test(error.userMessage ?? ""));
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get"]);
+
+    await backend.openAnswer(ref("t1"), prompt, { allowIdle: true }).digit(1);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "get", "read", "get", "keys"]);
+  });
+});
+
+test("a late switch to another Claude session refuses a Slack turn", async () => {
+  await withCore([{ ...CLAUDE, status: "idle" }], { screens: [CLAUDE_COMPOSER] }, async (backend, fake) => {
+    const updates: string[] = [];
+    const engine = testEngine(backend, {
+      async postReply(_c, _t, text) { assert.fail(text); },
+      async postMessage() {
+        writeFileSync(join(fake.sessionsDir, "101.json"), JSON.stringify({
+          pid: 101, sessionId: "replacement", cwd: "/repo/t1", startedAt: 101_000,
+        }));
+        return { async update(text) { updates.push(text); } };
+      },
+    });
+    try {
+      await engine.startTurn(PAIRING, "U1", "never send this to the replacement session");
+      assert.match(updates.join(), /前景で Claude Code を確認できなかったため、送信しませんでした/);
+      assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "get", "read", "get", "get"]);
+    } finally {
+      engine.abortAll();
+    }
+  });
 });

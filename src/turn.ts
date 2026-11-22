@@ -18,6 +18,7 @@ import {
   ExpectationLost,
   hasUnsendableC0Controls,
   SubmitRefused,
+  UnknownTarget,
   UNSENDABLE_TEXT_MESSAGE,
   WriteOutcomeUnknown,
   WRITE_OUTCOME_UNKNOWN_MESSAGE,
@@ -1288,7 +1289,7 @@ export class TurnEngine {
       }
       if (state.backend === "herdr-core" && agent.agent === "codex") {
         await state.promptHandle?.update(HC_CODEX_UNBOUND_NOTICE, []).catch(() => {});
-        await state.statusHandle.update(HC_CODEX_UNBOUND_NOTICE).catch(() => {});
+        await this.finalize(state, `${HC_CODEX_UNBOUND_NOTICE}\nClaude Code の部分的な出力を報告します。`, "confirmed");
         return;
       }
       const hcBlockedScreen = state.backend === "herdr-core" && agent.agent === "claude" &&
@@ -1482,17 +1483,10 @@ export class TurnEngine {
         const prompt = state.driver.parseBlockedPane(paneText);
         if (state.backend === "herdr-core" &&
             (!screen.complete || (prompt.kind !== "question" && prompt.kind !== "permission"))) {
-          if (state.phase === "awaiting-permission" && !state.pendingPrompt) continue;
-          const handle = state.promptHandle;
-          this.markPromptResolved(state);
+          if (state.promptHandle) continue;
           state.phase = "awaiting-permission";
           const notice = "⚠️ 入力待ちの画面を確認できませんでした。端末で答えてください。";
-          if (handle) {
-            state.promptHandle = handle;
-            await handle.update(notice, []).catch(() => {});
-          } else {
-            state.promptHandle = await this.notifier.postMessage(state.pairing.channel, state.pairing.threadTs ?? "", notice);
-          }
+          state.promptHandle = await this.notifier.postMessage(state.pairing.channel, state.pairing.threadTs ?? "", notice);
           continue;
         }
         const fingerprint = promptFingerprint(prompt);
@@ -1514,7 +1508,9 @@ export class TurnEngine {
           // and the agent went straight into the next. Nothing else reports
           // that, so without this the thread would keep offering buttons for a
           // prompt that is gone and never show the one actually waiting.
-          await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
+          if (state.backend !== "herdr-core" || state.pendingPrompt) {
+            await state.promptHandle?.update(this.answeredAtTerminalText(state), []).catch(() => {});
+          }
           state.pendingQuestionInfo = undefined;
           state.planFeedbackOptionNum = undefined;
           await this.postPrompt(state, paneText, prompt, fingerprint);
@@ -1537,6 +1533,8 @@ export class TurnEngine {
         const resolvedText =
           state.driver.kind === "omp" && state.ompNoticeText
             ? `${state.ompNoticeText}\n\n（ターミナル側で回答済み）`
+            : state.backend === "herdr-core" && !state.pendingPrompt
+              ? "（端末の入力待ちは終了しました）"
             : this.answeredAtTerminalText(state);
         await state.promptHandle?.update(resolvedText, []).catch(() => {});
         this.markPromptResolved(state);
@@ -1555,7 +1553,7 @@ export class TurnEngine {
     }
   }
 
-  private async finalize(state: TurnState, warning?: string): Promise<void> {
+  private async finalize(state: TurnState, warning?: string, files: "all" | "confirmed" = "all"): Promise<void> {
     const paneId = state.paneId;
     // By identity, never by pane id alone: a loop that outlived its turn would
     // otherwise finalize — and post the result of — whichever turn is registered
@@ -1570,13 +1568,13 @@ export class TurnEngine {
     // says it directly.
     this.turns.delete(paneId);
     try {
-      await this.reportTurnResult(paneId, state, warning);
+      await this.reportTurnResult(paneId, state, warning, files);
     } finally {
       state.lease.release();
     }
   }
 
-  private async reportTurnResult(paneId: string, state: TurnState, warning?: string): Promise<void> {
+  private async reportTurnResult(paneId: string, state: TurnState, warning: string | undefined, files: "all" | "confirmed"): Promise<void> {
     const elapsed = Math.round((Date.now() - state.startedAt) / 1000);
     const text = state.collected.join("\n\n").trim();
 
@@ -1614,23 +1612,12 @@ export class TurnEngine {
     // After the status update, not before: uploading several MB can take a
     // while, and the status line is an already-posted message being edited in
     // place, so settling it early doesn't reorder anything in the thread.
-    await this.attachOutboundFiles(state).catch((err) =>
+    await this.uploadAttachments(state.pairing, state.cwd, {
+      outboxBaseline: files === "all" ? state.outboxBaseline : undefined,
+      confirmed: state.writes.paths(),
+    }).catch((err) =>
       console.error(`[turn ${paneId}] outbound attach failed:`, err),
     );
-  }
-
-  /**
-   * Uploads files the turn produced that a Slack reader can't get from the
-   * text: anything the agent dropped in `<cwd>/.cctag/outbox` (an explicit
-   * "send this", so any file type goes), plus media/PDF files its transcript
-   * shows it writing (which catches the common case without the agent needing
-   * to know cctag exists).
-   */
-  private async attachOutboundFiles(state: TurnState): Promise<void> {
-    await this.uploadAttachments(state.pairing, state.cwd, {
-      outboxBaseline: state.outboxBaseline,
-      confirmed: state.writes.paths(),
-    });
   }
 
   /**
@@ -1682,13 +1669,15 @@ export class TurnEngine {
       const listedCwd = cwdByPane.get(other.paneId);
       let sharesCwd = listedCwd === cwd;
       if (!listedCwd) {
+        if (backendForTarget(other.paneId) !== "herdr-core") continue;
         // The picker can omit a live pane, and the stored cwd may predate a terminal-side switch.
         try {
           const live = await this.terminals.get(other.paneId);
           if (!live && !(await this.terminals.exists(other.paneId))) continue;
           if (!live || !isAbsolute(live.cwd)) throw new Error("live cwd unavailable");
           sharesCwd = live.cwd === cwd || (await realpath(live.cwd)) === (await realpath(cwd));
-        } catch {
+        } catch (error) {
+          if (error instanceof UnknownTarget) continue;
           return { sole: false, reason: "他の接続先の作業ディレクトリを確認できず、宛先スレッドを特定できませんでした" };
         }
       }
@@ -1702,7 +1691,7 @@ export class TurnEngine {
   private async uploadAttachments(
     pairing: Pairing,
     cwd: string,
-    sources: { outboxBaseline: DirSnapshot; confirmed: OutboundCandidate[] },
+    sources: { outboxBaseline?: DirSnapshot; confirmed: OutboundCandidate[] },
   ): Promise<void> {
     const paneId = pairing.paneId;
     const upload = this.notifier.uploadFile?.bind(this.notifier);
@@ -1724,7 +1713,9 @@ export class TurnEngine {
     // No extension filtering on either route: both are explicit "deliver this"
     // now that intent is no longer inferred from writes, so a .csv or .xlsx
     // goes through like anything else.
-    const fromOutbox: OutboundCandidate[] = outboxAdditions(cwd, sources.outboxBaseline).map((path) => ({ path }));
+    const fromOutbox = sources.outboxBaseline
+      ? outboxAdditions(cwd, sources.outboxBaseline).map((path) => ({ path }))
+      : [];
     const fromTranscript = sources.confirmed;
 
     let candidates = fromTranscript;

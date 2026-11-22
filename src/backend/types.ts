@@ -85,6 +85,7 @@ export class SubmitRefused extends Error {
       | "gate"
       | "incomplete-screen"
       | "agent-changed"
+      | "agent-unverified"
       | "cancelled"
       | "unsafe-text",
     message: string,

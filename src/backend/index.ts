@@ -48,7 +48,7 @@ export interface Terminals {
   exists(target: string): Promise<boolean>;
   read(target: string, lines: number, region: "screen" | "history", observation?: AgentInfo): Promise<ScreenSnapshot>;
   submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome>;
-  openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel;
+  openAnswer(ref: AgentRef, prompt: VerifiedPrompt, options?: { allowIdle?: boolean }): AnswerChannel;
   openModelAnswer(ref: AgentRef, prompt: VerifiedModelMenuPrompt): ModelAnswerChannel;
   openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel;
   openComposer(ref: AgentRef, driver: AgentDriver): ComposerChannel;
@@ -133,8 +133,8 @@ export function createTerminals(backends: TerminalBackends): Terminals {
     submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
       return backendFor(ref.target).submit(ref, text, ctx);
     },
-    openAnswer(ref: AgentRef, prompt: VerifiedPrompt) {
-      return backendFor(ref.target).openAnswer(ref, prompt);
+    openAnswer(ref: AgentRef, prompt: VerifiedPrompt, options?: { allowIdle?: boolean }) {
+      return backendFor(ref.target).openAnswer(ref, prompt, options);
     },
     openModelAnswer(ref: AgentRef, prompt: VerifiedModelMenuPrompt) {
       return backendFor(ref.target).openModelAnswer(ref, prompt);
