@@ -372,6 +372,21 @@ test("core replaces a restored suggestion only if its style still matches before
   }
 });
 
+test("core sends a slash command or an image prompt from a verified suggestion", async () => {
+  const suggestion = PAINTS.suggestion!;
+  const probed = PAINTS["suggestion-x"]!;
+  const restored = PAINTS["suggestion-backspace"]!;
+  for (const [text, hasImages] of [["/model haiku", false], ["go", true]] as const) {
+    await withCore([SUBMIT_TERMINAL], {
+      paints: [suggestion, suggestion, probed, probed, restored, restored],
+    }, async (backend, fake) => {
+      assert.deepEqual(await backend.submit(await submitRef(backend), text, { ...CTX, hasImages }),
+        { status: "started", draftStashed: false });
+      assert.deepEqual(writes(fake).map((args) => args.slice(4)), [["x"], ["backspace"], [text]]);
+    });
+  }
+});
+
 test("core rechecks a middle caret, stashes and sends once without claiming exact restoration", async () => {
   const preStash = STASH_PAINTS.slice(0, -1);
   await withCore([SUBMIT_TERMINAL], {
@@ -434,18 +449,26 @@ test("core refuses a trailing space exposed by the final probe and reverses its 
   });
 });
 
-test("core refuses a partial paint, whitespace-only draft, existing stash, model draft or image draft without input", async () => {
-  for (const [paint, text, hasImages, reason] of [
-    [PAINTS.empty!.slice(0, -8), "go", false, "incomplete-screen"],
-    [PAINTS.space!, "go", false, "incomplete-screen"],
-    [PAINTS.stashed!, "go", false, "existing-stash"],
-    [PAINTS["caret-end"]!, "/model haiku", false, "draft"],
-    [PAINTS["caret-end"]!, "go", true, "draft"],
+test("core refuses a partial paint, whitespace-only draft or existing stash without input", async () => {
+  for (const [paint, reason] of [
+    [PAINTS.empty!.slice(0, -8), "incomplete-screen"],
+    [PAINTS.space!, "incomplete-screen"],
+    [PAINTS.stashed!, "existing-stash"],
   ] as const) {
     await withCore([SUBMIT_TERMINAL], { paints: [paint] }, async (backend, fake) => {
-      await assert.rejects(backend.submit(await submitRef(backend), text, { ...CTX, hasImages }),
+      await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
         (error) => error instanceof SubmitRefused && error.reason === reason);
       assert.deepEqual(writes(fake), []);
+    });
+  }
+});
+
+test("core reverses the probe and refuses a slash command or image prompt with a typed draft", async () => {
+  for (const [text, hasImages] of [["/model haiku", false], ["go", true]] as const) {
+    await withCore([SUBMIT_TERMINAL], { paints: STASH_PAINTS.slice(0, 5) }, async (backend, fake) => {
+      await assert.rejects(backend.submit(await submitRef(backend), text, { ...CTX, hasImages }),
+        (error) => error instanceof SubmitRefused && error.reason === "draft" && error.composer.probe === null);
+      assert.deepEqual(writes(fake).map((args) => args.slice(4)), [["x"], ["backspace"]]);
     });
   }
 });

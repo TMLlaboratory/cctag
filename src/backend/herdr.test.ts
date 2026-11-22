@@ -58,11 +58,12 @@ if (args[0] === "status" && args[1] === "server") {
   process.stdout.write(JSON.stringify({ result: { pane: { terminal_id: "raw-terminal-id", scroll: { offset_from_bottom: 0 } } } }));
 } else if (args[0] === "pane" && args[1] === "process-info" && socket) {
   const pid = ${process.pid};
+  const processes = [{ pid, name: "claude" }];
   if (fs.readFileSync(${JSON.stringify(callsFile)}, "utf8").includes('"agent","prompt",${JSON.stringify(paneId)},"typed message"')) {
-    process.exit(1);
+    processes.push({ pid: pid + 1, name: "caffeinate" });
   }
   process.stdout.write(JSON.stringify({ result: { process_info: {
-    pane_id: ${JSON.stringify(paneId)}, foreground_process_group_id: pid, foreground_processes: [{ pid, name: "claude" }]
+    pane_id: ${JSON.stringify(paneId)}, foreground_process_group_id: pid, foreground_processes: processes
   } } }));
 } else if (args[0] === "agent" && args[1] === "list") {
   process.stdout.write(JSON.stringify({ result: { agents: [agent("working")] } }));
@@ -280,15 +281,16 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
   const socketPath = join(dir, "herdr.sock");
   assert.equal(HERDR_PAINTS["review-home-empty"], HERDR_PAINTS["review-home-space"]);
   const probeSuggestion = ["suggestion", "suggestion", "suggestion-x", "suggestion-x", "suggestion-backspace"];
+  const probeTyped = ["typed", "typed", "typed-x", "typed-x", "typed-backspace"];
   const paints = [
     "review-home-empty", "review-home-empty", "review-home-empty",
     "review-home-empty", "review-home-empty", "review-empty-probed", "review-empty-probed",
     "review-empty-restored", "review-empty-restored",
     "review-home-space", "review-home-space", "review-hidden-probed", "review-hidden-probed", "review-hidden-restored",
-    "suggestion",
+    ...probeTyped,
     ...probeSuggestion, "suggestion-backspace",
     ...probeSuggestion, "typed",
-    "typed", "typed", "typed-x", "typed-x", "typed-backspace", "typed-backspace",
+    ...probeTyped, "typed-backspace",
     "review-stashed", "review-stashed", "review-stashed-probed", "review-stashed-probed", "review-stashed", "review-stashed",
     "empty", "empty",
   ];
@@ -336,7 +338,7 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
       (error) => error instanceof SubmitRefused && error.reason === "draft" && error.composer.probe === null);
     await assert.rejects(backend.submit(agent.ref, "/model haiku", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "draft");
-    assert.deepEqual(await backend.submit(agent.ref, "replace suggestion", ctx), { status: "accepted", draftStashed: false });
+    assert.deepEqual(await backend.submit(agent.ref, "/model haiku", ctx), { status: "accepted", draftStashed: false });
     await assert.rejects(backend.submit(agent.ref, "changed suggestion", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "draft");
     assert.deepEqual(await backend.submit(agent.ref, "typed message", ctx), {
@@ -344,7 +346,7 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
     });
     await assert.rejects(backend.submit(agent.ref, "blocked", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "incomplete-screen");
-    await assert.rejects(backend.submit(agent.ref, "unverified foreground", ctx),
+    await assert.rejects(backend.submit(agent.ref, "foreground with caffeinate", ctx),
       (error) => error instanceof SubmitRefused && error.reason === "foreground-unverified");
     assert.deepEqual(cli.calls().filter((args) => ["prompt", "send-keys"].includes(args[1]!)), [
       ["pane", "send-keys", REF.target, "right", "x"],
@@ -354,7 +356,9 @@ test("legacy Claude pins the socket, checks for hidden space, and replaces a ver
       ["pane", "send-keys", REF.target, "backspace", "left"],
       ["pane", "send-keys", REF.target, "x"],
       ["pane", "send-keys", REF.target, "backspace"],
-      ["agent", "prompt", REF.target, "replace suggestion"],
+      ["pane", "send-keys", REF.target, "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["agent", "prompt", REF.target, "/model haiku"],
       ["pane", "send-keys", REF.target, "x"],
       ["pane", "send-keys", REF.target, "backspace"],
       ["pane", "send-keys", REF.target, "x"],

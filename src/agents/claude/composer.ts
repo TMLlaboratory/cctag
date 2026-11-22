@@ -15,10 +15,9 @@ const RESET = "\x1b[0m";
 const REVERSE = "\x1b[7m";
 const SGR = /\x1b\[[0-9;]*m/g;
 
-/** The full core observer paint contains Claude's inverse-video caret and its absolute position. */
 export function parseClaudeHcComposer(ansi: string, cols: number): ClaudeComposer | null {
   if (!ansi.startsWith("\x18\x1b[!p") || !ansi.includes("\x1b[H\x1b[2J")) return null;
-  // Finish at the observed status report so a truncated paint cannot qualify.
+  // Accepting a caret without the final status report could accept a truncated paint.
   const position = /\x1b\[>4;2m\x1b\[(\d+);(\d+)H\x1b\[0m[^\r\n]*\x1b\]7501;[^\r\n]*:app=claude-code(?::[^\x1b\r\n]*)?\x1b\\$/u.exec(ansi);
   if (!position) return null;
   const lines = ansi.slice(0, position.index).split("\r\n");

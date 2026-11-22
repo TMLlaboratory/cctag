@@ -169,9 +169,10 @@ for hidden whitespace before sending.
 If anything remains visible after stashing, the terminal needs a check.
 After a stashed send, Slack reports that exact restoration cannot be verified
 from the screen. Model changes and herdr-core messages with image attachments
-require an empty composer. For Claude Code on the legacy herdr TUI, send images
-at the terminal or resend the Slack message without images. Complete any
-model-switch confirmation at the terminal.
+accept an empty composer or a verified suggestion. For Claude Code on the
+legacy herdr TUI, send images at the terminal or resend the Slack message
+without images. Complete any model-switch confirmation on herdr or herdr-core
+at the terminal.
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the

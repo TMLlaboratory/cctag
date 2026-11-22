@@ -151,9 +151,9 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   the terminal.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question
-  or an approval is up, and `done` after a turn. A program that reports nothing
-  — Claude Code on its folder-trust screen, for one — has no status, which
-  cctag treats as unknown.
+  or an approval is up, including the observed folder-trust screen in
+  Claude Code 2.1.330, and `done` after a turn. A program that reports nothing
+  has no status, which cctag treats as unknown.
 - **Writes.** For Claude Code on herdr and herdr-core, cctag checks a complete
   visible composer and the current foreground process before each write in
   the message submission sequence. The captured default (manual) and auto
@@ -173,7 +173,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   draft is stashed with Ctrl+S. At the first screen with the stash marker,
   any visible text stops the send before another key is written. An initial
   standalone suggestion can be replaced after its probe, reversal and a
-  fresh same-agent composer check succeed.
+  fresh same-agent composer check succeed. Model commands and herdr-core
+  messages with images accept an empty composer or a verified suggestion.
   An ordered Right and sentinel probe distinguishes a blank composer from
   hidden whitespace. Once the sentinel has been removed, cctag checks the
   visible composer again before sending. A local key can still arrive after
@@ -304,30 +305,17 @@ pairing.
 For Claude Code, `@cctag model <name>` (e.g. `model opus`) forwards Claude's
 own `/model <name>` command rather than starting a normal conversational turn;
 the command's output doesn't reliably land in the session transcript. Claude
-Code model switching is supported on Herdr and Orca. `omp` has no model
+Code model switching is supported on herdr, herdr-core and Orca. `omp` has no model
 command; Codex CLI uses its separate model and reasoning-level picker, covered
 in [usage.md](usage.md).
 
-The steps below describe the Herdr command path. Orca uses its guarded composer
-channel for Claude Code.
-
-`commands.ts`'s `runTuiCommand()`:
-
-1. Sends the slash command via Herdr, then confirms it with Enter
-2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
-   confirmation that appears when switching models mid-conversation), the
-   existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
-   first option — asking for the switch already expressed that intent
-3. Once it settles (`idle`/`done`), reads the screen and relays the
-   command's own output back to Slack as-is
-
-Step 3's pane read has a gotcha: the TUI's screen always ends with a fixed
-footer (a separator, an empty prompt, another separator, then
-model/context/cwd/mode status lines). Reading only the last few lines lands
-entirely inside that footer, missing the actual command output above it. So
-cctag reads a larger chunk and cuts everything from the model/context
-status line downward (a distinctive `ctx ... /rc` pattern), then trims the
-separator/padding right above that (`stripFooterChrome()`).
+`runClaudeSlashCommand()` submits the command through the paired backend.
+On herdr and herdr-core, it checks the session and foreground identity in
+the readback and relays a new "Set model to …" result from the screen.
+If it cannot verify the result, Slack directs the user to the terminal,
+where any "Switch model?" confirmation can be answered.
+On Orca, cctag confirms the first option of a recognized confirmation menu
+and trims the footer from the terminal output before posting it to Slack.
 
 `TurnEngine` has a separate `externallyBusy` set alongside its normal turn
 tracking, so these TUI commands are treated as "busy" the same way an

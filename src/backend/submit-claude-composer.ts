@@ -81,11 +81,11 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
 
   let ready = initial;
   if (initial.draft) {
-    // A slash command can open a menu and image conversion can consume Enter.
-    if (text.trimStart().startsWith("/") || ctx.hasImages) throw refuse("draft");
     const { suggestion, reversed } = await probe(initial, "probe-unverified");
     ready = reversed;
     if (!suggestion) {
+      // A menu or image conversion can interrupt submission before the draft comes back.
+      if (text.trimStart().startsWith("/") || ctx.hasImages) throw refuse("draft");
       await key(["ctrl+s"], ready, "stash-unverified", { stash: "uncertain" });
       ready = await waitFor((view) => view.stashed, "stash-unverified");
       composer = { ...composer, stash: "stashed" };

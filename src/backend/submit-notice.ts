@@ -77,7 +77,9 @@ export function submitDraftNotice(outcome: SubmitOutcome, backend: BackendName):
 function withComposerState(message: string, composer: SubmitComposerState, backend: BackendName): string {
   const notes: string[] = [];
   if (composer.probe !== null) {
-    notes.push(`確かめのために打った \`${composer.probe}\` が入力欄に1文字残っているかもしれません。`);
+    notes.push(backend === "orca"
+      ? `確かめのために打った \`${composer.probe}\` が入力欄に1文字残っているかもしれません。`
+      : `入力欄に、確認のために打った \`${composer.probe}\` 1文字や提案の文字が残っている可能性があります。端末で確認してください。`);
   }
 
   if (composer.stash === "uncertain") {

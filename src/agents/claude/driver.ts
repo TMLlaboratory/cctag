@@ -289,10 +289,7 @@ async function confirmOrcaAnswerReview(
  * Runs a CLI slash command (`/model <name>`, ...) rather than a normal
  * conversational turn. These don't reliably show up in the session
  * transcript the way an LLM reply does, so this reads the result straight
- * off the pane. If a confirmation menu appears (e.g. switching models
- * mid-conversation asks "Switch model? Yes/No"), it's auto-confirmed with
- * the first option, since the user asking for the command already expressed
- * that intent.
+ * off the pane.
  */
 async function runClaudeSlashCommand(
   terminals: Terminals,

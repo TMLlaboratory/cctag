@@ -46,3 +46,12 @@ test("Herdr reports unverified restoration for accepted and uncertain stashed se
   assert.match(submitDraftNotice(outcome, "orca"), /2\.1\.287/u);
   assert.match(writeOutcomeUnknownText(error, "orca"), /2\.1\.287/u);
 });
+
+test("Herdr warns that a failed probe can leave the probe key or suggestion in the composer", () => {
+  for (const backend of ["herdr", "herdr-core"] as const) {
+    assert.equal(
+      submitRefusedText("probe-unverified", backend, { probe: "x", stash: "untouched", submitUncertain: false }),
+      `⚠️ ${backend} の入力欄が提案か書きかけかを確かめられなかったため、送信していません。 入力欄に、確認のために打った \`x\` 1文字や提案の文字が残っている可能性があります。端末で確認してください。`,
+    );
+  }
+});

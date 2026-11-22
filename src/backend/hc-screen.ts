@@ -41,7 +41,6 @@ export function observeHcScreen<T>(path: string, terminal: string): Promise<HcOb
             jsonrpc: "2.0", id: 1, method: "terminal.attach",
             params: { terminal, cols: 1, rows: 1, history: 0, observe: true },
           }));
-          // Herdr framing uses a little-endian channel, kind byte and little-endian length.
           const header = Buffer.alloc(9);
           header.writeUInt32LE(request.length, 5);
           socket.write(Buffer.concat([header, request]));
