@@ -117,7 +117,7 @@ const AGENTLESS_GRACE_MS = 5 * 60_000;
 
 export class BackgroundWatcher {
   private watches = new Map<string, WatchState>(); // key: paneId
-  private hcCodexNotices = new Map<string, string>(); // key: pairing key
+  private hcCodexNotices = new Map<string, { turn?: number; kind: string; fingerprint?: string }>();
   private busyLastTick = new Set<string>();
   /** Consecutive check failures per pane, for log throttling only. */
   private failureStreak = new Map<string, number>();
@@ -233,7 +233,7 @@ export class BackgroundWatcher {
       await this.noteHcCodexStatus(pairing, agent);
       return;
     }
-    this.hcCodexNotices.delete(pairing.key);
+    if (agent) this.hcCodexNotices.delete(pairing.key);
     if (!agent) {
       // "No agent" is not "no pane". Quitting the CLI to restart it in the same
       // pane leaves a shell prompt: get returns null while exists still returns
@@ -594,22 +594,32 @@ export class BackgroundWatcher {
 
   private async noteHcCodexStatus(pairing: Pairing, agent: AgentInfo): Promise<void> {
     const status = classifiedStatus(agent.evidence);
-    let fingerprint = `${agent.turn ?? ""}:${status}`;
+    const previous = this.hcCodexNotices.get(pairing.key);
+    let turn = agent.turn;
+    let kind: string = status;
+    let fingerprint: string | undefined;
     let text = HC_CODEX_UNBOUND_NOTICE;
-    if (status === "blocked") {
+    if (status === "blocked" || status === "unknown") {
       const screen = await this.terminals.read(pairing.paneId, 0, "screen").catch(() => null);
       const prompt = screen?.observedPrompt;
-      fingerprint += `:${prompt?.fingerprint ?? ""}`;
-      const label = prompt?.kind === "question" ? "質問" : prompt?.kind === "permission" ? "承認" : "入力";
+      if (!prompt || prompt.kind === "model" || prompt.kind === "effort") {
+        if (screen?.codexTrustExited && previous?.kind === "trust") this.hcCodexNotices.delete(pairing.key);
+        return;
+      }
+      ({ kind, turn, fingerprint } = prompt);
+      if (kind === "input" && previous?.turn === turn &&
+          (previous?.kind === "question" || previous?.kind === "permission")) return;
+      const label = prompt.kind === "question" ? "質問" : prompt.kind === "permission" ? "承認" :
+        prompt.kind === "trust" ? "フォルダの信頼確認" : "入力";
       text = `⚠️ herdr-core 上の Codex が${label}を待っています。端末で答えてください。`;
     } else if (status === "working") {
       text = `⚙️ herdr-core 上の Codex が作業中です。\n${text}`;
     } else if (status === "done") {
       text = `✅ herdr-core 上の Codex のターンが完了しました。\n${text}`;
     }
-    if (this.hcCodexNotices.get(pairing.key) === fingerprint) return;
+    if (previous && previous.turn === turn && previous.kind === kind && previous.fingerprint === fingerprint) return;
     await this.notifier.postReply(pairing.channel, pairing.threadTs ?? "", text);
-    this.hcCodexNotices.set(pairing.key, fingerprint);
+    this.hcCodexNotices.set(pairing.key, { turn, kind, fingerprint });
   }
 
   private async noteOmpBindingLoss(pairing: Pairing, state: WatchState): Promise<void> {

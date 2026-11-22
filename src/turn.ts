@@ -26,10 +26,10 @@ import type { AgentInfo, AgentRef, AgentStatus, BackendName, ScreenSnapshot, Tra
 import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
-import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
+import { classifiedStatus, EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
-import { readNewRecords, readRecentRecords, transcriptSizeSafe } from "./agents/transcript.js";
+import { readNewRecords, readRecentRecords, transcriptSizeIfAvailable, transcriptSizeSafe } from "./agents/transcript.js";
 import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo, type BlockedPrompt } from "./agents/driver.js";
 import { promptFingerprint } from "./agents/fingerprint.js";
 import {
@@ -454,7 +454,8 @@ export class TurnEngine {
 
       const sessionId = agent.sessionId ?? "";
       const tPath = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-      const offset = tPath ? transcriptSizeSafe(tPath) : 0;
+      const transcriptSize = tPath ? transcriptSizeIfAvailable(tPath) : null;
+      const offset = transcriptSize ?? 0;
 
       // A pane sitting at one of the agent's startup dialogs reports `idle`, so
       // nothing above this catches it, and submitting anyway is actively
@@ -477,20 +478,25 @@ export class TurnEngine {
       // extra pane read entirely, so this costs nothing on the hot path — and
       // it's what lets the detector be shape-based rather than a list of known
       // dialogs, since the only thing on a fresh pane's screen is startup UI.
-      if (!tPath && driver.parseStartupPrompt) {
-        const paneText = await this.terminals
-          .read(agent.ref.target, 40, driver.readRegion)
-          .then((snapshot) => snapshot.text)
-          .catch(() => "");
-        const question = paneText ? driver.parseStartupPrompt(paneText) : null;
+      if ((!tPath || (backend === "herdr-core" && transcriptSize === null)) && driver.parseStartupPrompt) {
+        const screen = await this.terminals.read(agent.ref.target, 40, driver.readRegion).catch(() => null);
+        const question = screen?.text && (backend !== "herdr-core" || screen.complete)
+          ? driver.parseStartupPrompt(screen.text) : null;
         if (question) {
           await this.notifier.postReply(
             pairing.channel,
             pairing.threadTs ?? "",
             `⚠️ ペインが起動時のダイアログで停止しています。このダイアログは端末で答えてください。\n` +
-              `> ${question}\n` +
+              (backend === "herdr-core" ? "" : `> ${question}\n`) +
               `cctagは代わりに答えません（信頼の付与やツールチェーンの更新を含むため、` +
               `ディレクトリと環境を確認できる人が判断すべき項目です）。応答後にもう一度送ってください。`,
+          );
+          return;
+        }
+        if (backend === "herdr-core" && (!screen || !driver.isIdleComposer?.(screen))) {
+          await this.notifier.postReply(
+            pairing.channel, pairing.threadTs ?? "",
+            "⚠️ 端末の入力欄を確認できませんでした。端末を確認してからもう一度送ってください。",
           );
           return;
         }
@@ -1221,6 +1227,16 @@ export class TurnEngine {
     return "same";
   }
 
+  private async updateRunningStatus(state: TurnState): Promise<void> {
+    const now = Date.now();
+    if (state.phase !== "running" || now - state.lastStatusUpdateAt <= 3_000) return;
+    state.lastStatusUpdateAt = now;
+    const lastTool = Object.keys(state.toolCounts).pop();
+    const elapsed = Math.round((now - state.startedAt) / 1000);
+    const suffix = lastTool ? ` — 🔧 ${lastTool}` : "";
+    await state.statusHandle.update(`⚙️ 実行中… (${elapsed}s)${suffix}`).catch(() => {});
+  }
+
   private async poll(state: TurnState): Promise<void> {
     const paneId = state.paneId;
     while (!state.lease.signal.aborted) {
@@ -1233,6 +1249,11 @@ export class TurnEngine {
       // different, newly-started turn.
       if (state.lease.signal.aborted) return;
 
+      // A Slack update must not age the foreground observation used by the hc screen read.
+      if (state.backend === "herdr-core") {
+        await this.updateRunningStatus(state);
+        if (state.lease.signal.aborted) return;
+      }
       // `null` and a thrown error mean different things and must not be
       // conflated: the Herdr adapter's get returns null only for its own "no
       // such pane" answer, but throws for a command timeout, spawn failure, or
@@ -1266,9 +1287,16 @@ export class TurnEngine {
         return;
       }
       if (state.backend === "herdr-core" && agent.agent === "codex") {
+        await state.promptHandle?.update(HC_CODEX_UNBOUND_NOTICE, []).catch(() => {});
         await state.statusHandle.update(HC_CODEX_UNBOUND_NOTICE).catch(() => {});
         return;
       }
+      const hcBlockedScreen = state.backend === "herdr-core" && agent.agent === "claude" &&
+        classifiedStatus(agent.evidence) === "blocked"
+        ? await this.terminals.read(paneId, BLOCKED_PANE_LINES, "screen", agent).then(
+          (screen) => ({ screen } as const), (error: unknown) => ({ error } as const),
+        )
+        : null;
       if (state.driver.kind === "omp" && agent.agent !== "omp") {
         state.collected = [];
         state.writes = new WrittenFileTracker();
@@ -1336,16 +1364,7 @@ export class TurnEngine {
         }
       }
 
-      if (state.phase === "running") {
-        const now = Date.now();
-        if (now - state.lastStatusUpdateAt > 3_000) {
-          state.lastStatusUpdateAt = now;
-          const lastTool = Object.keys(state.toolCounts).pop();
-          const elapsed = Math.round((now - state.startedAt) / 1000);
-          const suffix = lastTool ? ` — 🔧 ${lastTool}` : "";
-          await state.statusHandle.update(`⚙️ 実行中… (${elapsed}s)${suffix}`).catch(() => {});
-        }
-      }
+      if (state.backend !== "herdr-core") await this.updateRunningStatus(state);
 
       // A blocked pane is waiting on a person, so the clock doesn't run. This
       // has to come *before* the check below rather than after: while a prompt
@@ -1438,15 +1457,11 @@ export class TurnEngine {
         // posted the same prompt again, losing the collected output on the way.
         // Ownership of a prompt already delivered to Slack must not turn on one
         // failed read.
-        let paneText: string;
+        let screen: ScreenSnapshot;
         try {
-          if (resolution.screen) {
-            paneText = resolution.screen.text;
-          } else {
-            paneText = (
-              await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion)
-            ).text;
-          }
+          if (hcBlockedScreen && "error" in hcBlockedScreen) throw hcBlockedScreen.error;
+          screen = resolution.screen ?? hcBlockedScreen?.screen ??
+            await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion);
           state.failures.read = 0;
         } catch (err) {
           state.failures.read += 1;
@@ -1463,7 +1478,23 @@ export class TurnEngine {
           );
           return;
         }
+        const paneText = screen.text;
         const prompt = state.driver.parseBlockedPane(paneText);
+        if (state.backend === "herdr-core" &&
+            (!screen.complete || (prompt.kind !== "question" && prompt.kind !== "permission"))) {
+          if (state.phase === "awaiting-permission" && !state.pendingPrompt) continue;
+          const handle = state.promptHandle;
+          this.markPromptResolved(state);
+          state.phase = "awaiting-permission";
+          const notice = "⚠️ 入力待ちの画面を確認できませんでした。端末で答えてください。";
+          if (handle) {
+            state.promptHandle = handle;
+            await handle.update(notice, []).catch(() => {});
+          } else {
+            state.promptHandle = await this.notifier.postMessage(state.pairing.channel, state.pairing.threadTs ?? "", notice);
+          }
+          continue;
+        }
         const fingerprint = promptFingerprint(prompt);
 
         if (state.phase === "running") {

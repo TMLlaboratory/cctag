@@ -54,6 +54,7 @@ test("Codex cursor labels follow the selected row before and after Down", () => 
 });
 
 test("only the Codex /model stage parser creates model-menu capabilities", () => {
+  assert.equal(codexDriver.modes, null);
   for (const pane of [MODEL_MENU, EFFORT_MENU]) {
     const modelPrompt = parseCodexModelMenuPrompt(pane);
     assert.ok(modelPrompt);
@@ -74,12 +75,16 @@ test("hc Codex classifies measured prompts without granting capabilities", () =>
   const question = inspectHcCodexPrompt(snapshot(read("question")), "question");
   assert.equal(question?.kind, "question");
   const nextQuestion = inspectHcCodexPrompt(snapshot(read("question-next")), "question");
+  assert.ok(nextQuestion);
   assert.equal(nextQuestion?.kind, "question");
   assert.notEqual(question?.fingerprint, nextQuestion.fingerprint);
   assert.deepEqual(question, inspectHcCodexPrompt(snapshot(read("question").replace("› 1.", "  1.").replace("  2.", "› 2.")), "question"));
   assert.equal(inspectHcCodexPrompt(snapshot(read("question")), "permission"), null);
   assert.equal(inspectHcCodexPrompt({ ...snapshot(read("question")), complete: false }, "question"), null);
   assert.equal(inspectHcCodexPrompt(snapshot(read("approval")), "permission")?.kind, "permission");
+  const approval = read("approval");
+  assert.equal(inspectHcCodexPrompt(snapshot(approval + "\n› Ask Codex to do anything"), "permission"), null);
+  assert.equal(inspectHcCodexPrompt(snapshot(approval + "\n\nUnclassified dialog\n  Press enter to confirm or esc to cancel"), "permission"), null);
   assert.equal(inspectHcCodexPrompt(snapshot(read("model")))?.kind, "model");
   assert.equal(inspectHcCodexPrompt(snapshot(read("model-effort")))?.kind, "effort");
 });

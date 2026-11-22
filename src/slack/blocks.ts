@@ -94,7 +94,10 @@ export function agentPickerBlocks(result: ListResult, enabledBackends: readonly 
   return [
     {
       type: "section",
-      text: { type: "mrkdwn", text: "*接続するインスタンスを選択してください:*" },
+      text: {
+        type: "mrkdwn",
+        text: ["*接続するインスタンスを選択してください:*", ...result.notices.map((notice) => `ℹ️ ${notice}`)].join("\n"),
+      },
       accessory: {
         type: "static_select",
         action_id: "pair_select",

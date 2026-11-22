@@ -2404,6 +2404,7 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
   const { notifier, replies } = fakeNotifier();
   let status: AgentStatus = "working";
   let turn = 1;
+  let promptKind: "question" | "input" | "trust" = "question";
   const terminals = fakeTerminals(() => ({
     ...fakeAgent(),
     backend: "herdr-core",
@@ -2416,7 +2417,7 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
   }));
   terminals.read = async () => ({
     text: "PRIVATE PANE TEXT", complete: true, draft: null,
-    observedPrompt: { kind: "question", fingerprint: "same question" },
+    observedPrompt: { kind: promptKind, fingerprint: promptKind, turn },
   });
   const watcher = new BackgroundWatcher("herdr-core", terminals, store, idleEngine, notifier, 10, 10);
   try {
@@ -2437,9 +2438,73 @@ test("a live unbound hc Codex pairing reports status without publishing the pane
     assert.equal(replies[2], replies[1]);
     assert.match(replies[3], /完了/);
     assert.equal(replies[4], replies[3]);
+    status = "blocked";
+    promptKind = "input";
+    await watcher["tick"]();
+    assert.match(replies[5], /入力を待っています。端末で答えて/);
+    status = "unknown";
+    promptKind = "trust";
+    await watcher["tick"]();
+    await watcher["tick"]();
+    assert.equal(replies.length, 7);
+    assert.match(replies[6], /フォルダの信頼確認を待っています。端末で答えて/);
     assert.doesNotMatch(replies.join(), /PRIVATE PANE TEXT/);
     assert.equal(store.list().length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("hc Codex notices follow verified turns and preserve modal state through unavailable reads", async (t) => {
+  const blank = { text: "", draft: null, complete: false } as const;
+  const prompt = (kind: "question" | "input" | "trust", turn: number): ScreenSnapshot => ({
+    ...blank, observedPrompt: { kind, fingerprint: kind, turn },
+  });
+  for (const scenario of [
+    {
+      name: "verified turn takes precedence over the preceding get",
+      status: "blocked",
+      observations: [[4, prompt("question", 5)], [5, prompt("question", 5)]] as const,
+      notices: [/質問/],
+    },
+    {
+      name: "generic gap does not replace a specific notice, and a fresh turn gets a fallback",
+      status: "blocked",
+      observations: [[5, prompt("question", 5)], [5, prompt("input", 5)], [5, prompt("question", 5)], [6, prompt("input", 6)]] as const,
+      notices: [/質問/, /入力/],
+    },
+    {
+      name: "trust can recur after a verified exit, while an unavailable read preserves it",
+      status: "unknown",
+      observations: [[5, prompt("trust", 5)], [5, null], [5, prompt("trust", 5)],
+        [5, { ...blank, codexTrustExited: true } as const], [5, prompt("trust", 5)]] as const,
+      notices: [/信頼確認/, /信頼確認/],
+    },
+  ] satisfies { name: string; status: AgentStatus; observations: readonly (readonly [number, ScreenSnapshot | null])[]; notices: RegExp[] }[]) {
+    await t.test(scenario.name, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "cctag-hc-modal-"));
+      const target = "hc:t1";
+      const store = storeWithPairing(dir, { ...fakePairing(), paneId: target, backend: "herdr-core" });
+      const { notifier, replies } = fakeNotifier();
+      let turn = 0;
+      let screen: ScreenSnapshot | null = null;
+      const terminals = fakeTerminals(() => ({
+        ...fakeAgent(), backend: "herdr-core", agent: "codex", sessionId: null, turn, cwd: dir,
+        ref: { target, pid: null, processStartedAt: null },
+        evidence: { kind: "classified", status: scenario.status },
+      }));
+      terminals.read = async () => {
+        if (!screen) throw new Error("capture unavailable");
+        return screen;
+      };
+      const watcher = new BackgroundWatcher("herdr-core", terminals, store, idleEngine, notifier, 10, 10);
+      try {
+        for ([turn, screen] of scenario.observations) await watcher["tick"]();
+        assert.equal(replies.length, scenario.notices.length);
+        scenario.notices.forEach((pattern, index) => assert.match(replies[index], pattern));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   }
 });

@@ -155,7 +155,11 @@ started it and hands it to every terminal. Status is what Claude Code reports
 to the core; the transcript is found from `~/.claude/sessions/<pid>.json`,
 which Claude Code writes for each running session. `hc` cannot type text
 without pressing Enter, so a free-text answer to a multi-select question is
-refused with a note to answer in the terminal.
+refused with a note to answer in the terminal. Claude prompts that cannot be
+verified on the visible screen also require a terminal-side answer.
+If a previously paired terminal switches to a recognized Codex CLI, cctag
+can report its status and prompt the user to answer in the terminal. Codex
+session selection, output posting and Slack input are unavailable on herdr-core.
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the

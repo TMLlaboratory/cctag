@@ -101,11 +101,14 @@ export function inspectHcCodexPrompt(
   if (!snapshot.complete) return null;
   const rows = snapshot.text.trimEnd().split("\n");
   const footer = rows.at(-1)?.trim() ?? "";
+  const questionFooter = /^(?:tab to add notes|tab or esc to clear notes) \| enter to submit (?:answer|all)\b/;
   let kind: "question" | "permission" | "model" | "effort";
   let header: RegExp;
-  if (blockedKind === "question" && /^(?:tab to add notes|tab or esc to clear notes) \| enter to submit (?:answer|all)\b/.test(footer)) {
+  let sameFooter: (row: string) => boolean = (row) => row === footer;
+  if (blockedKind === "question" && questionFooter.test(footer)) {
     kind = "question";
     header = /^\s*Question \d+\/\d+ \(\d+ unanswered\)$/;
+    sameFooter = (row) => questionFooter.test(row);
   } else if (blockedKind === "permission" && footer === "Press enter to confirm or esc to cancel") {
     kind = "permission";
     header = /^\s*Would you like to run the following command\?$/;
@@ -120,13 +123,28 @@ export function inspectHcCodexPrompt(
   }
   const start = rows.map((row) => header.test(row)).lastIndexOf(true);
   if (start < 0) return null;
-  const body = rows.slice(start);
+  const body = rows.slice(start, -1);
+  if (body.some((row) => sameFooter(row.trim()))) return null;
   const menu = parseCodexMenu(body.join("\n"));
   if (!menu) return null;
   const content = body.slice(0, body.findIndex((row) => NUMBERED_LINE_RE.test(row))).join("\n")
     .replace(/ \(\d+ unanswered\)$/m, "");
   const fingerprint = createHash("sha256").update(JSON.stringify([kind, content, menu.choices])).digest("hex");
   return { kind, fingerprint };
+}
+
+export function isHcCodexTrustPrompt(snapshot: ScreenSnapshot): boolean {
+  if (!snapshot.complete) return false;
+  const rows = snapshot.text.trimEnd().split("\n").slice(-14).map((line) => line.trim());
+  const header = rows.lastIndexOf("Folder access");
+  const warning = rows.findIndex((line, index) => index > header && line.startsWith("Trust this folder?"));
+  if (header < 0 || !rows[header + 1]?.startsWith("/") || warning < header + 2) return false;
+  const tail = rows.slice(warning).filter(Boolean);
+  const choices = tail.slice(-3).join("\n").replace(/^› /gm, "");
+  return tail.slice(0, -3).join(" ") ===
+    "Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings can run code automatically, even without a model request. Continue only if you trust these files. Your trust decision will be saved." &&
+    choices === "1. Trust and continue\n2. Back to Agent Command Center\nenter continue · esc back" &&
+    tail.slice(-3, -1).filter((line) => line.startsWith("› ")).length === 1;
 }
 
 /** Extracts the bare level name from an effort-row label, e.g.

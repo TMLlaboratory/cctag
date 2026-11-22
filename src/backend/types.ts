@@ -52,7 +52,8 @@ export interface ScreenSnapshot {
   text: string;
   draft: string | null;
   complete: boolean;
-  observedPrompt?: { kind: "question" | "permission" | "model" | "effort"; fingerprint: string };
+  observedPrompt?: { kind: "question" | "permission" | "model" | "effort" | "input" | "trust"; fingerprint: string; turn?: number };
+  codexTrustExited?: true;
 }
 
 export interface SubmitComposerState {

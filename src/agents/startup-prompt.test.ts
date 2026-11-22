@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { parseCodexStartupPrompt } from "./codex/prompts.js";
 import { parseClaudeStartupPrompt } from "./claude/prompts.js";
@@ -29,15 +30,7 @@ const CODEX_UPDATE = [
 ].join("\n");
 
 // Captured verbatim from Claude Code on a fresh directory.
-const CLAUDE_TRUST = [
-  " Accessing workspace:",
-  " /private/tmp/scratch/v3-workdir",
-  " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known",
-  " open source project, or work from your team).",
-  " ❯ 1. Yes, I trust this folder",
-  "   2. No, exit",
-  " Enter to confirm · Esc to cancel",
-].join("\n");
+const CLAUDE_TRUST = readFileSync(new URL("./claude/__fixtures__/startup-trust.screen.txt", import.meta.url), "utf8");
 
 // A settled pane: banner, no pending dialog. Must not be treated as waiting.
 const CODEX_IDLE = [

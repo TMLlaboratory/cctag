@@ -208,8 +208,6 @@ export const codexDriver: AgentDriver = {
   parseStartupPrompt: parseCodexStartupPrompt,
 
   parseBlockedPane(paneText): BlockedPrompt {
-    // Herdr's existing answer flow uses numbered approval menus. hc inspects
-    // question forms separately, without granting an answer capability.
     const menu = parseCodexMenu(paneText);
     if (!menu) {
       return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-then-enter") };
@@ -238,6 +236,7 @@ export const codexDriver: AgentDriver = {
     await channel.confirm(expectedLabel);
   },
 
+  // Claude's permission-mode cycle cannot identify or verify Codex's collaboration modes.
   modes: null,
 
   async runModelCommand(terminals, agent, argsText): Promise<ModelCommandResult> {

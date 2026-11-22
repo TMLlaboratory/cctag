@@ -46,7 +46,7 @@ export interface Terminals {
   list(): Promise<ListResult>;
   get(target: string): Promise<AgentInfo | null>;
   exists(target: string): Promise<boolean>;
-  read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot>;
+  read(target: string, lines: number, region: "screen" | "history", observation?: AgentInfo): Promise<ScreenSnapshot>;
   submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome>;
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel;
   openModelAnswer(ref: AgentRef, prompt: VerifiedModelMenuPrompt): ModelAnswerChannel;
@@ -127,8 +127,8 @@ export function createTerminals(backends: TerminalBackends): Terminals {
     exists(target: string): Promise<boolean> {
       return backendFor(target).exists(target);
     },
-    read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
-      return backendFor(target).read(target, lines, region);
+    read(target: string, lines: number, region: "screen" | "history", observation?: AgentInfo): Promise<ScreenSnapshot> {
+      return backendFor(target).read(target, lines, region, observation);
     },
     submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
       return backendFor(ref.target).submit(ref, text, ctx);

@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDriver } from "../agents/driver.js";
 import { HC_CODEX_UNBOUND_NOTICE, HC_CODEX_WRITE_NOTICE } from "../agents/codex/driver.js";
-import { inspectHcCodexPrompt } from "../agents/codex/prompts.js";
+import { inspectHcCodexPrompt, isHcCodexTrustPrompt } from "../agents/codex/prompts.js";
 import type {
   AnswerChannel,
   BlindChannel,
@@ -59,7 +59,7 @@ interface HcListedTerminal {
   agent?: string;
   state: string;
   /** Present only for programs that report their state (coding agents), absent for shells. */
-  status?: string;
+  status?: string | null;
 }
 
 class HcCliError extends Error {
@@ -120,6 +120,15 @@ function isCodex(terminal: HcTerminal): boolean {
   return terminal.status?.app === "codex" || basename(terminal.foreground?.name ?? "") === "codex";
 }
 
+function isClaude(terminal: HcTerminal): boolean {
+  return terminal.status?.app === CLAUDE_APP && !isCodex(terminal);
+}
+
+function canVerifyClaude(terminal: HcTerminal): boolean {
+  const executable = basename(terminal.foreground?.name ?? "");
+  return isClaude(terminal) || (terminal.status == null && (executable === "claude" || executable === CLAUDE_APP));
+}
+
 export interface HcBackendOptions {
   socket?: string;
   sessionsDir?: string;
@@ -128,6 +137,7 @@ export interface HcBackendOptions {
 export class HcBackend implements Terminals {
   private readonly socket: string;
   private readonly sessionsDir: string;
+  private readonly claudeReads = new Map<string, { agent?: WeakRef<AgentInfo> }>();
 
   constructor(
     private readonly bin: string,
@@ -150,7 +160,7 @@ export class HcBackend implements Terminals {
     if (!(await probeSocket(this.socket))) {
       throw new BackendUnavailable(`herdr-core is not running (nothing listens on ${this.socket}); cctag does not start it`);
     }
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, HC_SOCKET: this.socket };
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
     delete env.HC_TERMINAL_SOCKET;
@@ -198,7 +208,7 @@ export class HcBackend implements Terminals {
     if (terminal.state !== "live") return null;
     if (isCodex(terminal)) {
       // A writer may still own the previous rollout after /new.
-      const status = normalizeStatus(terminal.status?.state);
+      const status = terminal.status?.app === "codex" ? normalizeStatus(terminal.status.state) : "unknown";
       return {
         ref: { target: `${PREFIX}${terminal.address}`, pid: null, processStartedAt: null, agentKind: "codex" },
         backend: "herdr-core",
@@ -239,33 +249,47 @@ export class HcBackend implements Terminals {
     // Remote machines' terminals (`machine/t7`) belong to the Spoke on that machine.
     const local = listed.filter((t) => t.state === "live" && !t.address.includes("/"));
     const notices: string[] = [];
-    if (local.some((t) => t.agent !== CLAUDE_APP && t.agent !== "codex" && t.status !== undefined)) {
+    if (local.some((t) => t.agent !== CLAUDE_APP && t.agent !== "codex" && t.status != null)) {
       notices.push(HC_UNSUPPORTED_AGENTS_NOTICE);
     }
+    let omittedCodex = local.some((t) => t.agent === "codex");
     const failures: ListResult["failures"] = [];
     const discovered = await Promise.all(
       local
-        .filter((t) => t.agent === CLAUDE_APP)
+        .filter((t) => t.agent === CLAUDE_APP || (t.agent !== "codex" && t.status == null))
         .map(async (t) => {
           try {
             const terminal = await this.terminal(t.address);
-            return terminal ? await this.agentFrom(terminal) : null;
+            if (terminal?.state !== "live") return null;
+            if (isCodex(terminal)) {
+              omittedCodex = true;
+              return null;
+            }
+            return t.agent === CLAUDE_APP ? await this.agentFrom(terminal) : null;
           } catch (err) {
             failures.push({ backend: "herdr-core", reason: `${t.address}: ${errorMessage(err)}` });
             return null;
           }
         }),
     );
-    if (local.some((t) => t.agent === "codex") || discovered.some((a) => a?.agent === "codex")) {
-      notices.push(HC_CODEX_UNBOUND_NOTICE);
-    }
-    const agents = discovered.filter((agent): agent is AgentInfo => agent?.agent === "claude");
+    if (omittedCodex) notices.push(HC_CODEX_UNBOUND_NOTICE);
+    const agents = discovered.filter((agent): agent is AgentInfo => agent !== null);
     return { agents, failures, complete: failures.length === 0, notices };
   }
 
   async get(target: string): Promise<AgentInfo | null> {
-    const terminal = await this.terminal(addressOf(target));
-    return terminal ? this.agentFrom(terminal) : null;
+    const address = addressOf(target);
+    const observation: { agent?: WeakRef<AgentInfo> } = {};
+    this.claudeReads.set(target, observation);
+    try {
+      const terminal = await this.terminal(address);
+      if (!terminal) return null;
+      const agent = await this.agentFrom(terminal);
+      if (agent?.agent === "claude" && isClaude(terminal)) observation.agent = new WeakRef(agent);
+      return agent;
+    } finally {
+      if (!observation.agent && this.claudeReads.get(target) === observation) this.claudeReads.delete(target);
+    }
   }
 
   async exists(target: string): Promise<boolean> {
@@ -273,30 +297,58 @@ export class HcBackend implements Terminals {
     return terminal !== null && terminal.state === "live";
   }
 
-  async read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
-    const command = region === "history" && lines > 0 ? ["read", "--lines", String(lines)] : ["read"];
+  async read(target: string, _lines: number, _region: "screen" | "history", observation?: AgentInfo): Promise<ScreenSnapshot> {
     const address = addressOf(target);
-    const before = await this.terminal(address);
-    const result = await this.json<{ text?: string; complete?: boolean }>(
-      before && isCodex(before) ? ["read"] : command,
-      [address],
-    );
-    const after = await this.terminal(address);
-    const snapshot = { text: result.text ?? "", draft: null, complete: result.complete === true };
-    const beforeCodex = before && isCodex(before);
-    const afterCodex = after && isCodex(after);
-    if (beforeCodex || afterCodex) {
-      const status = after?.status;
-      const kind = status?.kind;
-      const stable = beforeCodex && afterCodex &&
-        typeof before.foreground?.pid === "number" && before.foreground.pid === after.foreground?.pid &&
-        before.status?.state === status?.state && before.status?.kind === kind;
-      const prompt = !stable ? null : status?.state === "blocked"
-        ? (kind === "question" || kind === "permission" ? inspectHcCodexPrompt(snapshot, kind) : null)
-        : inspectHcCodexPrompt(snapshot);
-      return { text: "", draft: null, complete: false, ...(prompt ? { observedPrompt: prompt } : {}) };
+    // A positive --lines can make hc scroll a full-screen app.
+    const capture = () => this.json<{ text?: string; complete?: boolean }>(["read"], [address]);
+    // Do not infer the current foreground from a prior poll or from the pairing.
+    if (observation && this.claudeReads.get(target)?.agent?.deref() === observation) {
+      this.claudeReads.delete(target);
+      const result = await capture();
+      return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
     }
-    return { ...snapshot, text: stripSidePane(snapshot.text) };
+    const before = await this.terminal(address);
+    const redacted = { text: "", draft: null, complete: false };
+    if (!before || before.state !== "live") return redacted;
+    const claude = canVerifyClaude(before) ? await this.agentFrom(before) : null;
+    const codex = isCodex(before);
+    if (!claude && !codex) return redacted;
+    const result = await capture().catch((error: unknown) => {
+      if (claude) throw error;
+      return null;
+    });
+    const after = await this.terminal(address);
+    if (after?.state !== "live") return redacted;
+    const snapshot = { text: result?.text ?? "", draft: null, complete: result?.complete === true };
+    const sameForeground = typeof before.foreground?.pid === "number" &&
+      before.foreground.pid === after.foreground?.pid && before.foreground.name === after.foreground?.name;
+    if (claude && sameForeground && canVerifyClaude(after)) {
+      const current = await this.agentFrom(after);
+      if (current?.agent === "claude" && current.sessionId === claude.sessionId && current.cwd === claude.cwd) {
+        return { ...snapshot, text: stripSidePane(snapshot.text) };
+      }
+    }
+    if (!codex || !isCodex(after) || before.turn !== after.turn) return redacted;
+
+    const kind = after.status?.kind;
+    const stable = sameForeground && before.status?.app === after.status?.app &&
+      before.status?.state === after.status?.state && before.status?.kind === kind;
+    if (after.status?.app === "codex" && after.status.state === "blocked") {
+      const prompt = stable && (kind === "question" || kind === "permission") ? inspectHcCodexPrompt(snapshot, kind) : null;
+      return { ...redacted, observedPrompt: { ...(prompt ?? { kind: "input", fingerprint: "input" }), turn: after.turn } };
+    }
+    if (!stable) return redacted;
+    if (after.status == null && isHcCodexTrustPrompt(snapshot)) {
+      return { ...redacted, observedPrompt: { kind: "trust", fingerprint: "trust", turn: after.turn } };
+    }
+    const prompt = inspectHcCodexPrompt(snapshot);
+    if (prompt) return { ...redacted, observedPrompt: { ...prompt, turn: after.turn } };
+    const [composer, footer, hint] = snapshot.text.split("\n").filter((row) => row.trim()).slice(-3);
+    const composerVisible = /^›(?: |$)/u.test(composer ?? "") &&
+      /^ {2}\S.* · \//u.test(footer ?? "") && /^ {2}← for agents · \? for shortcuts/u.test(hint ?? "");
+    return after.status == null && snapshot.complete && composerVisible
+      ? { ...redacted, codexTrustExited: true }
+      : redacted;
   }
 
   private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<void> {
@@ -351,6 +403,7 @@ export class HcBackend implements Terminals {
     let pendingText: string | null = null;
     const assertFingerprint = async (): Promise<void> => {
       const snapshot = await this.read(ref.target, ANSWER_PANE_LINES, prompt.driver.readRegion);
+      if (!snapshot.complete) throw new ExpectationLost("the verified prompt screen is incomplete");
       const current = prompt.driver.parseBlockedPane(snapshot.text);
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
@@ -366,8 +419,8 @@ export class HcBackend implements Terminals {
     };
     const write = async (action: () => Promise<void>, terminal = false): Promise<void> => {
       assertActive();
+      if (firstWrite && ref.agentKind !== "codex" && prompt.driver.kind !== "codex") await assertFingerprint();
       await this.assertWritable(ref, prompt.driver);
-      if (firstWrite) await assertFingerprint();
       await action();
       firstWrite = false;
       if (terminal) active = false;

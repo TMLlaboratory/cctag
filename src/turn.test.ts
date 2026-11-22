@@ -1310,16 +1310,7 @@ test("Orca permits interior LF and TAB and reports an accepted write", async () 
 });
 
 test("a startup dialog asks for a terminal-side answer instead of submitting", async () => {
-  // Captured Claude Code fresh-directory prompt, shared with startup-prompt.test.ts.
-  const startupDialog = [
-    " Accessing workspace:",
-    " /private/tmp/scratch/v3-workdir",
-    " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known",
-    " open source project, or work from your team).",
-    " ❯ 1. Yes, I trust this folder",
-    "   2. No, exit",
-    " Enter to confirm · Esc to cancel",
-  ].join("\n");
+  const startupDialog = readFileSync(new URL("./agents/claude/__fixtures__/startup-trust.screen.txt", import.meta.url), "utf8");
   const target = `orca:${PANE}`;
   const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
   let submits = 0;

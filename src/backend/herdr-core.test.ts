@@ -4,8 +4,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { WrittenFileTracker } from "../attachments.js";
+import type { Notifier } from "../notifier.js";
+import type { Pairing } from "../pairing.js";
+import { TurnEngine } from "../turn.js";
 import { claudeDriver } from "../agents/claude/driver.js";
 import { codexDriver, parseCodexModelMenuPrompt } from "../agents/codex/driver.js";
+import { agentPickerBlocks } from "../slack/blocks.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import type { SubmitContext } from "./index.js";
@@ -15,7 +21,11 @@ import { BackendUnavailable, ExpectationLost, SubmitRefused, WriteOutcomeUnknown
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
+const STARTUP_SCREEN = readFileSync(new URL("startup-trust.screen.txt", FIXTURES), "utf8");
+const CLAUDE_COMPOSER = JSON.parse(readFileSync(new URL("idle-composer.screen.json", FIXTURES), "utf8")).terminal.tail.join("\n");
+const CODEX_COMPOSER = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-idle-fresh.screen.json", import.meta.url), "utf8")).text;
 const CODEX_QUESTION = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-question.screen.json", import.meta.url), "utf8")).text;
+const CODEX_TRUST = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-trust.screen.json", import.meta.url), "utf8")).text;
 const MODEL_SCREEN = JSON.parse(readFileSync(new URL("../agents/codex/__fixtures__/hc-model.screen.json", import.meta.url), "utf8")).text;
 
 interface FakeTerminal {
@@ -37,8 +47,17 @@ interface Fake {
   socket: string;
   sessionsDir: string;
   calls(): { args: string[]; env: Record<string, string | undefined> }[];
+  setTerminal(terminal: Partial<FakeTerminal>): void;
   startCore(): Promise<void>;
   cleanup(): Promise<void>;
+}
+
+interface FakeOptions {
+  screens?: string[];
+  incomplete?: boolean;
+  readError?: boolean;
+  terminalAfterRead?: Partial<FakeTerminal>;
+  send?: Record<string, unknown> | { error: { kind: string; message: string } };
 }
 
 /**
@@ -48,12 +67,13 @@ interface Fake {
  */
 function fakeHc(
   terminals: FakeTerminal[],
-  options: { screens?: string[]; send?: Record<string, unknown> | { error: { kind: string; message: string } } } = {},
+  options: FakeOptions = {},
 ): Fake {
   const dir = mkdtempSync(join(tmpdir(), "cctag-hc-"));
   const bin = join(dir, "hc");
   const callsFile = join(dir, "calls.jsonl");
   const readCount = join(dir, "read-count");
+  const terminalOverride = join(dir, "terminal-override.json");
   const sessionsDir = join(dir, "sessions");
   mkdirSync(sessionsDir);
   for (const t of terminals) {
@@ -65,29 +85,33 @@ function fakeHc(
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const ops = args.includes("--") ? args.slice(args.indexOf("--") + 1) : [];
-const env = { HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET };
+const env = { HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET, HC_SOCKET: process.env.HC_SOCKET };
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({ args, env }) + "\\n");
 const terminals = ${JSON.stringify(terminals)};
 const screens = ${JSON.stringify(options.screens ?? ["screen text"])};
 const send = ${JSON.stringify(options.send ?? { started: true, status: "working", turn: 2 })};
+const afterRead = ${JSON.stringify(options.terminalAfterRead ?? {})};
 const fail = (kind, message, code) => { process.stderr.write(JSON.stringify({ error: { kind, message } })); process.exit(code); };
 const find = (address) => terminals.find((t) => t.address === address) ?? fail("not_found", "no terminal " + address, 3);
 const out = (value) => process.stdout.write(JSON.stringify(value));
 if (args[0] === "ls") {
   out({ terminals: terminals.map((t) => ({ address: t.address, agent: t.agent, state: t.state ?? "live", ...(t.status === undefined ? {} : { status: t.status }) })) });
 } else if (args[0] === "get") {
-  const t = find(ops[0]);
+  const file = ${JSON.stringify(terminalOverride)};
+  const t = { ...find(ops[0]), ...(fs.existsSync(${JSON.stringify(readCount)}) ? afterRead : {}),
+    ...(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {}) };
   out({
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
     foreground: t.pid === undefined ? null : { pid: t.pid, cwd: t.foregroundCwd === undefined ? "/moved/here" : t.foregroundCwd, name: t.foregroundName ?? "claude" },
-    status: t.status === undefined ? null : { app: t.agent, state: t.status, kind: t.kind },
+    status: t.status == null ? null : { app: t.agent, state: t.status, kind: t.kind },
     turn: t.turn,
   });
 } else if (args[0] === "read") {
   find(ops[0]);
+  if (${JSON.stringify(options.readError ?? false)}) fail("unavailable", "screen unavailable", 5);
   const n = Number(fs.existsSync(${JSON.stringify(readCount)}) ? fs.readFileSync(${JSON.stringify(readCount)}, "utf8") : "0");
   fs.writeFileSync(${JSON.stringify(readCount)}, String(n + 1));
-  out({ text: screens[Math.min(n, screens.length - 1)], complete: true, how: "screen" });
+  out({ text: screens[Math.min(n, screens.length - 1)], complete: ${!options.incomplete}, how: "screen" });
 } else if (args[0] === "send") {
   if (send.error) fail(send.error.kind, send.error.message, 9);
   out(send);
@@ -106,6 +130,7 @@ if (args[0] === "ls") {
     bin,
     socket,
     sessionsDir,
+    setTerminal: (terminal) => writeFileSync(terminalOverride, JSON.stringify(terminal)),
     calls: () =>
       existsSync(callsFile)
         ? readFileSync(callsFile, "utf8")
@@ -143,6 +168,11 @@ const CTX: SubmitContext = {
   retryLimit: 1,
   pollIntervalMs: 1,
 };
+const CLAUDE: FakeTerminal = { address: "t1", agent: "claude-code", status: "blocked", pid: 101 };
+const PAIRING: Pairing = {
+  key: "C1:1.1", channel: "C1", threadTs: "1.1", paneId: "hc:t1", pairedBy: "U1", pairedAt: "2026-11-22T00:00:00Z",
+  terminalId: "t1", cwd: "/repo/t1", backend: "herdr-core",
+};
 
 function ref(address: string): AgentRef {
   return { target: `hc:${address}`, pid: null, processStartedAt: null };
@@ -153,6 +183,118 @@ function verified(screen: string): VerifiedPrompt {
   if (parsed.kind !== "question" && parsed.kind !== "permission") throw new Error(`expected a prompt, got ${parsed.kind}`);
   return parsed.verified;
 }
+
+function testEngine(backend: HcBackend, notifier: Notifier): TurnEngine {
+  return new TurnEngine(backend, notifier, {
+    turnTimeoutMs: 60_000, pollIntervalMs: 5, limits: { maxFileBytes: 1024, maxFileCount: 1 },
+  }, { list: () => [PAIRING] });
+}
+
+test("an adopted hc turn reads after a status update and never publishes the replacement foreground", async (t) => {
+  for (const scenario of [
+    { name: "Codex replaces Claude in Slack I/O", replace: true, screen: PLAN_SCREEN.text + "\nPRIVATE SCREEN", notice: /現在の会話/ },
+    { name: "private unclassified screen", replace: false, screen: "PRIVATE SCREEN", notice: /端末で答えてください/ },
+    { name: "visible Claude question", replace: false, screen: QUESTION_SCREEN.text, notice: /❓/ },
+  ]) {
+    await t.test(scenario.name, async () => {
+      await withCore([CLAUDE], { screens: [scenario.screen] }, async (backend, fake) => {
+        const messages: { text: string; blocks?: unknown[] }[] = [];
+        let seen: () => void;
+        const notice = new Promise<void>((resolve) => { seen = resolve; });
+        const record = (text: string, blocks?: unknown[]) => {
+          messages.push({ text, blocks });
+          if (scenario.notice.test(text)) seen();
+        };
+        const notifier: Notifier = {
+          async postReply(_c, _t, text) { record(text); },
+          async postMessage(_c, _t, text, blocks) {
+            record(text, blocks);
+            return {
+              async update(update, nextBlocks) {
+                if (scenario.replace && update.includes("実行中")) {
+                  await delay(5);
+                  fake.setTerminal({ agent: "codex", foregroundName: "codex", status: "idle" });
+                }
+                record(update, nextBlocks);
+              },
+            };
+          },
+        };
+        const engine = testEngine(backend, notifier);
+        try {
+          assert.equal(await engine.adoptBlockedTerminal(PAIRING, {
+            backend: "herdr-core", driver: claudeDriver, sessionId: "session-101", transcriptPath: "",
+            offset: 0, collected: [], paneId: PAIRING.paneId, ref: ref("t1"), cwd: PAIRING.cwd,
+            outboxBaseline: {}, writes: new WrittenFileTracker(),
+          }), true);
+          await Promise.race([notice, delay(4_000, undefined, { ref: false }).then(() => assert.fail("expected notice"))]);
+          const calls = fake.calls().map(({ args }) => args);
+          assert.deepEqual(calls.map(([command]) => command), scenario.replace ? ["get"] : ["get", "read"]);
+          if (!scenario.replace) assert.deepEqual(calls[1], ["read", "--json", "--", "t1"]);
+          const output = JSON.stringify(messages);
+          assert.doesNotMatch(output, /PRIVATE SCREEN/);
+          if (scenario.screen === QUESTION_SCREEN.text) assert.match(output, /action_id/);
+          else assert.doesNotMatch(output, /action_id/);
+        } finally {
+          engine.abortAll();
+        }
+      });
+    });
+  }
+});
+
+test("a session-backed status-null Claude startup is checked before submit", async (t) => {
+  const terminal = { ...CLAUDE, status: null };
+  const privateDialog = STARTUP_SCREEN.replace(" Accessing workspace:", "PRIVATE STARTUP SENTINEL")
+    .replace("Is this a project you created or one you trust?", "Continue with this setup?");
+  for (const scenario of [
+    { name: "captured trust dialog", terminal, options: { screens: [STARTUP_SCREEN] }, notice: /このダイアログは端末で答えてください/ },
+    { name: "private startup heading", terminal, options: { screens: [privateDialog] }, notice: /このダイアログは端末で答えてください/ },
+    { name: "unavailable screen", terminal, options: { readError: true }, notice: /端末の入力欄を確認できません/ },
+    { name: "unqualified foreground", terminal: { ...terminal, foregroundName: "zsh" }, options: {}, notice: /端末の入力欄を確認できません/ },
+    { name: "foreground changed during capture", terminal, options: {
+      screens: [STARTUP_SCREEN],
+      terminalAfterRead: { agent: "codex", foregroundName: "codex", status: "idle" },
+    }, notice: /端末の入力欄を確認できません/ },
+  ]) {
+    await t.test(scenario.name, async () => {
+      await withCore([scenario.terminal], scenario.options, async (backend, fake) => {
+        const replies: string[] = [];
+        const engine = testEngine(backend, {
+          async postReply(_c, _t, text) { replies.push(text); },
+          async postMessage() { assert.fail("a blocked startup should not start a turn"); },
+        });
+        try {
+          await engine.startTurn(PAIRING, "U1", "continue");
+          assert.match(replies.join(), scenario.notice);
+          assert.doesNotMatch(replies.join(), /PRIVATE STARTUP SENTINEL|Is this a project you created or one you trust\?/);
+          const commands = fake.calls().map(({ args }) => args[0]);
+          assert.ok(!commands.includes("send"));
+          if (scenario.name === "captured trust dialog" || scenario.name === "private startup heading") {
+            assert.deepEqual(commands, ["get", "get", "read", "get"]);
+          }
+        } finally {
+          engine.abortAll();
+        }
+      });
+    });
+  }
+  await t.test("verified visible composer can submit", async () => {
+    await withCore([terminal], { screens: [CLAUDE_COMPOSER], send: { started: false } }, async (backend, fake) => {
+      const engine = testEngine(backend, {
+        async postReply() {},
+        async postMessage() { return { async update() {} }; },
+      });
+      try {
+        await engine.startTurn(PAIRING, "U1", "continue");
+        assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "get", "read", "get", "get", "send"]);
+        assert.deepEqual(fake.calls()[2].args, ["read", "--json", "--", "t1"]);
+      } finally {
+        engine.abortAll();
+      }
+    });
+  });
+});
 
 test("lists local Claude Code terminals with the session id and cwd Claude Code recorded", async () => {
   await withCore(
@@ -214,6 +356,7 @@ test("a stopped core is reported as unavailable and hc is never run, so cctag ca
     assert.match(result.failures[0]?.reason ?? "", /not running/);
     await assert.rejects(backend.get("hc:t1"), BackendUnavailable);
     await assert.rejects(backend.exists("hc:t1"), BackendUnavailable);
+    await assert.rejects(backend.submit(ref("t1"), "message", CTX), BackendUnavailable);
     assert.deepEqual(fake.calls(), []);
   } finally {
     await fake.cleanup();
@@ -230,7 +373,7 @@ test("hc runs without the Spoke's own HC_TERMINAL_ID, HC_SCOPE or HC_TERMINAL_SO
       await backend.submit(ref("t1"), "hello", CTX);
       const send = fake.calls().find((call) => call.args[0] === "send");
       assert.deepEqual(send?.args, ["send", "--json", "--", "t1", "hello"]);
-      assert.deepEqual(send?.env, {}, "no HC_* variable reached hc");
+      assert.deepEqual(send?.env, { HC_SOCKET: fake.socket }, "hc uses the same socket that cctag probes");
     });
   } finally {
     if (saved.id === undefined) delete process.env.HC_TERMINAL_ID;
@@ -274,19 +417,109 @@ test("submit turns hc's refusal of a blocked terminal into a gate refusal, and o
   });
 });
 
-test("read asks for history lines only for the history region and strips the side pane", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+test("hc reads only the visible screen for either region and strips the side pane", async () => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const screen = await backend.read("hc:t1", 200, "screen");
     await backend.read("hc:t1", 200, "history");
     assert.deepEqual(
       fake.calls().filter((call) => call.args[0] === "read").map((call) => call.args),
       [
         ["read", "--json", "--", "t1"],
-        ["read", "--lines", "200", "--json", "--", "t1"],
+        ["read", "--json", "--", "t1"],
       ],
     );
     assert.equal(screen.complete, true);
     assert.ok(!screen.text.includes("AI解説"), "the qa-guide pane is stripped");
+  });
+});
+
+test("a polling read uses one hc command with the current Claude observation and discards it after use", async () => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text, "private"], terminalAfterRead: { status: null, foregroundName: "zsh" } }, async (backend, fake) => {
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    assert.equal((await backend.read("hc:t1", 200, "history", agent)).text, stripSidePane(QUESTION_SCREEN.text));
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read"]);
+    assert.deepEqual(fake.calls()[1].args, ["read", "--json", "--", "t1"]);
+    assert.deepEqual(await backend.read("hc:t1", 200, "history", agent), { text: "", draft: null, complete: false });
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
+  });
+});
+
+test("a qualified Claude read propagates a read failure without another get", async () => {
+  await withCore([CLAUDE], { readError: true }, async (backend, fake) => {
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    await assert.rejects(backend.read("hc:t1", 0, "screen", agent), /screen unavailable/);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read"]);
+  });
+});
+
+test("a newer unqualified poll cannot reuse an unconsumed Claude observation", async () => {
+  await withCore([CLAUDE], { terminalAfterRead: { foregroundName: "zsh", status: null } }, async (backend, fake) => {
+    const earlier = await backend.get("hc:t1");
+    assert.ok(earlier);
+    await backend.read("hc:t1", 0, "screen");
+    const current = await backend.get("hc:t1");
+    assert.ok(current);
+    for (const observation of [current, earlier]) {
+      const snapshot = await backend.read("hc:t1", 200, "history", observation);
+      assert.equal(snapshot.text, "");
+    }
+    assert.equal(fake.calls().filter(({ args }) => args[0] === "read").length, 1);
+  });
+});
+
+test("an unobserved read with a replaced Claude foreground withholds the screen and a stale answer sends no keys", async () => {
+  const terminalAfterRead = { agent: "codex", foregroundName: "codex", status: "blocked", kind: "question" };
+  await withCore([CLAUDE], { screens: [CODEX_QUESTION], terminalAfterRead }, async (backend) => {
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), { text: "", draft: null, complete: false });
+  });
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text], terminalAfterRead }, async (backend, fake) => {
+    const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
+    await assert.rejects(channel.digit(1), ExpectationLost);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
+  });
+});
+
+test("fresh Codex blocked status produces a generic prompt when no current form can be verified", async () => {
+  const terminal = { address: "t1", agent: "codex", foregroundName: "codex", status: "blocked", kind: "question", pid: 101, turn: 3 };
+  for (const options of [
+    { screens: [CODEX_QUESTION], incomplete: true },
+    { screens: [CODEX_QUESTION + "\n› Ask Codex to do anything"] },
+    { screens: ["private unclassified prompt"] },
+    { readError: true },
+  ]) {
+    await withCore([terminal], options, async (backend) => {
+      assert.deepEqual(await backend.read("hc:t1", 0, "screen"), {
+        text: "", draft: null, complete: false, observedPrompt: { kind: "input", fingerprint: "input", turn: 3 },
+      });
+    });
+  }
+  await withCore([terminal], { screens: [CODEX_QUESTION], terminalAfterRead: { status: "working" } }, async (backend) => {
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), { text: "", draft: null, complete: false });
+  });
+  await withCore([{ ...terminal, pid: undefined }], { screens: [CODEX_QUESTION] }, async (backend) => {
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), {
+      text: "", draft: null, complete: false, observedPrompt: { kind: "input", fingerprint: "input", turn: 3 },
+    });
+  });
+});
+
+test("foreground-only Codex can report the measured trust screen on an existing terminal", async () => {
+  const terminal = { address: "t1", agent: "env", foregroundName: "codex", status: null, pid: 101, turn: 7 };
+  const moved = CODEX_TRUST.replace("› 1.", "  1.").replace("  2.", "› 2.");
+  await withCore([terminal], {
+    screens: [CODEX_TRUST, moved, CODEX_TRUST + "\n› Ask Codex to do anything", CODEX_COMPOSER],
+  }, async (backend, fake) => {
+    const notice = {
+      text: "", draft: null, complete: false, observedPrompt: { kind: "trust", fingerprint: "trust", turn: 7 },
+    };
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), notice);
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), notice);
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), { text: "", draft: null, complete: false });
+    assert.deepEqual(await backend.read("hc:t1", 0, "screen"), { text: "", draft: null, complete: false, codexTrustExited: true });
+    await assert.rejects(backend.openComposer(ref("t1"), claudeDriver).backTab(), ExpectationLost);
+    assert.ok(fake.calls().every(({ args }) => args[0] !== "keys" && args[0] !== "send"));
   });
 });
 
@@ -297,7 +530,7 @@ test("the captured hc screens parse as a question and a plan approval", () => {
 });
 
 test("an answer checks the prompt is still on screen, then presses keys by hc's key names", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
     const channel = backend.openAnswer(ref("t1"), prompt);
     await channel.move("Down", 2);
@@ -310,11 +543,20 @@ test("an answer checks the prompt is still on screen, then presses keys by hc's 
       ["keys", "--json", "--", "t1", "enter"],
     ]);
     assert.equal(fake.calls().filter((call) => call.args[0] === "read").length, 1);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "get", "keys", "get", "keys", "get", "keys"]);
+  });
+});
+
+test("a matching answer fingerprint on an incomplete hc screen authorizes no input", async () => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text], incomplete: true }, async (backend, fake) => {
+    const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
+    await assert.rejects(channel.digit(1), ExpectationLost);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
   });
 });
 
 test("typed text is pasted together with its Enter, and nothing else may follow it", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
     const channel = backend.openAnswer(ref("t1"), prompt);
     await channel.move("Down", 2);
@@ -337,7 +579,7 @@ test("typed text is pasted together with its Enter, and nothing else may follow 
 });
 
 test("an answer is refused when the prompt on screen is no longer the verified one", async () => {
-  await withCore([{ address: "t1" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
     const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
     await assert.rejects(channel.digit(1), ExpectationLost);
     assert.deepEqual(fake.calls().filter((call) => call.args[0] === "keys" || call.args[0] === "send"), []);
@@ -380,7 +622,7 @@ test("a multi-select free-text answer on herdr-core is refused before any key is
 });
 
 test("plan feedback moves to the option, then pastes the feedback with its Enter", async () => {
-  await withCore([{ address: "t1" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(PLAN_SCREEN.text);
     const channel = backend.openAnswer(ref("t1"), prompt);
     await claudeDriver.answerPlanFeedback!(channel, 3, "改行1つだけにして");
@@ -422,20 +664,26 @@ test("hc Codex stays live and unbound, and every backend input path refuses", as
     await assert.rejects(backend.openComposer(ref("t1"), claudeDriver).backTab(), ExpectationLost);
     const model = parseCodexModelMenuPrompt(MODEL_SCREEN);
     assert.ok(model);
+    const beforeModelAnswer = fake.calls().length;
     await assert.rejects(backend.openModelAnswer(ref("t1"), model).escape(), ExpectationLost);
+    assert.equal(fake.calls().length, beforeModelAnswer);
     assert.deepEqual(fake.calls().filter(({ args }) => args[0] === "send" || args[0] === "keys"), []);
   });
 });
 
 test("a Codex foreground executable triggers refusal without app metadata", async () => {
   await withCore(
-    [{ address: "t1", pid: 101, foregroundName: "/opt/homebrew/bin/codex", foregroundCwd: null }],
+    [{ address: "t1", agent: "env", status: null, pid: 101, foregroundName: "/opt/homebrew/bin/codex", foregroundCwd: null }],
     { screens: [CODEX_QUESTION] },
     async (backend, fake) => {
       const agent = await backend.get("hc:t1");
       assert.equal(agent?.agent, "codex");
       assert.equal(agent?.cwd, "", "the terminal creation cwd does not establish live ownership");
-      assert.equal((await backend.list()).agents.length, 0);
+      const listing = await backend.list();
+      assert.deepEqual(listing.agents, []);
+      assert.equal(listing.notices.length, 1);
+      assert.match(listing.notices[0], /現在の会話/);
+      assert.match(JSON.stringify(agentPickerBlocks(listing, ["herdr-core"])), /現在の会話/);
       assert.equal((await backend.read("hc:t1", 200, "history")).text, "");
       await assert.rejects(backend.submit(ref("t1"), "try to send", CTX), SubmitRefused);
       const prompt = verified(stripSidePane(QUESTION_SCREEN.text));

@@ -175,7 +175,7 @@ test("the agent picker groups by backend and cwd with readable title-less Orca l
     ],
     failures: [],
     complete: true,
-    notices: [],
+    notices: ["herdr-core 上の Codex は現在の会話を確認できません"],
   };
   const blocks = agentPickerBlocks(result, ["herdr", "orca"]) as unknown as Array<{
     accessory: {
@@ -186,6 +186,7 @@ test("the agent picker groups by backend and cwd with readable title-less Orca l
     };
   }>;
   const groups = blocks[0]!.accessory.option_groups;
+  assert.match(JSON.stringify(blocks), /herdr-core 上の Codex は現在の会話を確認できません/);
   assert.deepEqual(groups.map((group) => group.label.text), ["herdr · project", "orca · project"]);
   assert.deepEqual(groups[0]!.options.map((option) => option.value), ["wT:p1", "wT:p2"]);
   assert.deepEqual(groups[0]!.options.map((option) => option.text.text), [

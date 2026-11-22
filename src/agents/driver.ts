@@ -106,7 +106,7 @@ export interface TurnOutput {
   toolOutcomes?: ToolOutcome[];
 }
 
-/** Shift+Tab-style mode ring (Claude Code only — Codex has no equivalent, so its driver's `modes` is null). */
+/** A verified Shift+Tab mode ring, currently implemented for Claude Code. */
 export interface ModeSupport {
   ring: readonly string[];
   aliases: Record<string, string>;
@@ -289,7 +289,7 @@ export interface AgentDriver {
   /** Resolves the on-disk plan file for a plan-approval prompt. Absent = no plan-file concept. */
   resolvePlanFile?(paneText: string): string | null;
 
-  /** Shift+Tab-style mode ring, or null if this agent has no equivalent. */
+  /** Verified Shift+Tab mode support, when implemented. */
   readonly modes: ModeSupport | null;
   /** Handles `@cctag model <argsText>` end-to-end, including its submit outcome. */
   runModelCommand(terminals: Terminals, agent: AgentInfo, argsText: string): Promise<ModelCommandResult>;
