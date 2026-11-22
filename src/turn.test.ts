@@ -317,6 +317,30 @@ test("a stashed Orca draft is reported in the thread after submission", async ()
   }
 });
 
+test("an accepted core send with unverified restoration remains under turn monitoring", async () => {
+  const target = "hc:t1";
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "herdr-core" };
+  const { notifier, posts, updates } = fakeNotifier();
+  const terminals = fakeBackend(() => "working", () => "private-draft", {
+    async get() {
+      return { ...fakeAgent("working", "herdr-core"), ref: { target, pid: 42, processStartedAt: 1 } };
+    },
+    async submit() {
+      return { status: "accepted", draftStashed: true, draftRestoration: "unverified" };
+    },
+  }, "herdr-core");
+  const engine = engineFor(terminals, notifier, 600_000);
+  try {
+    await engine.startTurn(pairing, "U1", "send this");
+    assert.equal(engine.isBusy(target), true);
+    assert.match(posts.join("\n"), /書きかけが戻ったか確認できません/u);
+    assert.match(updates.map(({ text }) => text).join("\n"), /ターン開始を確認/u);
+    assert.doesNotMatch(posts.join("\n"), /private-draft|戻ったことを確認/u);
+  } finally {
+    engine.abortAll();
+  }
+});
+
 test("turn refusal is reported once, in its status message, with probe and stash uncertainty", async () => {
   const target = `orca:${PANE}`;
   const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };

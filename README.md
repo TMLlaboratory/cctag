@@ -146,16 +146,25 @@ must be available.
 
 herdr-core does not share agents with the herdr TUI; they are separate
 servers. cctag talks to the core with `hc`, and the Herdr app shows the same
-terminals, so what cctag types appears there as well. cctag never starts the
-core: when nothing listens on its socket (`HC_SOCKET`, or
+terminals, so what cctag types appears there as well. cctag checks the
+selected socket before running `hc` and uses that same socket for each call. When
+nothing listens on it (`HC_SOCKET`, or
 `~/.local/state/herdr-core/default/default.sock`), the backend reports that
 herdr-core is not running. Start the core yourself — through the Herdr app,
 launchd or `hc server start` — because a core takes the environment of whatever
 started it and hands it to every terminal. Status is what Claude Code reports
 to the core; the transcript is found from `~/.claude/sessions/<pid>.json`,
-which Claude Code writes for each running session. `hc` cannot type text
-without pressing Enter, so a free-text answer to a multi-select question is
+which Claude Code writes for each running session. `hc` can press named keys
+but cannot paste arbitrary text without Enter, so a free-text answer to a multi-select question is
 refused with a note to answer in the terminal.
+
+On herdr and herdr-core, cctag checks the foreground Claude Code process and
+the visible composer before sending. When it verifies a single-line draft, it
+stashes it and tests the composer for hidden whitespace before sending.
+If anything remains visible after stashing, the terminal needs a check.
+After a stashed send, Slack reports that exact restoration cannot be verified
+from the screen. Model changes and messages with image attachments require an
+empty composer. Complete any model-switch confirmation at the terminal.
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the
@@ -171,10 +180,9 @@ text a person typed, so before sending a Slack message into a non-empty
 composer cctag types one character to tell them apart and removes it again. A
 suggestion is replaced by the message. A typed draft is stashed with Ctrl+S,
 the message is sent, and Claude Code puts the draft back; this replaces any
-draft stashed earlier, because Claude Code keeps only one. When cctag cannot
-confirm what happened, it sends nothing and says in the thread what may be left
-in the composer. This was verified with Claude Code 2.1.287; on other versions
-a message may be refused while a suggestion is shown.
+draft stashed earlier, because Claude Code keeps only one. A failed pre-send
+check stops submission. If the send outcome is unknown, Slack asks you to check
+the terminal. The restore behavior was verified with Claude Code 2.1.287.
 
 For a fuller walkthrough of the mechanism — Hub/Spoke roles, how herdr's
 agent registry differs from raw pane access, why a turn ending is decided

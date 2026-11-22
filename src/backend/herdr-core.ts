@@ -5,6 +5,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDriver } from "../agents/driver.js";
+import { parseClaudeHcComposer } from "../agents/claude/composer.js";
+import { submitClaudeComposer } from "./submit-claude-composer.js";
+import { observeHcScreen } from "./hc-screen.js";
 import type {
   AnswerChannel,
   BlindChannel,
@@ -19,6 +22,7 @@ import { stripSidePane } from "./side-pane.js";
 import { backendForTarget } from "./target.js";
 import {
   BackendUnavailable,
+  EMPTY_SUBMIT_COMPOSER_STATE,
   ExpectationLost,
   SubmitRefused,
   UnknownTarget,
@@ -28,6 +32,7 @@ import {
   type AgentStatus,
   type ListResult,
   type ScreenSnapshot,
+  type SubmitComposerState,
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +52,8 @@ interface HcTerminal {
   cwd: string;
   state: string;
   title?: string | null;
+  cols?: number;
+  screen?: string;
   foreground?: { pid?: number; cwd?: string; name?: string } | null;
   status?: { app?: string | null; state?: string | null } | null;
 }
@@ -100,11 +107,15 @@ function probeSocket(path: string): Promise<boolean> {
 }
 
 /** Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under. */
-async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string } | null> {
+async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string; startedAt: number | null } | null> {
   try {
-    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as { sessionId?: unknown; cwd?: unknown };
+    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as {
+      pid?: number; sessionId?: unknown; cwd?: unknown; startedAt?: number;
+    };
     if (typeof raw.sessionId !== "string" || typeof raw.cwd !== "string") return null;
-    return { sessionId: raw.sessionId, cwd: raw.cwd };
+    const startedAt = raw.pid === pid && raw.sessionId && typeof raw.startedAt === "number" &&
+      Number.isSafeInteger(raw.startedAt) && raw.startedAt > 0 ? raw.startedAt : null;
+    return { sessionId: raw.sessionId, cwd: raw.cwd, startedAt };
   } catch {
     return null;
   }
@@ -144,7 +155,8 @@ export class HcBackend implements Terminals {
     if (!(await probeSocket(this.socket))) {
       throw new BackendUnavailable(`herdr-core is not running (nothing listens on ${this.socket}); cctag does not start it`);
     }
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, HC_SOCKET: this.socket };
+    delete env.HC_SESSION;
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
     delete env.HC_TERMINAL_SOCKET;
@@ -193,7 +205,7 @@ export class HcBackend implements Terminals {
     const session = await claudeSession(pid, this.sessionsDir);
     if (!session) return null;
     return {
-      ref: { target: `${PREFIX}${terminal.address}`, pid: null, processStartedAt: null },
+      ref: { target: `${PREFIX}${terminal.address}`, pid, processStartedAt: session.startedAt, sessionId: session.sessionId },
       backend: "herdr-core",
       agent: "claude",
       sessionId: session.sessionId,
@@ -250,18 +262,49 @@ export class HcBackend implements Terminals {
     return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
   }
 
-  async submit(ref: AgentRef, text: string, _ctx: SubmitContext): Promise<SubmitOutcome> {
+  private async send(ref: AgentRef, text: string, composer: SubmitComposerState): Promise<SubmitOutcome> {
     let result: { started?: boolean };
     try {
       result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
     } catch (err) {
       if (err instanceof HcCliError && err.kind === "blocked") {
-        throw new SubmitRefused("gate", `herdr-core refused the send: ${err.message}`);
+        throw new SubmitRefused("gate", `herdr-core refused the send: ${err.message}`, composer);
       }
-      throw new WriteOutcomeUnknown(err);
+      throw new WriteOutcomeUnknown(err, { ...composer, submitUncertain: true });
     }
-    // `started` is whether the agent began a turn; a slash command such as /model never does.
-    return { status: result.started === true ? "started" : "accepted", draftStashed: false };
+    if (typeof result?.started !== "boolean") throw new WriteOutcomeUnknown(undefined, { ...composer, submitUncertain: true });
+    return { status: result.started ? "started" : "accepted", draftStashed: composer.stash === "stashed" };
+  }
+
+  async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    if (ctx.driver.kind !== "claude") return this.send(ref, text, EMPTY_SUBMIT_COMPOSER_STATE);
+    const address = addressOf(ref.target);
+    const refuse = (reason: SubmitRefused["reason"]) => new SubmitRefused(reason, `herdr-core: ${reason}`);
+    const sameAgent = (terminal: HcTerminal | null) =>
+      terminal?.address === address && terminal.state === "live" && terminal.foreground?.pid === ref.pid &&
+      terminal.foreground?.name === "claude" && terminal.status?.app === CLAUDE_APP;
+    const read = async () => {
+      if (ref.pid === null || ref.processStartedAt === null || !ref.sessionId) throw refuse("agent-unverified");
+      const observed = await observeHcScreen<HcTerminal>(this.socket, address);
+      if (!observed || observed.terminal.screen !== "exact" || !observed.terminal.cols) throw refuse("incomplete-screen");
+      const current = await this.terminal(address).catch(() => null);
+      if (!sameAgent(observed.terminal) || !sameAgent(current)) {
+        throw refuse("agent-changed");
+      }
+      const session = await claudeSession(ref.pid, this.sessionsDir);
+      if (!session || session.startedAt === null) throw refuse("agent-unverified");
+      if (session.sessionId !== ref.sessionId || session.startedAt !== ref.processStartedAt) throw refuse("agent-changed");
+      if (current?.status?.state === "blocked" || observed.terminal.status?.state === "blocked") throw refuse("gate");
+      const status = observed.terminal.status?.state;
+      const view = parseClaudeHcComposer(observed.ansi, observed.terminal.cols);
+      if (status !== current?.status?.state || (status !== "idle" && status !== "done")) throw refuse("not-idle");
+      return view;
+    };
+    return submitClaudeComposer(text, ctx, {
+      read,
+      key: async (...keys) => { await this.json(["keys"], [address, ...keys]); },
+      send: (composer) => this.send(ref, text, composer),
+    });
   }
 
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel {
@@ -277,8 +320,8 @@ export class HcBackend implements Terminals {
   }
 
   /**
-   * hc has no way to type text without pressing Enter (`hc keys` takes key
-   * names only), so `text()` holds the value and the following `confirm()`
+   * hc cannot paste arbitrary text without pressing Enter, so `text()`
+   * holds the value and the following `confirm()`
    * pastes it with Enter through `hc send --force`. Anything else after
    * `text()` would need the text typed but not submitted, and is refused.
    */

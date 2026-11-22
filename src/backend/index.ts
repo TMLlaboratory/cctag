@@ -8,6 +8,7 @@ export * from "./types.js";
 export interface SubmitOutcome {
   status: "started" | "accepted";
   draftStashed: boolean;
+  draftRestoration?: "verified" | "unverified";
 }
 
 export interface SubmitContext {
@@ -18,6 +19,7 @@ export interface SubmitContext {
   retryLimit: number;
   /** The poll interval already used by TurnEngine before moving submit here. */
   pollIntervalMs: number;
+  hasImages?: boolean;
 }
 
 export interface AnswerChannel {

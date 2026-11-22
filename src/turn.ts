@@ -23,7 +23,7 @@ import {
   WRITE_OUTCOME_UNKNOWN_MESSAGE,
 } from "./backend/types.js";
 import type { AgentInfo, AgentRef, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
-import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
+import { submitDraftNotice, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
 import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
@@ -549,10 +549,12 @@ export class TurnEngine {
           transcriptGrew: () => (canVerify ? transcriptSizeSafe(tPath) > offset : null),
           retryLimit: retries,
           pollIntervalMs: this.opts.pollIntervalMs,
+          hasImages: prepared.imageCount > 0,
         });
-        if (outcome.draftStashed) {
+        const draftNotice = submitDraftNotice(outcome, backend);
+        if (draftNotice) {
           await this.notifier
-            .postReply(pairing.channel, pairing.threadTs ?? "", draftStashedText(backend))
+            .postReply(pairing.channel, pairing.threadTs ?? "", draftNotice)
             .catch(() => {});
         }
         if (backend !== "herdr" && outcome.status === "accepted") {

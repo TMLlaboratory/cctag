@@ -33,6 +33,7 @@ import {
   WriteOutcomeUnknown,
 } from "./types.js";
 import { stripSidePane } from "./side-pane.js";
+import { classifyComposerProbe, composerProbeKey } from "./composer-probe.js";
 import { backendForTarget } from "./target.js";
 
 const execFileAsync = promisify(execFile);
@@ -956,7 +957,7 @@ export class OrcaBackend implements Terminals {
           draftMismatchReason: SubmitRefused["reason"];
         } = { notIdleReason: failureReason, draftMismatchReason: failureReason },
       ): Promise<{ kind: "suggestion" | "typed"; snapshot: ScreenSnapshot }> => {
-        const probe = draft === "x" ? "y" : "x";
+        const probe = composerProbeKey(draft);
         await writeKey(probe, draft, {
           ...firstWriteReasons,
           beforeWrite: () => {
@@ -967,12 +968,13 @@ export class OrcaBackend implements Terminals {
           },
         });
 
-        const observed = await readStableDraft((value) => value === probe || value === `${draft}${probe}`);
+        const classify = (value: string | null) => classifyComposerProbe(draft, draft.length, probe, value);
+        const observed = await readStableDraft((value) => classify(value) !== null);
         if (!observed) {
           throw refuse(failureReason, "The one-character composer probe could not be verified.");
         }
 
-        if (observed.draft === probe) {
+        if (classify(observed.draft) === "suggestion") {
           await writeKey("\u007f", probe, {
             notIdleReason: failureReason,
             draftMismatchReason: failureReason,

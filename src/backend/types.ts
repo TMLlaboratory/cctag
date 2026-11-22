@@ -29,6 +29,7 @@ export interface AgentRef {
   readonly agentKind?: AgentKind;
   readonly sessionId?: string | null;
   readonly transcriptIdentity?: TranscriptIdentity;
+  readonly terminalInstance?: string;
 }
 
 export interface AgentInfo {
@@ -57,6 +58,7 @@ export interface SubmitComposerState {
   readonly probe: "x" | "y" | null;
   readonly stash: "untouched" | "uncertain" | "stashed";
   readonly submitUncertain: boolean;
+  readonly draftRestored?: boolean;
 }
 
 export const EMPTY_SUBMIT_COMPOSER_STATE: SubmitComposerState = {
@@ -77,10 +79,12 @@ export class SubmitRefused extends Error {
     readonly reason:
       | "not-idle"
       | "draft"
+      | "existing-stash"
       | "probe-unverified"
       | "stash-unverified"
       | "gate"
       | "incomplete-screen"
+      | "agent-unverified"
       | "agent-changed"
       | "cancelled"
       | "unsafe-text",

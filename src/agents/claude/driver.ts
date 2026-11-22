@@ -7,6 +7,7 @@ import { createBlindPermissionPrompt, createVerifiedPrompt } from "../../backend
 import {
   ExpectationLost,
   hasUnsendableC0Controls,
+  SubmitRefused,
   UNSENDABLE_TEXT_MESSAGE,
 } from "../../backend/types.js";
 import type { AgentInfo, AgentRef, ScreenSnapshot } from "../../backend/types.js";
@@ -297,17 +298,51 @@ async function runClaudeSlashCommand(
   driver: AgentDriver,
   agent: AgentInfo,
   command: string,
+  cancelled: () => boolean,
 ): Promise<ModelCommandResult> {
+  const backend = backendForTarget(agent.ref.target);
+  const guarded = backend === "herdr-core" || backend === "herdr";
+  const readResult = () => backend === "herdr"
+    ? terminals.read(agent.ref.target, 40, "history")
+    : terminals.read(agent.ref.target, 0, "screen");
+  const before = guarded ? await readResult().catch(() => null) : null;
+  if (guarded && cancelled()) throw new SubmitRefused("cancelled", "model command cancelled");
   // Atomic submit — same reason as TurnEngine.startTurn: a separate
   // send-text + Enter races Claude Code's paste coalescing and can leave the
   // command unsent. Terminals.submit keeps it one server-side operation.
   const submitOutcome = await terminals.submit(agent.ref, command, {
     driver,
-    cancelled: () => false,
+    cancelled: guarded ? cancelled : () => false,
     transcriptGrew: () => false,
     retryLimit: 0,
     pollIntervalMs: 0,
   });
+
+  if (guarded) {
+    const echoRow = `❯ ${command}`;
+    const oldEchoes = before?.complete ? before.text.split(/\r?\n/).filter((row) => row === echoRow).length : null;
+    for (let i = 0; i < 10; i++) {
+      await sleep(600);
+      const pane = await readResult().catch(() => null);
+      const current = await terminals.get(agent.ref.target).catch(() => null);
+      if (!pane?.complete || !current || current.ref.pid === null || current.ref.processStartedAt === null) continue;
+      if (current.ref.pid !== agent.ref.pid ||
+        current.ref.processStartedAt !== agent.ref.processStartedAt || current.sessionId !== agent.sessionId ||
+        current.ref.terminalInstance !== agent.ref.terminalInstance) break;
+      const rows = pane.text.split(/\r?\n/);
+      const echo = rows.lastIndexOf(echoRow);
+      const output = /^\s*⎿\s+(Set model to .+)$/u.exec(rows[echo + 1] ?? "")?.[1];
+      if (oldEchoes !== null && rows.filter((row) => row === echoRow).length > oldEchoes &&
+        output && !output.includes("`")) {
+        const tail = output.endsWith("saved as your default") && rows[echo + 2]?.trim() === "for new sessions"
+          ? " for new sessions" : "";
+        return { reply: "```\n" + output + tail + "\n```", submitOutcome };
+      }
+      if (current.evidence.kind === "classified" && current.evidence.status === "blocked") break;
+    }
+    // The local switch is evidenced; sending keys to a follow-up menu would need its own capture.
+    return { reply: `⚠️ ${backend} はモデル変更の入力を受け付けました。端末で結果を確認し、確認画面が出ていれば端末で選択してください。`, submitOutcome };
+  }
 
   let settled = false;
   for (let i = 0; i < 10 && !settled; i++) {
@@ -653,7 +688,7 @@ export const claudeDriver: AgentDriver = {
     },
   },
 
-  async runModelCommand(terminals, agent, argsText) {
-    return runClaudeSlashCommand(terminals, claudeDriver, agent, `/model ${argsText}`);
+  async runModelCommand(terminals, agent, argsText, cancelled = () => false) {
+    return runClaudeSlashCommand(terminals, claudeDriver, agent, `/model ${argsText}`, cancelled);
   },
 };

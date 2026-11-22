@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeDriver } from "../agents/claude/driver.js";
+import { submitRefusedText } from "./submit-notice.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import type { SubmitContext } from "./index.js";
@@ -14,6 +15,14 @@ import { BackendUnavailable, ExpectationLost, SubmitRefused, WriteOutcomeUnknown
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
+const PAINTS = JSON.parse(readFileSync(new URL("hc-composer.ansi.json", FIXTURES), "utf8")) as Record<string, string>;
+const EMPTY = PAINTS["review-empty"]!;
+const EMPTY_PROBE = PAINTS["review-empty-probed"]!;
+const EMPTY_SEND = [EMPTY, EMPTY, EMPTY_PROBE, EMPTY_PROBE, EMPTY, EMPTY];
+const STASHED = PAINTS["review-stashed"]!;
+const STASH_PROBE = PAINTS["review-stashed-probed"]!;
+const STASH_SEND = [STASHED, STASH_PROBE, STASH_PROBE, STASHED, STASHED];
+const SUBMIT_TERMINAL = { address: "t1", agent: "claude-code", status: "idle", pid: 101 };
 
 interface FakeTerminal {
   address: string;
@@ -41,7 +50,13 @@ interface Fake {
  */
 function fakeHc(
   terminals: FakeTerminal[],
-  options: { screens?: string[]; send?: Record<string, unknown> | { error: { kind: string; message: string } } } = {},
+  options: {
+    screens?: string[];
+    paints?: string[];
+    changedAt?: number;
+    legacySession?: boolean;
+    send?: Record<string, unknown> | { error: { kind: string; message: string } };
+  } = {},
 ): Fake {
   const dir = mkdtempSync(join(tmpdir(), "cctag-hc-"));
   const bin = join(dir, "hc");
@@ -51,14 +66,14 @@ function fakeHc(
   mkdirSync(sessionsDir);
   for (const t of terminals) {
     if (t.pid !== undefined) {
-      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({ pid: t.pid, sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}` }));
+      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({ sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}`, ...(options.legacySession ? {} : { pid: t.pid, startedAt: 1234 }) }));
     }
   }
   const script = `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const ops = args.includes("--") ? args.slice(args.indexOf("--") + 1) : [];
-const env = { HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET };
+const env = { HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET, HC_SOCKET: process.env.HC_SOCKET, HC_SESSION: process.env.HC_SESSION };
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({ args, env }) + "\\n");
 const terminals = ${JSON.stringify(terminals)};
 const screens = ${JSON.stringify(options.screens ?? ["screen text"])};
@@ -94,6 +109,7 @@ if (args[0] === "ls") {
   chmodSync(bin, 0o755);
   const socket = join(dir, "core.sock");
   let server: Server | null = null;
+  let observation = 0;
   return {
     bin,
     socket,
@@ -108,7 +124,42 @@ if (args[0] === "ls") {
         : [],
     startCore: () =>
       new Promise((resolve) => {
-        server = createServer((socket) => socket.destroy());
+        server = createServer((socket) => {
+          socket.once("data", (hello) => {
+            assert.equal(JSON.parse(hello.toString()).method, "hello");
+            socket.write(JSON.stringify({ id: 0, result: { framed: true } }) + "\n");
+            socket.once("data", (bytes) => {
+              const request = JSON.parse(bytes.subarray(9).toString());
+              assert.equal(request.method, "terminal.attach");
+              assert.equal(request.params.observe, true);
+              assert.equal(request.params.history, 0);
+              const terminal = terminals.find((t) => t.address === request.params.terminal);
+              assert.ok(terminal);
+              const index = observation++;
+              const paint = options.paints ? options.paints[Math.min(index, options.paints.length - 1)]! : EMPTY_SEND[index % EMPTY_SEND.length]!;
+              const frame = (channel: number, value: string) => {
+                const payload = Buffer.from(value);
+                const header = Buffer.alloc(9);
+                header.writeUInt32LE(channel);
+                header.writeUInt32LE(payload.length, 5);
+                return Buffer.concat([header, payload]);
+              };
+              if (observation === options.changedAt) {
+                const path = join(sessionsDir, `${terminal.pid}.json`);
+                const old = JSON.parse(readFileSync(path, "utf8"));
+                writeFileSync(path, JSON.stringify({ ...old, startedAt: old.startedAt + 1 }));
+              }
+              socket.write(Buffer.concat([frame(0, JSON.stringify({ id: 1, result: {
+                channel: 1,
+                terminal: {
+                  address: terminal.address, state: "live", cols: 200, screen: "exact",
+                  foreground: { pid: terminal.pid, name: "claude" },
+                  status: { app: terminal.agent, state: terminal.status },
+                },
+              } })), frame(1, paint)]));
+            });
+          });
+        });
         server.listen(socket, () => resolve());
       }),
     cleanup: async () => {
@@ -138,6 +189,12 @@ const CTX: SubmitContext = {
 
 function ref(address: string): AgentRef {
   return { target: `hc:${address}`, pid: null, processStartedAt: null };
+}
+
+async function submitRef(backend: HcBackend): Promise<AgentRef> {
+  const agent = await backend.get("hc:t1");
+  assert.ok(agent);
+  return agent.ref;
 }
 
 function verified(screen: string): VerifiedPrompt {
@@ -196,6 +253,23 @@ test("only hc's not_found means gone; a finished terminal is gone too", async ()
   });
 });
 
+test("old Claude session files still support list and pairing lookup, while writes require native identity", async () => {
+  await withCore([SUBMIT_TERMINAL], { legacySession: true }, async (backend, fake) => {
+    const [listed] = (await backend.list()).agents;
+    assert.equal(listed?.sessionId, "session-101");
+    const agent = await backend.get("hc:t1");
+    assert.equal(agent?.cwd, "/repo/t1");
+    assert.equal(agent.ref.processStartedAt, null);
+    await assert.rejects(backend.submit(agent.ref, "go", CTX), (error) => {
+      assert.ok(error instanceof SubmitRefused);
+      assert.equal(error.reason, "agent-unverified");
+      assert.match(submitRefusedText(error.reason, "herdr-core"), /プロセス情報が不足.*端末から入力/u);
+      return true;
+    });
+    assert.deepEqual(writes(fake), []);
+  });
+});
+
 test("a stopped core is reported as unavailable and hc is never run, so cctag cannot start it", async () => {
   const fake = fakeHc([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }]);
   try {
@@ -213,28 +287,31 @@ test("a stopped core is reported as unavailable and hc is never run, so cctag ca
 });
 
 test("hc runs without the Spoke's own HC_TERMINAL_ID and HC_SCOPE", async () => {
-  const saved = { id: process.env.HC_TERMINAL_ID, scope: process.env.HC_SCOPE };
+  const saved = { ...process.env };
+  process.env.HC_SOCKET = "/tmp/another-core.sock";
+  process.env.HC_SESSION = "other-session";
   process.env.HC_TERMINAL_ID = "t99";
   process.env.HC_SCOPE = "scope";
   try {
     await withCore([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }], {}, async (backend, fake) => {
-      await backend.submit(ref("t1"), "hello", CTX);
+      await backend.submit(await submitRef(backend), "hello", CTX);
       const send = fake.calls().find((call) => call.args[0] === "send");
       assert.deepEqual(send?.args, ["send", "--json", "--", "t1", "hello"]);
-      assert.deepEqual(send?.env, {}, "no HC_* variable reached hc");
+      assert.ok(fake.calls().every(({ env }) => Object.keys(env).length === 1 && env.HC_SOCKET === fake.socket));
     });
   } finally {
-    if (saved.id === undefined) delete process.env.HC_TERMINAL_ID;
-    else process.env.HC_TERMINAL_ID = saved.id;
-    if (saved.scope === undefined) delete process.env.HC_SCOPE;
-    else process.env.HC_SCOPE = saved.scope;
+    for (const name of ["HC_TERMINAL_ID", "HC_SCOPE", "HC_SOCKET", "HC_SESSION"]) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
   }
 });
 
 test("a message that starts with a hyphen is sent as text, not read as a flag", async () => {
-  await withCore([{ address: "t1" }], {}, async (backend, fake) => {
-    await backend.submit(ref("t1"), "--force", CTX);
-    await backend.submit(ref("t1"), "-1 for that", CTX);
+  await withCore([SUBMIT_TERMINAL], {}, async (backend, fake) => {
+    const agent = await submitRef(backend);
+    await backend.submit(agent, "--force", CTX);
+    await backend.submit(agent, "-1 for that", CTX);
     assert.deepEqual(
       fake.calls().filter((call) => call.args[0] === "send").map((call) => call.args),
       [
@@ -246,20 +323,149 @@ test("a message that starts with a hyphen is sent as text, not read as a flag", 
 });
 
 test("submit reports whether the agent started a turn", async () => {
-  await withCore([{ address: "t1" }], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
-    assert.deepEqual(await backend.submit(ref("t1"), "go", CTX), { status: "started", draftStashed: false });
+  await withCore([SUBMIT_TERMINAL], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
+    assert.deepEqual(await backend.submit(await submitRef(backend), "go", CTX), { status: "started", draftStashed: false });
   });
-  await withCore([{ address: "t1" }], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
-    assert.deepEqual(await backend.submit(ref("t1"), "/model", CTX), { status: "accepted", draftStashed: false });
+  await withCore([SUBMIT_TERMINAL], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
+    assert.deepEqual(await backend.submit(await submitRef(backend), "/model", CTX), { status: "accepted", draftStashed: false });
   });
 });
 
 test("submit turns hc's refusal of a blocked terminal into a gate refusal, and other failures into an unknown outcome", async () => {
-  await withCore([{ address: "t1" }], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
-    await assert.rejects(backend.submit(ref("t1"), "go", CTX), (err: unknown) => err instanceof SubmitRefused && err.reason === "gate");
+  await withCore([SUBMIT_TERMINAL], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX), (err: unknown) => err instanceof SubmitRefused && err.reason === "gate");
   });
-  await withCore([{ address: "t1" }], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
-    await assert.rejects(backend.submit(ref("t1"), "go", CTX), WriteOutcomeUnknown);
+  await withCore([SUBMIT_TERMINAL], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX), WriteOutcomeUnknown);
+  });
+});
+
+const STASH_PAINTS = [
+  PAINTS["caret-middle"]!, PAINTS["caret-middle"]!, PAINTS["mid-probe"]!, PAINTS["mid-probe"]!,
+  PAINTS["caret-middle"]!, PAINTS["caret-middle"]!, STASHED,
+];
+
+function writes(fake: Fake): string[][] {
+  return fake.calls().filter(({ args }) => ["send", "keys"].includes(args[0]!)).map(({ args }) => args);
+}
+
+test("core replaces a restored suggestion only if its style still matches before send", async () => {
+  const initial = PAINTS.suggestion!;
+  const probe = PAINTS["suggestion-x"]!;
+  const reversed = PAINTS["suggestion-backspace"]!;
+  const withoutDim = reversed.replace("\x1b[2mnce fixed", "nce fixed");
+  assert.notEqual(withoutDim, reversed);
+  for (const final of [reversed, withoutDim]) {
+    await withCore([SUBMIT_TERMINAL], {
+      paints: [initial, initial, probe, probe, reversed, final],
+    }, async (backend, fake) => {
+      const submit = backend.submit(await submitRef(backend), "go", CTX);
+      const keys = [["keys", "--json", "--", "t1", "x"], ["keys", "--json", "--", "t1", "backspace"]];
+      if (final === reversed) {
+        assert.deepEqual(await submit, { status: "started", draftStashed: false });
+        assert.deepEqual(writes(fake), [...keys, ["send", "--json", "--", "t1", "go"]]);
+      } else {
+        await assert.rejects(submit, (error) => error instanceof SubmitRefused && error.reason === "draft");
+        assert.deepEqual(writes(fake), keys);
+      }
+    });
+  }
+});
+
+test("core rechecks a middle caret, stashes and sends once without claiming exact restoration", async () => {
+  const preStash = STASH_PAINTS.slice(0, -1);
+  await withCore([SUBMIT_TERMINAL], {
+    paints: [...preStash, PAINTS["caret-middle"]!, STASHED, ...STASH_SEND, PAINTS["review-trailing"]!],
+  }, async (backend, fake) => {
+    assert.deepEqual(await backend.submit(await submitRef(backend), "go", CTX), {
+      status: "started", draftStashed: true, draftRestoration: "unverified",
+    });
+    assert.deepEqual(writes(fake), [
+      ["keys", "--json", "--", "t1", "x"],
+      ["keys", "--json", "--", "t1", "backspace"],
+      ["keys", "--json", "--", "t1", "ctrl+s"],
+      ["keys", "--json", "--", "t1", "right", "x"],
+      ["keys", "--json", "--", "t1", "backspace"],
+      ["send", "--json", "--", "t1", "go"],
+    ]);
+  });
+});
+
+test("core refuses an intervening draft or changed foreground instance before send", async () => {
+  for (const [competing, changedAt, reason] of [
+    [PAINTS.competing!, undefined, "stash-unverified"],
+    [PAINTS.stashed!, 8, "agent-changed"],
+  ] as const) {
+    await withCore([SUBMIT_TERMINAL], { paints: [...STASH_PAINTS, competing], changedAt }, async (backend, fake) => {
+      await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+        (error) => error instanceof SubmitRefused && error.reason === reason && error.composer.stash === "stashed");
+      assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s"]);
+    });
+  }
+});
+
+test("a caret-zero competing draft on the first post-stash read receives no further key", async () => {
+  await withCore([SUBMIT_TERMINAL], { paints: [...STASH_PAINTS.slice(0, -1), PAINTS["review-first-competing"]!] }, async (backend, fake) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+      (error) => error instanceof SubmitRefused && error.reason === "stash-unverified" && error.composer.stash === "stashed");
+    assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s"]);
+  });
+});
+
+test("the original draft text with a stash marker refuses before a later empty paint", async () => {
+  const sameText = PAINTS["review-first-competing"]!.replace("z\x1b[0m", "d\x1b[0mraft");
+  await withCore([SUBMIT_TERMINAL], {
+    paints: [...STASH_PAINTS.slice(0, -1), sameText, STASHED, ...STASH_SEND],
+  }, async (backend, fake) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+      (error) => error instanceof SubmitRefused && error.reason === "stash-unverified" && error.composer.stash === "stashed");
+    assert.deepEqual(writes(fake).map((args) => args.slice(4)), [["x"], ["backspace"], ["ctrl+s"]]);
+  });
+});
+
+test("core refuses a trailing space exposed by the final probe and reverses its keys", async () => {
+  const hidden = PAINTS["review-stashed-hidden-probed"]!;
+  await withCore([SUBMIT_TERMINAL], { paints: [...STASH_PAINTS, STASHED, hidden, hidden, STASHED] }, async (backend, fake) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+      (error) => error instanceof SubmitRefused && error.reason === "stash-unverified" && error.composer.probe === null);
+    assert.deepEqual(writes(fake).map((args) => args.slice(4)), [
+      ["x"], ["backspace"], ["ctrl+s"], ["right", "x"], ["backspace", "left"],
+    ]);
+  });
+});
+
+test("core refuses a partial paint, whitespace-only draft, existing stash, model draft or image draft without input", async () => {
+  for (const [paint, text, hasImages, reason] of [
+    [PAINTS.empty!.slice(0, -8), "go", false, "incomplete-screen"],
+    [PAINTS.space!, "go", false, "incomplete-screen"],
+    [PAINTS.stashed!, "go", false, "existing-stash"],
+    [PAINTS["caret-end"]!, "/model haiku", false, "draft"],
+    [PAINTS["caret-end"]!, "go", true, "draft"],
+  ] as const) {
+    await withCore([SUBMIT_TERMINAL], { paints: [paint] }, async (backend, fake) => {
+      await assert.rejects(backend.submit(await submitRef(backend), text, { ...CTX, hasImages }),
+        (error) => error instanceof SubmitRefused && error.reason === reason);
+      assert.deepEqual(writes(fake), []);
+    });
+  }
+});
+
+test("core preserves accepted and unknown delivery outcomes independently of restoration", async () => {
+  await withCore([SUBMIT_TERMINAL], {
+    paints: [...STASH_PAINTS, ...STASH_SEND], send: { started: false },
+  }, async (backend, fake) => {
+    assert.deepEqual(await backend.submit(await submitRef(backend), "go", CTX), {
+      status: "accepted", draftStashed: true, draftRestoration: "unverified",
+    });
+    assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s", "x", "backspace", "go"]);
+  });
+  await withCore([SUBMIT_TERMINAL], {
+    paints: [...STASH_PAINTS, ...STASH_SEND, PAINTS["review-trailing"]!],
+    send: { error: { kind: "unavailable", message: "transport lost" } },
+  }, async (backend, fake) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+      (error) => error instanceof WriteOutcomeUnknown && error.composer.submitUncertain === true && error.composer.draftRestored === false);
+    assert.deepEqual(writes(fake).map((args) => args.at(-1)), ["x", "backspace", "ctrl+s", "x", "backspace", "go"]);
   });
 });
 

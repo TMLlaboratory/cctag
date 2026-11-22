@@ -18,10 +18,14 @@ would have to keep. Pin an exact version if that matters to you.
   behind the Herdr app, separate from the herdr TUI — through `hc`
   (`CCTAG_HC_BIN`, default `~/.local/bin/hc`). Its rows appear under
   `herdr-core · <directory>` in `@cctag connect`, and its targets carry an
-  `hc:` prefix, so herdr and Orca pairings are unchanged. cctag never starts the
-  core. A free-text answer to a multi-select question is answered in the
-  terminal there, because `hc` cannot type text without pressing Enter. Codex
+  `hc:` prefix, so herdr and Orca pairings are unchanged. cctag checks the
+  selected socket before invoking `hc`. A free-text answer to a multi-select question is answered in the
+  terminal there, because `hc` cannot paste arbitrary text without Enter. Codex
   CLI and `omp` on herdr-core are not supported yet.
+- Claude Code messages on herdr and herdr-core can temporarily stash a verified
+  single-line draft. Slack reports that exact restoration cannot be verified
+  from the screen. Model switches and image attachments require a verified empty
+  composer on these backends.
 
 ### Fixed
 

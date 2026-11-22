@@ -43,5 +43,18 @@ Named-session frame, captured on 2026-10-12 from a live Claude Code 2.1.296 sess
 
 herdr-core frames, captured on 2026-11-06 from live Claude Code 2.1.318 sessions in throwaway herdr-core terminals (hc 0.1.18, qa-guide installed). Each stores `text`, `complete` and `how` from `hc read <terminal> --json` (the visible screen, 120 rows). Redactions keep each row's display width: `<plan>` replaces the account-tier label, `<user>` the local user name, and `<hook-note>` a local Stop-hook message about another repository.
 
+The composer ANSI captures were taken from logged-out scratch sessions
+running Claude Code 2.1.330 on 2026-11-22. They keep the prompt rows,
+colors, caret styling and rules. Paths are replaced with placeholders and
+legacy shell startup rows are omitted.
+
+- `hc-composer.ansi.json` contains read-only observer paints from herdr-core
+  0.1.21 at 200 columns. It includes a middle caret, whitespace at the end,
+  an intervening input after stash and the restored draft.
+- `herdr-composer.ansi.json` contains visible ANSI from the legacy herdr
+  0.9.5 socket API at 54 pane columns. It includes the local model result,
+  draft restoration and the local auth-error suggestion before and after
+  the reversible probe, both with and without a stash.
+
 - `hc-question.screen.json` — single-select question with the qa-guide pane to its right; the core reported `status.state: blocked`.
 - `hc-plan-approval.screen.json` — the plan-approval menu (`Ready to code?`); the core reported `blocked` with the message `approve plan`.

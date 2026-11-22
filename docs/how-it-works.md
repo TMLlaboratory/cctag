@@ -145,16 +145,30 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   (`machine/t7`), which belong to the Spoke on that machine. For each, the
   foreground process id leads to `~/.claude/sessions/<pid>.json`, where Claude
   Code records its session id and the directory its transcript is filed under.
-  A terminal without that record is not offered.
+  A terminal without that record is not offered. Guarded writes also require
+  the native PID and process start time, which older session records may omit.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question
   or an approval is up, and `done` after a turn. A program that reports nothing
   — Claude Code on its folder-trust screen, for one — has no status, which
   cctag treats as unknown.
-- **Writes.** A message goes through `hc send`, which pastes the text and
+- **Writes.** For Claude Code on herdr and herdr-core, cctag checks a complete
+  visible composer and the current foreground process before each write in
+  the message submission sequence.
+  A one-key probe distinguishes a suggestion from a typed draft. A verified
+  draft is stashed with Ctrl+S. At the first screen with the stash marker,
+  any visible text stops the send before another key is written. An initial
+  standalone suggestion can be replaced after its probe, reversal and a
+  fresh same-agent composer check succeed.
+  An ordered Right and sentinel probe distinguishes a blank composer from
+  hidden whitespace. Once the sentinel has been removed, cctag checks the
+  visible composer again before sending. A local key can still arrive after
+  the positive check, including during reversal. The screen cannot confirm
+  exact restoration of a stashed draft.
+  On herdr-core a message goes through `hc send`, which pastes the text and
   presses Enter once nobody has typed for about three seconds, and refuses a
   `blocked` program. Answers press named keys with `hc keys` (digits, arrows,
-  Enter, Esc, Shift+Tab). `hc` has no way to type text without pressing Enter,
+  Enter, Esc, Shift+Tab). `hc` cannot paste arbitrary text without Enter,
   so free text is pasted with its Enter through `hc send --force`; a free-text
   answer to a multi-select question, which has to be typed and *not* submitted,
   is refused before any key is sent. A Slack image arrives as a real attachment
@@ -164,7 +178,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 - **Starting the core.** Any `hc` command starts a stopped core, and a core
   passes the environment of whoever started it to every terminal. cctag
   therefore connects to the core's socket first and runs nothing when no core
-  listens, and it drops `HC_TERMINAL_ID` / `HC_SCOPE` so a Spoke running inside
+  listens. Each command uses that same socket through `HC_SOCKET`. cctag drops
+  `HC_TERMINAL_ID` / `HC_SCOPE` so a Spoke running inside
   an hc terminal does not get its messages wrapped in `<hc from=…>`.
 
 ## 4. From `@cctag connect` to an actual conversation
@@ -425,10 +440,10 @@ The path→attachment conversion is asynchronous and the Enter is absorbed while
 it runs. A prompt with only non-image paths submits immediately, so this is
 specific to images (measured: 500ms–1000ms to convert a 2.8MB PNG).
 
-The existing "resend Enter if nothing was submitted" safety net (`0d4c830` /
-`624389c`) waited once and retried once, so it's now a bounded loop of
-`SUBMIT_RETRIES_WITH_IMAGES` attempts. An Enter into an empty box is a harmless
-no-op, which is why erring toward over-retrying is the safe direction.
+Claude Code submissions can restore an earlier draft as soon as the Enter
+lands. cctag sends no second Enter on that path because a delayed retry could
+submit the restored draft. If image conversion consumes the first Enter,
+check the visible composer and complete the send at the terminal.
 
 ### Outbound: two routes
 
