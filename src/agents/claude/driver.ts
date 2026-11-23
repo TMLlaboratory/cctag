@@ -283,11 +283,22 @@ async function confirmOrcaAnswerReview(
   }
 }
 
+const SWITCH_MODEL_HEADING = /^\s*Switch model\?\s*$/m;
+
 export function isClaudeModelSwitchConfirmation(prompt: BlockedPrompt): boolean {
   if (prompt.kind !== "permission") return false;
   const { snippet, choices } = prompt.menu;
-  return /^\s*Switch model\?\s*$/m.test(snippet) && choices.length === 2 &&
+  return SWITCH_MODEL_HEADING.test(snippet) && choices.length === 2 &&
     /^Yes, switch to \S/.test(choices[0]!.label) && choices[1]!.label === "No, go back";
+}
+
+function matchesRequestedModel(request: string, affirmativeLabel: string): boolean {
+  const name = affirmativeLabel.slice("Yes, switch to ".length).toLowerCase();
+  const requested = request.trim().toLowerCase();
+  if (!/^(?:claude )?[a-z]+ \d+(?:\.\d+)*$/.test(name)) return false;
+  // A family label alone cannot tell us whether Claude resolved an alias to this version.
+  return requested === name ||
+    (/^(haiku|sonnet|opus)$/.test(requested) && name === `${requested} 5.5`);
 }
 
 /**
@@ -311,6 +322,13 @@ async function runClaudeModelCommand(
     pollIntervalMs: 0,
   });
 
+  const hc = agent.backend === "herdr-core";
+  const readPane = () => terminals.read(agent.ref.target, hc ? 0 : 40, hc ? "screen" : "history");
+  const confirmAtTerminal = () => ({
+    reply: "⚠️ モデル切り替えを確認できませんでした。確認画面が表示されている場合は、ターミナルで回答してください。",
+    submitOutcome,
+  });
+  let confirmed = false;
   let settled = false;
   for (let i = 0; i < 10 && !settled; i++) {
     await sleep(600);
@@ -323,13 +341,27 @@ async function runClaudeModelCommand(
     // `blocked` (verified empirically). So inspect the pane for a parseable menu
     // on every iteration, not only when status says `blocked` — otherwise this
     // dialog is mistaken for "already settled" and left unanswered.
-    const paneText = (await terminals.read(agent.ref.target, 40, "history")).text;
+    const snapshot = await readPane();
+    if (hc && !snapshot.complete) return confirmAtTerminal();
+    const paneText = snapshot.text;
     const menu = parsePermissionMenu(paneText);
+    if (hc && !menu && SWITCH_MODEL_HEADING.test(paneText)) return confirmAtTerminal();
     if (menu && menu.choices.length > 0) {
       const parsed = driver.parseBlockedPane(paneText);
-      if (parsed.kind === "question" || parsed.kind === "permission") {
-        const purpose = agent.backend === "herdr-core" && isClaudeModelSwitchConfirmation(parsed) ? "claude-model-switch" : undefined;
-        await terminals.openAnswer(agent.ref, parsed.verified, purpose).digit(Number(menu.choices[0].num));
+      if (hc) {
+        if (parsed.kind !== "permission" || !isClaudeModelSwitchConfirmation(parsed) ||
+            !matchesRequestedModel(argsText, parsed.menu.choices[0]!.label)) return confirmAtTerminal();
+        if (!confirmed) {
+          confirmed = true;
+          try {
+            await terminals.openAnswer(agent.ref, parsed.verified, "claude-model-switch").digit(1);
+          } catch (error) {
+            if (error instanceof ExpectationLost) return confirmAtTerminal();
+            throw error;
+          }
+        }
+      } else if (parsed.kind === "question" || parsed.kind === "permission") {
+        await terminals.openAnswer(agent.ref, parsed.verified).digit(Number(menu.choices[0].num));
       }
       continue;
     }
@@ -340,8 +372,11 @@ async function runClaudeModelCommand(
     }
   }
 
-  const raw = (await terminals.read(agent.ref.target, 40, "history")).text;
-  const snippet = stripFooterChrome(raw);
+  const snapshot = await readPane();
+  if (hc && (!snapshot.complete || SWITCH_MODEL_HEADING.test(snapshot.text))) {
+    return confirmAtTerminal();
+  }
+  const snippet = stripFooterChrome(snapshot.text);
   return { reply: "```\n" + snippet.slice(-1500) + "\n```", submitOutcome };
 }
 

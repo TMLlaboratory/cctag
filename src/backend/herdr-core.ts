@@ -163,12 +163,13 @@ export class HcBackend implements Terminals {
    * a Spoke run inside an hc terminal does not get its sends wrapped in
    * `<hc from=…>`, which also stops slash commands from working.
    */
-  private async raw(args: string[]): Promise<string> {
+  private async raw(args: string[], cancelled?: () => boolean): Promise<string> {
     await probeSocket(this.socket);
     const env: NodeJS.ProcessEnv = { ...process.env, HC_SOCKET: this.socket };
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
     delete env.HC_TERMINAL_SOCKET;
+    if (cancelled?.()) throw new SubmitRefused("cancelled", "herdr-core submit was cancelled before writing");
     try {
       const result = await execFileAsync(this.bin, args, { env, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
       return result.stdout;
@@ -189,8 +190,8 @@ export class HcBackend implements Terminals {
    * starts with `-` (a Slack reply such as "-1" or "--force") an operand
    * instead of a flag.
    */
-  private async json<T>(command: string[], operands: string[] = []): Promise<T> {
-    const stdout = await this.raw([...command, "--json", "--", ...operands]);
+  private async json<T>(command: string[], operands: string[] = [], cancelled?: () => boolean): Promise<T> {
+    const stdout = await this.raw([...command, "--json", "--", ...operands], cancelled);
     try {
       return JSON.parse(stdout) as T;
     } catch {
@@ -298,10 +299,10 @@ export class HcBackend implements Terminals {
       throw err;
     }
     let result: { started?: boolean };
-    if (ctx.cancelled()) throw new SubmitRefused("cancelled", "herdr-core submit was cancelled before writing");
     try {
-      result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
+      result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text], () => ctx.cancelled());
     } catch (err) {
+      if (err instanceof SubmitRefused) throw err;
       if (err instanceof HcCliError && err.kind === "blocked") {
         throw new SubmitRefused("gate", `herdr-core refused the send: ${err.message}`);
       }
@@ -345,7 +346,7 @@ export class HcBackend implements Terminals {
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
       }
-      if (answerStatus === "done" && !isClaudeModelSwitchConfirmation(current)) {
+      if (modelConfirmation && !isClaudeModelSwitchConfirmation(current)) {
         throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       }
     };
@@ -359,6 +360,7 @@ export class HcBackend implements Terminals {
     };
     const write = async (action: () => Promise<void>, terminal = false, modelConfirmation = false): Promise<void> => {
       assertActive();
+      if (modelSwitch && !modelConfirmation) throw new ExpectationLost("only the affirmative model-switch digit is allowed");
       if (firstWrite) await assertFingerprint(modelConfirmation);
       const current = await this.assertWritable(ref, prompt.driver);
       if (current.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
