@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, Socket, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -265,24 +265,33 @@ test("refuses Codex writes when the PID, start time, or foreground executable ch
 });
 
 test("Codex keys require the published blocked turn and a complete plain screen", async (t) => {
-  for (const scenario of ["same prompt", "later hc turn", "new blocked observation", "incomplete screen"] as const) {
+  for (const scenario of ["same prompt", "later hc turn", "new blocked observation", "competing start after publication", "incomplete screen"] as const) {
     await t.test(scenario, async () => checkCodexApproval(scenario));
   }
 });
 
 async function checkCodexApproval(scenario: string) {
   let rollout = "";
+  let competitor = "";
   const id = "00000000-0000-0000-0000-000000000001";
+  const otherId = "00000000-0000-0000-0000-000000000002";
   await withCore([{ ...CODEX, status: "blocked", kind: "permission" }], {
     screens: [CODEX_APPROVAL.text],
     incomplete: scenario === "incomplete screen",
   }, async (backend, fake) => {
     rollout = join(fake.sessionsDir, `rollout-fixture-${id}.jsonl`);
-    writeFileSync(rollout, JSON.stringify({ type: "session_meta", payload: { id, cwd: "/moved/here", thread_source: "user" } }) + "\n");
+    competitor = join(fake.sessionsDir, `rollout-fixture-${otherId}.jsonl`);
+    for (const [path, sessionId] of [[rollout, id], [competitor, otherId]]) {
+      writeFileSync(path, JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/moved/here", thread_source: "user" } }) + "\n");
+    }
     const agent = await backend.get("hc:t1");
-    assert.equal(agent?.sessionId, id);
-    assert.ok(agent?.transcriptIdentity && agent.hcCodexPromptStamp);
-    const context = { ref: agent.ref, rollout: agent.transcriptIdentity, stamp: agent.hcCodexPromptStamp, offset: statSync(rollout).size };
+    const selected = agent?.codexRollouts?.find(({ sessionId }) => sessionId === id);
+    const other = agent?.codexRollouts?.find(({ sessionId }) => sessionId === otherId);
+    assert.ok(agent?.hcCodexPromptStamp && selected && other);
+    const context = {
+      ref: agent.ref, rollout: selected.transcriptIdentity, stamp: agent.hcCodexPromptStamp, offset: statSync(rollout).size,
+      competitors: [{ identity: other.transcriptIdentity, offset: statSync(competitor).size }],
+    };
     const capture = () => backend.read(agent.ref.target, 0, "screen", context);
     if (scenario === "incomplete screen") {
       await assert.rejects(capture(), ExpectationLost);
@@ -292,6 +301,9 @@ async function checkCodexApproval(scenario: string) {
       const answer = () => backend.openAnswer(agent.ref, prompt.verified).digit(2);
       if (scenario === "later hc turn") fake.setTerminal({ turn: 3 });
       if (scenario === "new blocked observation") fake.setTerminal({ statusMs: 101 });
+      if (scenario === "competing start after publication") {
+        appendFileSync(competitor, '{"type":"event_msg","payload":{"type":"task_started","turn_id":"competing"}}\n');
+      }
       if (scenario === "same prompt") {
         await answer();
         assert.deepEqual(writes(fake), [["keys", "--json", "--", "t1", "2"]]);
@@ -302,10 +314,15 @@ async function checkCodexApproval(scenario: string) {
     assert.deepEqual(writes(fake), []);
   }, async (file, args) => {
     if (file === "ps") return execResult("Tue Nov 24 01:00:00 2026");
-    const { dev, ino } = statSync(rollout, { bigint: true });
-    if (file === "stat") return execResult(`${dev} ${ino}`);
+    if (file === "stat") {
+      const { dev, ino } = statSync(args.at(-1)!, { bigint: true });
+      return execResult(`${dev} ${ino}`);
+    }
     if (args[0] === "-Fpa") return execResult("p202\nf8\nau\n");
-    return execResult(`p202\nf8\nau\ntREG\nD0x${dev.toString(16)}\ni${ino}\nn${rollout}\n`);
+    return execResult("p202\n" + [rollout, competitor].map((path, i) => {
+      const { dev, ino } = statSync(path, { bigint: true });
+      return `f${8 + i}\nau\ntREG\nD0x${dev.toString(16)}\ni${ino}\nn${path}\n`;
+    }).join(""));
   });
 }
 

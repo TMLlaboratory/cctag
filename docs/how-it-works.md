@@ -174,8 +174,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 
   For Codex, writes recheck the foreground PID and process start time. Messages
   require an idle or done report and a recognizable composer. A Slack button
-  records the hc turn, blocked status timestamp, rollout identity and byte
-  offset observed when the button is published. cctag compares those values
+  records the hc turn, blocked status timestamp, and verified rollout
+  identities and offsets observed when the button is published. cctag compares those values
   around a complete screen capture and repeats the check on click before
   sending one digit. A changed or unverified observation calls for an answer
   at the terminal. The final check and the key write are separate hc calls.
@@ -192,7 +192,9 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 - **Codex replies.** Pairing follows the terminal across `/new` and resume.
   Codex can keep both the old and new rollouts open through the next turn.
   cctag records the end of each open rollout before sending and binds the
-  turn only when one candidate records the exact input sent. A newly observed
+  turn only when one candidate records the exact input sent and every eligible
+  candidate was readable. A competing task start ends the turn before cctag
+  offers any answer buttons. A newly observed
   rollout is read from the beginning only when it was created after submission.
   cctag checks the opened file's device and inode for both baselines and
   reads. Once a turn is bound, a later task start ends collection before

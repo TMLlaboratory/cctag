@@ -46,10 +46,15 @@ export function verifiedTranscriptSize(identity: TranscriptIdentity, createdSinc
       ? size : null);
 }
 
+export function readVerifiedRecords(identity: TranscriptIdentity, from: { offset: number }): Promise<ReturnType<typeof parseRecords> | null>;
+export function readVerifiedRecords(identity: TranscriptIdentity, from: { createdSince: number }): Promise<ReturnType<typeof parseRecords> | "pre-existing" | null>;
 export function readVerifiedRecords(identity: TranscriptIdentity, from: { offset: number } | { createdSince: number }) {
   return withVerifiedTranscript(identity, async (file, size, birthtimeNs) => {
     const offset = "offset" in from ? from.offset : 0;
-    if ("createdSince" in from && (birthtimeNs <= 0n || birthtimeNs < BigInt(from.createdSince) * 1_000_000n)) return null;
+    if ("createdSince" in from) {
+      if (birthtimeNs <= 0n) return null;
+      if (birthtimeNs < BigInt(from.createdSince) * 1_000_000n) return "pre-existing" as const;
+    }
     if (size < offset) return null;
     if (size === offset) return parseRecords(Buffer.alloc(0), offset);
     const parts: Buffer[] = [];

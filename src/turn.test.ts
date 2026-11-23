@@ -2631,8 +2631,11 @@ function rolloutIdentity(path: string) {
   return { path, device: String(dev), inode: String(ino) };
 }
 
-test("a later herdr-core Codex poll clips a new start and rejects a replaced rollout", async (t) => {
-  for (const scenario of ["next task in same rollout", "another rollout start during binding", "replaced path"]) {
+test("herdr-core Codex rejects unverified or competing rollout evidence", async (t) => {
+  for (const scenario of [
+    "next task in same rollout", "blocked with a competing start", "replaced path",
+    "unreadable eligible candidate", "unreadable possibly fresh candidate", "verified pre-existing candidate",
+  ]) {
     await t.test(scenario, async () => {
       const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-later-"));
       const path = join(dir, "bound.jsonl");
@@ -2644,12 +2647,19 @@ test("a later herdr-core Codex poll clips a new start and rejects a replaced rol
       const paneId = "hc:t1";
       const pairing = { ...fakePairing(), paneId };
       const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
-      const { notifier, posts } = fakeNotifier();
+      const { notifier, posts, postedBlocks } = fakeNotifier();
+      const blocked = scenario === "blocked with a competing start";
+      const unreadable = scenario.startsWith("unreadable");
+      const previouslyUnseen = scenario === "verified pre-existing candidate" || scenario === "unreadable possibly fresh candidate";
+      const { text: approval } = JSON.parse(readFileSync(
+        new URL("./agents/codex/__fixtures__/hc-approval.screen.json", import.meta.url), "utf8",
+      ));
       const event = (payload: object) => JSON.stringify({ type: "event_msg", timestamp: new Date().toISOString(), payload }) + "\n";
       const reply = (text: string) => JSON.stringify({ type: "response_item", payload: {
         type: "message", role: "assistant", content: [{ type: "output_text", text }],
       } }) + "\n";
       let polls = 0;
+      let promptReads = 0;
       let submitted = false;
       const engine = engineFor(fakeBackend(() => "working", () => "", {
         async get() {
@@ -2663,26 +2673,47 @@ test("a later herdr-core Codex poll clips a new start and rejects a replaced rol
             }
           }
           return {
-            ...fakeAgent(submitted ? "working" : "idle", "herdr-core"),
-            ref, agent: "codex", sessionId: null, cwd: dir, codexRollouts: [other, rollout],
+            ...fakeAgent(submitted ? (blocked ? "blocked" : previouslyUnseen ? "done" : "working") : "idle", "herdr-core"),
+            ref, agent: "codex", sessionId: null, cwd: dir,
+            codexRollouts: previouslyUnseen && !submitted ? [rollout] : [other, rollout],
+            hcCodexPromptStamp: blocked ? { turn: 2, statusMs: 100 } : undefined,
           };
+        },
+        async read() {
+          promptReads++;
+          return { text: submitted ? approval : "", complete: true, draft: null, hcCodexPromptKind: "permission" };
         },
         async submit() {
           appendFileSync(path, event({ type: "task_started", turn_id: "active" }) +
             event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }) +
             reply("verified reply"));
-          if (scenario === "another rollout start during binding") {
+          if (scenario === "verified pre-existing candidate") {
+            appendFileSync(path, event({ type: "task_complete", turn_id: "active" }));
+          }
+          if (blocked) {
             appendFileSync(otherPath, event({ type: "task_started", turn_id: "parallel" }));
+          }
+          if (unreadable) {
+            renameSync(otherPath, join(dir, "other-original.jsonl"));
+            writeFileSync(otherPath, "");
           }
           submitted = true;
           return { status: "started", draftStashed: false };
         },
       }, "herdr-core"), notifier, 5000);
       try {
+        await sleep(5);
         await engine.startTurn(pairing, "U1", "request");
         for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
         assert.equal(engine.isBusy(paneId), false);
-        assert.ok(posts.includes("verified reply"), JSON.stringify(posts));
+        assert.equal(posts.includes("verified reply"), !unreadable, JSON.stringify(posts));
+        if (unreadable) assert.ok(posts.some((post) => post.includes("Codex の入力先を確認できませんでした")));
+        if (blocked) {
+          assert.ok(posts.includes(CODEX_THREAD_SWITCHED));
+          // The startup screen may be read before submission. A blocked prompt must not be captured.
+          assert.equal(promptReads, 1);
+          assert.ok(postedBlocks.every((blocks) => promptIdInButtonBlock(blocks) === undefined));
+        }
         assert.ok(!posts.some((post) => post.includes("unrelated reply")));
       } finally {
         engine.abortAll();

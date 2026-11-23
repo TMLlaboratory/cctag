@@ -37,6 +37,7 @@ export interface HcCodexPromptContext {
   readonly stamp: HcCodexPromptStamp;
   readonly rollout: TranscriptIdentity;
   readonly offset: number;
+  readonly competitors: readonly { readonly identity: TranscriptIdentity; readonly offset: number }[];
 }
 
 export interface AgentRef {

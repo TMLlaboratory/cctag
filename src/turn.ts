@@ -70,6 +70,7 @@ interface HcCodexInput {
   text: string;
   sentAt: number;
   baselines: CodexRolloutBaseline[];
+  startedRollouts: TranscriptIdentity[];
 }
 
 const HC_CODEX_INPUT_UNVERIFIED = "⚠️ Codex の入力先を確認できませんでした。端末で応答を確認してください。";
@@ -90,13 +91,17 @@ async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCod
     const identity = rollout.transcriptIdentity;
     const baseline = input.baselines.find((entry) => sameTranscriptIdentity(entry.identity, identity));
     const offset = baseline ? baseline.offset : 0;
-    if (offset === null) continue;
-    const batch = await readVerifiedRecords(identity, baseline ? { offset } : { createdSince: input.sentAt });
-    if (!batch) continue;
+    if (offset === null) return null;
+    const batch = baseline ? await readVerifiedRecords(identity, { offset })
+      : await readVerifiedRecords(identity, { createdSince: input.sentAt });
+    if (!batch) return null;
+    if (batch === "pre-existing") continue;
     const { records, newOffset } = batch;
     const starts = records.map(codexTaskStart);
-    // Keep an unconsumed start visible to later polls, even if this rollout did not record our input.
-    const consumed = { identity, offset: starts.some(Boolean) ? offset : newOffset };
+    if (starts.some(Boolean) && !input.startedRollouts.some((started) => sameTranscriptIdentity(started, identity))) {
+      input.startedRollouts.push(identity);
+    }
+    const consumed = { identity, offset: newOffset };
     if (baseline) scanned[scanned.indexOf(baseline)] = consumed;
     else scanned.push(consumed);
     const inputRecord = records.findIndex((record) => isCodexSubmittedInput(record, input.text, input.sentAt));
@@ -106,7 +111,12 @@ async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCod
     if (!turnId) continue;
     matches.push({ rollout, turnId, records: records.slice(start), offset, newOffset });
   }
-  return { matches, scanned };
+  const selected = matches[0]?.rollout.transcriptIdentity;
+  return {
+    matches,
+    scanned,
+    competingStart: input.startedRollouts.some((identity) => !sameTranscriptIdentity(identity, selected)),
+  };
 }
 
 async function otherCodexRolloutStarted(
@@ -606,7 +616,7 @@ export class TurnEngine {
             throw new SubmitRefused("agent-unverified", "Codex の rollout を確認できなかったため送信しませんでした。端末の状態を確認してください。");
           }
           const sentAt = Date.now();
-          state.hcCodexInput = { text: normalized, sentAt, baselines };
+          state.hcCodexInput = { text: normalized, sentAt, baselines, startedRollouts: [] };
           state.awaitingFirstRecordSince = sentAt;
         }
         const canVerify = tPath !== "" && !state.hcCodexInput;
@@ -1417,15 +1427,16 @@ export class TurnEngine {
         }
       }
 
-      let boundInput: Awaited<ReturnType<typeof matchHcCodexInput>>["matches"][number] | undefined;
+      let boundInput: NonNullable<Awaited<ReturnType<typeof matchHcCodexInput>>>["matches"][number] | undefined;
+      let competingStart = false;
       if (state.hcCodexInput) {
         const input = state.hcCodexInput;
-        const { matches, scanned } = await matchHcCodexInput(codexRollouts, input);
-        if (matches.length > 1) {
+        const match = await matchHcCodexInput(codexRollouts, input);
+        if (!match || match.matches.length > 1) {
           await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
           return;
         }
-        boundInput = matches[0];
+        boundInput = match.matches[0];
         if (!boundInput) {
           if (Date.now() - input.sentAt < (this.opts.firstRecordGraceMs ?? FIRST_RECORD_GRACE_MS)) continue;
           await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
@@ -1435,8 +1446,9 @@ export class TurnEngine {
         state.sessionId = boundInput.rollout.sessionId;
         state.transcriptIdentity = boundInput.rollout.transcriptIdentity;
         state.transcriptPath = boundInput.rollout.transcriptIdentity.path;
-        state.hcCodexRollouts = scanned;
+        state.hcCodexRollouts = match.scanned;
         state.hcCodexTurnId = boundInput.turnId;
+        competingStart = match.competingStart;
       }
 
       const path = hcCodex && !codexRollouts.length ? "" : state.transcriptPath;
@@ -1474,7 +1486,7 @@ export class TurnEngine {
         }
         if (hcCodex && output.lifecycle?.some(({ kind, turnId }) =>
           kind !== "started" && turnId === state.hcCodexTurnId)) state.hcCodexTurnId = undefined;
-        if (nextStart !== -1) {
+        if (nextStart !== -1 || competingStart) {
           state.promptId = null;
           await state.promptHandle?.update(CODEX_THREAD_SWITCHED, []).catch(() => {});
           await this.finalize(state, CODEX_THREAD_SWITCHED);
@@ -1585,10 +1597,17 @@ export class TurnEngine {
         // Ownership of a prompt already delivered to Slack must not turn on one
         // failed read.
         let paneText: string;
-        const hcPrompt: HcCodexPromptContext | undefined = hcCodex && path && state.hcCodexTurnId &&
-          state.transcriptIdentity && agent.hcCodexPromptStamp
-          ? { ref: state.ref, stamp: agent.hcCodexPromptStamp, rollout: state.transcriptIdentity, offset: state.offset }
-          : undefined;
+        let hcPrompt: HcCodexPromptContext | undefined;
+        if (hcCodex && path && state.hcCodexTurnId && state.transcriptIdentity && agent.hcCodexPromptStamp) {
+          const competitors = codexRollouts.flatMap(({ transcriptIdentity }) => {
+            if (sameTranscriptIdentity(transcriptIdentity, state.transcriptIdentity)) return [];
+            const baseline = state.hcCodexRollouts?.find(({ identity }) => sameTranscriptIdentity(identity, transcriptIdentity));
+            return baseline?.offset == null ? [] : [{ identity: baseline.identity, offset: baseline.offset }];
+          });
+          if (competitors.length + 1 === codexRollouts.length) {
+            hcPrompt = { ref: state.ref, stamp: agent.hcCodexPromptStamp, rollout: state.transcriptIdentity, offset: state.offset, competitors };
+          }
+        }
         let hcScreen: ScreenSnapshot | null = null;
         try {
           if (hcCodex) {
@@ -1622,7 +1641,7 @@ export class TurnEngine {
           ? parseVerifiedHcCodexPrompt(hcScreen, hcPrompt)
           : state.driver.parseBlockedPane(paneText, state.backend);
         const fingerprint = hcPrompt && (prompt.kind === "question" || prompt.kind === "permission")
-          ? JSON.stringify([hcPrompt.stamp, hcPrompt.offset, prompt.verified.fingerprint])
+          ? JSON.stringify([hcPrompt.stamp, hcPrompt.offset, hcPrompt.competitors, prompt.verified.fingerprint])
           : promptFingerprint(prompt);
 
         if (state.phase === "running") {

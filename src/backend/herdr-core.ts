@@ -385,11 +385,17 @@ export class HcBackend implements Terminals {
     const kind = terminal.status?.kind;
     const cwd = terminal.foreground?.cwd;
     if (stamp?.turn !== context.stamp.turn || stamp.statusMs !== context.stamp.statusMs ||
-        (kind !== "permission" && kind !== "question") || !cwd ||
-        !(await this.codexRollouts(context.ref.pid!, cwd))?.some(({ transcriptIdentity }) =>
-          sameTranscriptIdentity(context.rollout, transcriptIdentity)) ||
-        await verifiedTranscriptSize(context.rollout) !== context.offset) {
+        (kind !== "permission" && kind !== "question") || !cwd) {
       throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+    }
+    const rollouts = await this.codexRollouts(context.ref.pid!, cwd);
+    const expected = [{ identity: context.rollout, offset: context.offset }, ...context.competitors];
+    if (rollouts?.length !== expected.length) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+    for (const { identity, offset } of expected) {
+      if (!rollouts.some(({ transcriptIdentity }) => sameTranscriptIdentity(identity, transcriptIdentity)) ||
+          await verifiedTranscriptSize(identity) !== offset) {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      }
     }
     return kind;
   }
