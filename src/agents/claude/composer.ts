@@ -9,6 +9,7 @@ export interface ClaudeComposer {
   frame: string;
   rawRow: string;
   nativeCaret?: true;
+  nativeProbeFits?: boolean;
 }
 
 export const COMPOSER_BOTTOM_RULE_RE = /^[─━]+$/u;
@@ -86,7 +87,8 @@ function parseFrame(lines: string[], index: number, cols: number, column?: numbe
     caret = before.length;
   }
   if (/[\p{C}\u00a0]/u.test(draft) || (draft && !draft.trim()) || /\[(?:Pasted|Image)\b/i.test(draft)) return null;
-  if (3 + [...draft].reduce((width, char) => width + cellWidth(char.codePointAt(0)!), 0) >= cols) return null;
+  const draftEnd = 3 + [...draft].reduce((width, char) => width + cellWidth(char.codePointAt(0)!), 0);
+  if (draftEnd >= cols) return null;
   const preceding = stripVTControlCharacters(lines.slice(1, index - 1).join("\n")).trimEnd().split("\n").at(-1) ?? "";
   const idle = !/^[✳✽✻]\s.*…/u.test(preceding.trimStart()) && !/esc to (?:interrupt|cancel)/i.test(footer);
   const banner = lines[index - 2] ?? "";
@@ -95,5 +97,9 @@ function parseFrame(lines: string[], index: number, cols: number, column?: numbe
     stripVTControlCharacters(banner).length === cols - 2;
   if (native && !fullscreenStash && /\bdraft stashed\s*$/u.test(stripVTControlCharacters(banner))) return null;
   const stashed = fullscreenStash || /\bdraft stashed\s*$/m.test(footer);
-  return { draft, caret, stashed, idle, frame: upper + "\n" + footer, rawRow: row, ...(native ? { nativeCaret: true } : {}) };
+  // The native probe can expose an unpainted space before its sentinel.
+  return {
+    draft, caret, stashed, idle, frame: upper + "\n" + footer, rawRow: row,
+    ...(native ? { nativeCaret: true, nativeProbeFits: draftEnd + 2 < cols } : {}),
+  };
 }

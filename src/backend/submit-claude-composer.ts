@@ -94,6 +94,7 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
   notCancelled();
   const initial = await read();
   if (initial.stashed) throw refuse("existing-stash");
+  if (initial.nativeProbeFits === false) throw refuse("draft");
 
   let ready = initial;
   if (initial.draft) {

@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseClaudeHcComposer } from "../agents/claude/composer.js";
 import { claudeDriver } from "../agents/claude/driver.js";
 import { submitRefusedText } from "./submit-notice.js";
 import { stripSidePane } from "./side-pane.js";
@@ -473,6 +474,30 @@ test("core reverses a native draft's hidden trailing-space probe before stashing
     ]);
   });
 });
+
+for (const [limit, hidden] of [["first probe", ""], ["hidden trailing space", " "]] as const) {
+  test(`core leaves a native draft at the ${limit} width limit untouched`, async () => {
+    const { frame, cols, rows } = NATIVE_PAINT;
+    const paint = (draft: string) => frame.replace("❯\u00a0", "❯\u00a0" + draft)
+      .replace("\x1b[65;3H", "\x1b[65;" + (draft.length + 3) + "H");
+    const draft = "a".repeat(cols - 4 - hidden.length);
+    const initial = paint(draft);
+    const start = parseClaudeHcComposer(initial, cols, rows);
+    assert.equal(start?.draft, draft);
+    assert.equal(start?.caret, draft.length);
+    const probed = paint(draft + "x");
+    const nearEdge = paint(draft + hidden + "x");
+    await withCore([SUBMIT_TERMINAL], {
+      size: { cols, rows },
+      paints: [initial, initial, probed, probed, initial, initial, nearEdge],
+    }, async (backend, fake) => {
+      const result = await backend.submit(await submitRef(backend), "go", CTX).catch((error: unknown) => error);
+      assert.deepEqual(writes(fake), []);
+      assert.ok(result instanceof SubmitRefused && result.reason === "draft");
+      assert.deepEqual(result.composer, { probe: null, stash: "untouched", submitUncertain: false });
+    });
+  });
+}
 
 test("core refuses a partial paint, whitespace-only draft or existing stash without input", async () => {
   for (const [paint, reason] of [

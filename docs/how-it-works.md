@@ -159,12 +159,16 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   the message submission sequence. The composer has full-width rules and
   valid visible footer text. Only the upper rule may contain the session name.
   The caret is verified from inverse video or, on herdr-core, from the cursor
-  coordinates in a complete alternate-screen paint. Before stashing a
-  native-caret draft, cctag probes for unpainted trailing whitespace and
-  returns the caret to its original position. Each footer row must begin with
-  at least two spaces followed by visible text. A paint with no footer text is
-  refused. Only a synthetic test covers that layout. The captured `/model` dropdown is also
-  refused because the footer area contains a selection marker.
+  coordinates in a complete alternate-screen paint that matches the captured
+  layout. Native-caret drafts accept printable ASCII and the supported wide
+  Japanese character ranges. Before writing, cctag requires enough display
+  cells for the probe character and one unpainted space inside the verified
+  width. Before stashing a native-caret draft, cctag probes for unpainted
+  trailing whitespace and returns the caret to its original position. Each
+  footer row must begin with at least two spaces followed by visible text. A
+  paint with no footer text is refused. Only a synthetic test covers that
+  layout. The captured `/model` dropdown is also refused because the footer
+  area contains a selection marker.
   Legacy herdr gets the PID and process start time during guarded submission
   and model readback. Guarded model and message submission report a change
   when agent kind or terminal instance is known to differ, or when both known
