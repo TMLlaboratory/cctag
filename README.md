@@ -32,8 +32,7 @@ In a Herdr-backed setup, cctag controls the paired agent through [herdr](https:/
 (a terminal workspace manager) rather than screen-scraping tmux — discovery,
 keystroke injection, and status use Herdr. Turn output comes from the agent's
 own structured JSONL transcript, not the screen. Herdr reports `claude` or
-`codex`, and cctag selects the matching driver. This covers Claude Code or
-Codex CLI on Herdr or Orca; see the support matrix for Orca details.
+`codex`, and cctag selects the matching driver.
 
 cctag can also drive agents running in [Orca](https://github.com/stablyai/orca)
 terminals, alongside herdr, from the same Spoke. In the `@cctag connect` picker,
@@ -41,7 +40,7 @@ Orca Claude Code and `omp` rows share the `orca · <directory name>` group;
 `omp` rows carry the `[omp]` prefix. Herdr pane IDs and existing pairings keep
 their current format.
 
-Claude Code running in [herdr-core](https://github.com/herdrdev/herdr-core)
+Claude Code and Codex CLI running in [herdr-core](https://github.com/herdrdev/herdr-core)
 terminals — the core behind the Herdr app, a separate product from the herdr
 TUI — is driven through its `hc` CLI, from the same Spoke. Those rows appear in
 the `herdr-core · <directory name>` group.
@@ -94,7 +93,7 @@ Pre-1.0 is a deliberate claim rather than a placeholder: the interface still
 moves, so pin an exact version if that matters to you.
 
 Text-in / text-out turns work for the supported combinations: Claude Code on
-Herdr, Orca or herdr-core, Codex CLI on Herdr or Orca, and `omp` on Orca. For supported Claude Code
+Herdr, Orca or herdr-core, Codex CLI on Herdr, Orca or herdr-core, and `omp` on Orca. For supported Claude Code
 and Codex CLI tool-permission / command-approval prompts, cctag shows Slack
 buttons; a human can answer through Slack or at the terminal. Codex CLI approvals
 on Orca, and `omp` questions and approvals, appear in Slack as terminal-only
@@ -119,7 +118,7 @@ listed in the terminal-backend matrix below.
 | Tool-permission / command-approval prompts as Slack buttons | ✅ | ✅ |
 | `AskUserQuestion` buttons + free-text answers | ✅ | — *(no equivalent tool)* |
 | `@cctag model` | ✅ `/model <name>` | ✅ model + reasoning-level picker |
-| `@cctag mode` / `@cctag plan` | ✅ | — *(no Shift+Tab mode ring or plan mode)* |
+| `@cctag mode` / `@cctag plan` | ✅ | — *(switch Plan mode in the terminal)* |
 | Plan-file attach on ExitPlanMode | ✅ | — |
 | Background watcher (terminal-initiated work) | ✅ | ✅ |
 | Slack → agent image/file attachments | ✅ real image attachments | ✅ *(read via an `exec` step)* |
@@ -141,7 +140,7 @@ must be available.
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
 | Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ the features above. Use the terminal for unverified prompts and for free-text answers to multi-select questions |
-| Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal | — |
+| Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal | ✅ Turns, output, status, and buttons for verified approvals and questions. Start with `codex --no-daemon`. Use the terminal for question notes and model or mode changes |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) | — |
 
 herdr-core does not share agents with the herdr TUI; they are separate
@@ -159,7 +158,10 @@ process, an absent or `claude-code` status app, and a valid session record
 that holds the foreground PID and a start time. A Claude Code that runs as `node`
 or records neither is not listed. Before each write, cctag
 rechecks the PID, session ID and recorded start time against the values
-observed at the start of the operation. See [herdr-core discovery and writes](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows).
+observed at the start of the operation. For Codex, cctag checks the foreground
+PID and process start time, and uses the rollout written by that process for
+replies. Pairing stays with the terminal across `/new` and resume.
+See [herdr-core discovery and writes](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows).
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the
@@ -199,7 +201,7 @@ authorized — see [docs/how-it-works.md](docs/how-it-works.md).
   coding-agent session. Each Spoke connects out to the Hub over an
   authenticated WebSocket and drives that person's local agents through its
   enabled terminal backend(s), exactly like standalone mode. Claude Code uses
-  herdr, Orca or herdr-core, Codex CLI uses herdr or Orca, and `omp` uses Orca.
+  herdr, Orca or herdr-core, Codex CLI uses herdr, Orca or herdr-core, and `omp` uses Orca.
 
 **If someone else already runs a Hub you can join**, you only need [For Spoke
 users](#for-spoke-users) below — skip straight there, none of the Slack app

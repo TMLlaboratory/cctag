@@ -211,7 +211,7 @@ export function selectedOptionIndices(body: unknown): number[] | null {
 }
 
 /** Renders an AskUserQuestion prompt read off the pane (one question at a time). */
-export function askUserQuestionBlocks(paneId: string, promptId: number, info: AskUserQuestionPaneInfo) {
+export function askUserQuestionBlocks(paneId: string, promptId: number, info: AskUserQuestionPaneInfo, allowFreeText = true) {
   const header = `❓ ${info.header}`;
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: `*${header}*\n${info.question}` } }];
 
@@ -311,7 +311,8 @@ export function askUserQuestionBlocks(paneId: string, promptId: number, info: As
   // it had fewer — and the missing ones were unanswerable.
   const hidden = info.options.length - shown.length;
   const hint =
-    hidden > 0
+    !allowFreeText ? "ボタンで選択できます。補足を入力する場合は端末で回答してください。"
+      : hidden > 0
       ? `ボタンは${MAX_OPTION_BUTTONS}件までです。残り${hidden}件を選ぶ場合や自由に答える場合は、このスレッドに返信してください`
       : "ボタンを押すか、このスレッドに返信すると自由記述で回答できます";
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: hint }] });

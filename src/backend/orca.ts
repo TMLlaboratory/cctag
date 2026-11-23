@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { homedir } from "node:os";
-import { open, readFile } from "node:fs/promises";
-import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { lstartTimestamp, nativeExecFile, nativeReadTranscriptHead, runSystem, resultError } from "./local-process.js";
 import type { AgentDriver, OrcaProcessAccess, OrcaProcessIdentity, OrcaProcessSession } from "../agents/driver.js";
 import { ORCA_AGENT_DRIVERS } from "../agents/driver.js";
 import { CODEX_ORCA_TERMINAL_ANSWER } from "../agents/codex/driver.js";
@@ -35,7 +34,6 @@ import {
 import { stripSidePane } from "./side-pane.js";
 import { backendForTarget } from "./target.js";
 
-const execFileAsync = promisify(execFile);
 const ORCA_TIMEOUT_MS = 5_000;
 const SUBMIT_TIMEOUT_MS = 25_000;
 const PROBE_POLL_MS = 150;
@@ -120,16 +118,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Not every lsof exit 1: a bad option exits 1 too, and differs only in
-// explaining itself on stderr (measured on macOS).
-function lsofFoundOnlySome(file: string, result: OrcaExecResult): boolean {
-  return file === "lsof" && result.exitCode === 1 && !result.stderr.trim();
-}
-
-function resultError(result: OrcaExecResult): string {
-  return result.stderr.trim() || result.error || `command exited with status ${result.exitCode}`;
-}
-
 function parseEnvelope(output: string): JsonObject {
   try {
     const parsed = object(JSON.parse(output));
@@ -138,11 +126,6 @@ function parseEnvelope(output: string): JsonObject {
   } catch (error) {
     throw new BackendUnavailable(`orca returned invalid JSON: ${errorMessage(error)}`);
   }
-}
-
-function lstartTimestamp(value: string): number | null {
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function parsePsRow(line: string, drivers: readonly AgentDriver[]): ProcessRow | null {
@@ -376,54 +359,6 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-async function nativeExecFile(file: string, args: string[], options: { timeoutMs: number }): Promise<OrcaExecResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync(file, args, {
-      timeout: options.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    return { stdout, stderr, exitCode: 0 };
-  } catch (error) {
-    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: string };
-    return {
-      stdout: typeof failure.stdout === "string" ? failure.stdout : "",
-      stderr: typeof failure.stderr === "string" ? failure.stderr : "",
-      // Not 1: a timed-out lsof would then pass for one that found part of its list.
-      exitCode: typeof failure.code === "number" ? failure.code : -1,
-      error: failure.message,
-    };
-  }
-}
-const MAX_SESSION_HEAD_BYTES = 64 * 1024;
-const MAX_SESSION_HEAD_LINES = 16;
-
-async function nativeReadTranscriptHead(path: string): Promise<string> {
-  const file = await open(path, "r");
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  let lines = 0;
-  try {
-    while (bytes < MAX_SESSION_HEAD_BYTES) {
-      const buffer = Buffer.allocUnsafe(Math.min(4096, MAX_SESSION_HEAD_BYTES - bytes));
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, bytes);
-      if (bytesRead === 0) break;
-      let length = bytesRead;
-      for (let index = 0; index < bytesRead; index++) {
-        if (buffer[index] === 0x0a && ++lines === MAX_SESSION_HEAD_LINES) {
-          length = index + 1;
-          break;
-        }
-      }
-      chunks.push(buffer.subarray(0, length));
-      bytes += length;
-      if (lines === MAX_SESSION_HEAD_LINES) break;
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  } finally {
-    await file.close();
-  }
-}
-
 export function createOrcaRuntime(): OrcaRuntime {
   return {
     homeDir: homedir(),
@@ -458,21 +393,12 @@ export class OrcaBackend implements Terminals {
       homeDir: runtime.homeDir,
       readFile: (path) => runtime.readFile(path),
       readTranscriptHead: (path) => runtime.readTranscriptHead(path),
-      runSystem: (file, args) => this.runSystem(file, args),
+      runSystem: (file, args) => this.system(file, args),
     };
   }
 
-  private async runSystem(file: string, args: string[]): Promise<string> {
-    let result: OrcaExecResult;
-    try {
-      result = await this.runtime.execFile(file, args, { timeoutMs: ORCA_TIMEOUT_MS });
-    } catch (error) {
-      throw new BackendUnavailable(errorMessage(error));
-    }
-    if (result.exitCode !== 0 && !lsofFoundOnlySome(file, result)) {
-      throw new BackendUnavailable(resultError(result));
-    }
-    return result.stdout;
+  private system(file: string, args: string[]): Promise<string> {
+    return runSystem(this.runtime.execFile.bind(this.runtime), file, args, ORCA_TIMEOUT_MS);
   }
 
   private async runOrca(args: string[], timeoutMs = ORCA_TIMEOUT_MS): Promise<unknown> {
@@ -529,12 +455,12 @@ export class OrcaBackend implements Terminals {
   }
 
   private async processRows(withCwd: boolean): Promise<ProcessRow[]> {
-    const rows = parsePsRows(await this.runSystem("ps", PS_ARGS), this.drivers);
+    const rows = parsePsRows(await this.system("ps", PS_ARGS), this.drivers);
     const candidates = rows.filter(isAgentProcess);
     if (candidates.length === 0) return rows;
     const pids = candidates.map((row) => row.pid);
     const environment = parseEnvironmentRows(
-      await this.runSystem("ps", ["eww", "-o", "pid=,command=", "-p", pids.join(",")]),
+      await this.system("ps", ["eww", "-o", "pid=,command=", "-p", pids.join(",")]),
     );
     for (const row of candidates) {
       const env = environment.get(row.pid);
@@ -544,7 +470,7 @@ export class OrcaBackend implements Terminals {
     }
     if (withCwd) {
       const cwd = parseLsofCwds(
-        await this.runSystem("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fpn"]),
+        await this.system("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fpn"]),
       );
       for (const row of candidates) row.cwd = cwd.get(row.pid);
     }
@@ -793,7 +719,7 @@ export class OrcaBackend implements Terminals {
     const bindsTranscript = ref.agentKind === "omp" || ref.agentKind === "codex";
     const rows = bindsTranscript
       ? await this.processRows(true)
-      : parsePsRows(await this.runSystem("ps", PS_ARGS), this.drivers);
+      : parsePsRows(await this.system("ps", PS_ARGS), this.drivers);
     const current = rows.find((row) => row.pid === ref.pid);
     if (
       !current ||
@@ -807,7 +733,7 @@ export class OrcaBackend implements Terminals {
     const processPaneKey = bindsTranscript
       ? current.paneKey
       : parseEnvironmentRows(
-          await this.runSystem("ps", ["eww", "-o", "pid=,command=", "-p", String(ref.pid)]),
+          await this.system("ps", ["eww", "-o", "pid=,command=", "-p", String(ref.pid)]),
         ).get(ref.pid)?.paneKey;
     if (
       processPaneKey !== paneKey ||

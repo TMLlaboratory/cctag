@@ -19,12 +19,21 @@ interface CodexPayload {
   cwd?: string;
   session_id?: string;
   turn_id?: string;
+  item?: { type?: string; content?: CodexContentBlock[] };
 }
 
 export interface CodexRecord {
   type?: string;
   timestamp?: string;
   payload?: CodexPayload;
+}
+
+export function isCodexSubmittedInput(record: CodexRecord, text: string, sentAt: number): boolean {
+  if (record.type !== "event_msg" || record.payload?.type !== "item_completed" ||
+      record.payload.item?.type !== "UserMessage") return false;
+  const content = record.payload.item.content;
+  return Array.isArray(content) && Date.parse(record.timestamp ?? "") >= sentAt &&
+    content?.filter((part) => part.type === "text").map((part) => part.text).join("") === text;
 }
 
 /** Lists `~/.codex/sessions/YYYY/MM/DD` day directories, most recent first. */

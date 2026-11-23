@@ -41,7 +41,7 @@ cctagはherdrに加えて[Orca](https://github.com/stablyai/orca)のターミナ
 herdrのpane IDと既存のペアリング形式は変わらない。
 
 [herdr-core](https://github.com/herdrdev/herdr-core)（Herdr appの土台で、herdrのTUIとは別の製品）の
-ターミナルで動くClaude Codeも、`hc` CLI経由で同じSpokeから操作できる。これらは
+ターミナルで動くClaude CodeとCodex CLIも、`hc` CLI経由で同じSpokeから操作できる。これらは
 `herdr-core · <ディレクトリ名>`グループに表示される。
 詳細は[ターミナルバックエンド](#ターミナルバックエンド-herdrとorcaとherdr-core)を参照。
 
@@ -82,7 +82,7 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 場つなぎの表示ではなく意図的な宣言で、インターフェースはまだ動く。それが問題になるなら
 バージョンを固定して使うこと。
 
-テキスト入出力のターンは対応する組み合わせで動作する: Claude Codeはherdr・Orca・herdr-core、Codex CLIはherdrまたはOrca、
+テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeとCodex CLIはherdr・Orca・herdr-core、
 `omp`はOrca。Claude CodeとCodex CLIの対応する権限確認・コマンド承認プロンプトはSlackのボタンにでき、
 Slack上または端末から人が回答できる。Orca上のCodex CLIの承認と`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
 回答できない。
@@ -103,7 +103,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 | ツール権限確認・コマンド承認プロンプトのSlackボタン化 | ✅ | ✅ |
 | `AskUserQuestion`ボタン＋自由記述回答 | ✅ | — *(対応するツールが存在しない)* |
 | `@cctag model` | ✅ `/model <name>` | ✅ モデル＋推論レベルピッカー |
-| `@cctag mode` / `@cctag plan` | ✅ | — *(Shift+Tabモードリング・プランモードが存在しない)* |
+| `@cctag mode` / `@cctag plan` | ✅ | — *(Plan modeは端末で切り替える)* |
 | ExitPlanModeでのプランファイル添付 | ✅ | — |
 | バックグラウンドウォッチャー（ターミナル起点の作業） | ✅ | ✅ |
 | Slack→エージェントへの画像・ファイル添付 | ✅ 本物の画像添付になる | ✅ *(`exec`経由で読み込む)* |
@@ -122,7 +122,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
 | Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて | ✅ 上の表の機能。確認できないプロンプトへの回答と、複数選択の質問への自由記述は端末で行う |
-| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える | — |
+| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える | ✅ ターン・出力・状態と、確認できた承認・質問へのボタン回答。`codex --no-daemon`で起動する。質問への補足入力とモデル・モードの切り替えは端末で行う |
 | oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） | — |
 
 herdr-coreはherdrのTUIとはエージェントを共有しない別のサーバである。cctagは`hc`でcoreとやりとりし、
@@ -135,6 +135,8 @@ cctagは、`hc ls`が`claude-code`と報告するローカルで稼働中の端�
 前景プロセスが`claude`か`claude-code`で、状態の`app`が未報告か`claude-code`であり、有効なセッションレコードがあること。
 ファイルに前景のPIDと起動時刻（`startedAt`）が記録されていること。`node`として動くClaude Codeや、どちらかを記録しないClaude Codeは一覧に出ない。
 書き込みにはファイルに記録されたPIDと開始時刻が必要で、書き込み直前にPID・セッションID・開始時刻を操作開始時の値と照合する。
+Codexでは前景のPIDとプロセスの開始時刻を照合し、そのプロセスが書くrolloutから応答を読む。
+`/new`やresumeの後も、ペアリングは同じ端末に残る。
 詳細は[herdr-coreの検出と書き込み](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows)を参照（英語）。
 
 Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
@@ -165,7 +167,7 @@ OrcaはClaude Codeの灰色の「次のプロンプトの提案」を、人が�
   唯一のSocket Mode接続を保持し、イベントのルーティングだけを行う — 誰のコーディングエージェント
   セッションも実行しないし、見ることもない。各Spokeは認証済みWebSocketでHubに接続し、
   有効にしたターミナルバックエンド経由でローカルのエージェントを操作する。対応する組み合わせは、
-  Claude Codeがherdr・Orca・herdr-core、Codex CLIがherdrまたはOrca、`omp`がOrca。
+  Claude CodeとCodex CLIがherdr・Orca・herdr-core、`omp`がOrca。
 
 **すでに誰かが運用しているHubに参加できる場合**は、下記の
 [Spoke利用者向け](#spoke利用者向け)だけで十分 — そこまで読み飛ばして構わない。Slack app関連の

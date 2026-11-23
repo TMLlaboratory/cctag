@@ -20,8 +20,12 @@ would have to keep. Pin an exact version if that matters to you.
   `herdr-core · <directory>` in `@cctag connect`, and its targets carry an
   `hc:` prefix, so herdr and Orca pairings are unchanged. cctag never starts the
   core. A free-text answer to a multi-select question is answered in the
-  terminal there, because `hc` cannot type text without pressing Enter. Codex
-  CLI and `omp` on herdr-core are not supported yet.
+  terminal there, because `hc` cannot type text without pressing Enter.
+- Codex CLI on herdr-core appears in the connect picker, accepts Slack turns,
+  and posts replies from its verified rollout. Use `codex --no-daemon` for
+  a per-terminal writer. The pairing follows the terminal across `/new`
+  and resume. Verified command approvals and Plan mode questions have Slack
+  buttons, with a terminal fallback for other screens.
 
 ### Fixed
 

@@ -47,7 +47,7 @@ roles.
 | | Role | Runs on | Can do |
 |---|---|---|---|
 | **Hub** | The one connection to Slack | A small always-on server (e.g. a small cloud VM) | Receives Slack messages and forwards them to the right person's Spoke. **Never touches Claude Code or the local terminal backends** |
-| **Spoke** | The local terminal connection | **Your own PC** | Lists, reads, and sends input to supported agents through enabled backends: Claude Code and Codex CLI on either; `omp` on Orca |
+| **Spoke** | The local terminal connection | **Your own PC** | Lists, reads, and sends input to supported agents. Claude Code and Codex CLI run on Herdr, Orca or herdr-core. `omp` runs on Orca |
 
 The important part: **the Hub has no way to reach your terminal.** Even if
 the Hub's server were compromised, it has no ability to control the Claude
@@ -141,7 +141,7 @@ watching the Herdr app sees cctag's input arrive in the same terminal. Targets
 carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 
 - **Discovery.** cctag considers live local terminals that `hc ls` identifies
-  as `claude-code`. It checks with `hc get` that the foreground executable is
+  as `claude-code` or `codex`. For Claude Code, it checks with `hc get` that the foreground executable is
   `claude` or `claude-code`, the foreground PID is a positive safe integer,
   and the status app is either absent or `claude-code`. The foreground PID identifies
   `~/.claude/sessions/<pid>.json`, which must contain a nonempty session ID and
@@ -149,10 +149,16 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   `startedAt`; a Claude Code that writes either differently is not listed, so it cannot be connected. The executable
   name comes from `hc get` as the OS reports it: a Claude Code that runs as
   `node` (an npm install without the native binary) is not listed either. Remote terminals
-  (`machine/t7`) belong to the Spoke on that machine.
+  (`machine/t7`) belong to the Spoke on that machine. For Codex, cctag verifies
+  the foreground process and uses the same `lsof` checks as Orca to find user
+  rollouts that the process alone has open for writing. A fresh
+  `codex --no-daemon` is eligible before its first rollout. If a rollout
+  cannot be bound to a terminal on a shared app server, cctag explains how
+  to start a per-terminal server.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question
-  or an approval is up, and `done` after a turn. A program that reports nothing
+  or an approval is up, and `done` after a turn. Codex reports the same
+  states for command approvals and Plan mode questions. A program that reports nothing
   — Claude Code on its folder-trust screen, for one — has no status, which
   cctag treats as unknown.
 - **Writes.** Before each message, answer, model confirmation, or mode-change
@@ -166,16 +172,28 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   The [Claude model-switch confirmation](#56-switching-model) can also be
   answered while the state remains `done`.
 
+  For Codex, writes recheck the foreground PID and process start time. Messages
+  require an idle or done report and a recognizable composer. A Slack button
+  requires a complete, recognized approval or question whose fingerprint and
+  blocked turn still match. Codex accepts a single digit to answer these
+  prompts. Use the terminal for question notes or unverified screens.
+
   A message goes through `hc send`, which pastes the text and
-  presses Enter once nobody has typed for about three seconds, and refuses a
-  `blocked` program. Answers and mode changes use named keys through `hc keys`
+  presses Enter, and refuses a `blocked` program. Answers and mode changes use named keys through `hc keys`
   (digits, arrows, Enter, Shift+Tab). `hc` has no way to type text without pressing Enter,
   so free text is pasted with its Enter through `hc send --force`; a free-text
   answer to a multi-select question, which has to be typed and *not* submitted,
-  is refused before any key is sent. A Slack image arrives as a real attachment
+  is refused before any key is sent. For Claude Code, a Slack image arrives as a real attachment
   (`[Image #1]`), as on herdr, and the paste-then-Enter of `hc send` was not
   swallowed by the conversion, so the Enter retry described in 5.8 is not used
   on herdr-core.
+- **Codex replies.** Pairing follows the terminal across `/new` and resume.
+  Codex can keep both the old and new rollouts open through the next turn.
+  cctag records the end of each open rollout before sending and binds the
+  turn only when one candidate records the exact input sent. A newly observed
+  rollout is read from the beginning only when it was created after submission.
+  Once a turn is bound, an observed switch ends it with the output already
+  collected. When the input cannot be matched uniquely, check the terminal.
 - **Starting the core.** Any `hc` command starts a stopped core, and a core
   passes the environment of whoever started it to every terminal. cctag
   therefore connects to the core's socket first and runs nothing when no core
@@ -186,7 +204,7 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
    the enabled backends. Herdr provides Claude Code and Codex, Orca provides
-   Claude Code, Codex and `omp`, and herdr-core provides Claude Code.
+   Claude Code, Codex and `omp`, and herdr-core provides Claude Code and Codex.
 
    "Owner only" is not simply a narrowed permission. **The Spoke runs on the
    owner's own machine, so `connect` is choosing which of your own panes to
@@ -292,7 +310,7 @@ For Claude Code, `@cctag model <name>` (e.g. `model opus`) forwards Claude's
 own `/model <name>` command rather than starting a normal conversational turn;
 the command's output doesn't reliably land in the session transcript. Claude
 Code model switching is supported on Herdr, Orca and herdr-core. `omp` has no model
-command; Codex CLI uses its separate model and reasoning-level picker, covered
+command; Codex CLI on Herdr uses its separate model and reasoning-level picker, covered
 in [usage.md](usage.md).
 
 The Claude driver sends the slash command through the backend's `submit`.

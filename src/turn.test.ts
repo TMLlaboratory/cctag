@@ -2574,6 +2574,89 @@ test("a Codex thread resumed mid-turn on Orca ends the turn instead of replaying
   }
 });
 
+test("herdr-core Codex binds a new rollout after /new without replaying the same input in the old rollout", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-input-"));
+  const old = { sessionId: "old", transcriptIdentity: { path: join(dir, "old.jsonl"), device: "1", inode: "11" } };
+  const next = { sessionId: "next", transcriptIdentity: { path: join(dir, "new.jsonl"), device: "1", inode: "22" } };
+  const text = "identical user text";
+  const record = (type: string, payload: Record<string, unknown>) =>
+    JSON.stringify({ type, timestamp: new Date(Date.now() + 1000).toISOString(), payload }) + "\n";
+  const records = (reply: string) =>
+    record("event_msg", { type: "task_started", turn_id: "1" }) +
+    record("event_msg", { type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text }] } }) +
+    record("response_item", { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: reply }] }) +
+    record("event_msg", { type: "task_complete", turn_id: "1" });
+  writeFileSync(old.transcriptIdentity.path, records("historical reply"));
+  const paneId = "hc:t1";
+  const pairing = { ...fakePairing(), paneId };
+  const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+  const { notifier, posts } = fakeNotifier();
+  let sent = false;
+  const terminals = fakeBackend(() => "idle", () => "", {
+    async get() {
+      return {
+        ...fakeAgent(sent ? "done" : "idle", "herdr-core"),
+        ref,
+        agent: "codex",
+        cwd: dir,
+        sessionId: sent ? null : old.sessionId,
+        transcriptIdentity: sent ? undefined : old.transcriptIdentity,
+        codexRollouts: sent ? [old, next] : [old],
+      };
+    },
+    async submit() {
+      writeFileSync(next.transcriptIdentity.path, records("new reply"));
+      sent = true;
+      return { status: "started", draftStashed: false };
+    },
+  }, "herdr-core");
+  const engine = engineFor(terminals, notifier, 5000);
+  try {
+    await engine.startTurn(pairing, "U1", text);
+    for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+    assert.equal(engine.isBusy(paneId), false);
+    assert.ok(posts.includes("new reply"), JSON.stringify(posts));
+    assert.ok(!posts.includes("historical reply"));
+  } finally {
+    engine.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a mid-turn Codex rollout switch on herdr-core ends the adopted turn without replay", async () => {
+  const paneId = "hc:t1";
+  const pairing = { ...fakePairing(), paneId };
+  const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+  const previous = { path: "/old.jsonl", device: "1", inode: "11" };
+  const next = { path: "/new.jsonl", device: "1", inode: "12" };
+  const { notifier, posts } = fakeNotifier();
+  const engine = engineFor(fakeBackend(() => "working", () => "", {
+    async get() {
+      return {
+        ...fakeAgent("working", "herdr-core"),
+        ref, agent: "codex", sessionId: null, cwd: "/tmp",
+        codexRollouts: [
+          { sessionId: "old", transcriptIdentity: previous },
+          { sessionId: "next", transcriptIdentity: next },
+        ],
+      };
+    },
+  }, "herdr-core"), notifier, 5000);
+  try {
+    await engine.adoptBlockedTerminal(pairing, {
+      backend: "herdr-core", driver: codexDriver, ref, paneId, cwd: "/tmp",
+      sessionId: "old", transcriptPath: previous.path, transcriptIdentity: previous, offset: 0,
+      collected: ["already collected"], outboxBaseline: {}, writes: new WrittenFileTracker(),
+    });
+    for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+    assert.equal(engine.isBusy(paneId), false);
+    assert.ok(posts.includes(CODEX_THREAD_SWITCHED), JSON.stringify(posts));
+    assert.ok(posts.includes("already collected"));
+  } finally {
+    engine.abortAll();
+  }
+});
+
 test("a Codex approval on Orca is posted as a terminal-only notice, without buttons", async () => {
   const { notifier, posts, postedBlocks } = fakeNotifier();
   const { terminal } = JSON.parse(

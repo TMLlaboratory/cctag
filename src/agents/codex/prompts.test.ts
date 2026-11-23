@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { codexDriver, parseCodexModelMenuPrompt } from "./driver.js";
 
 // Captured verbatim in D-codex-11a-permissions-menu-restore-screen.json and
@@ -31,6 +32,31 @@ const EFFORT_MENU = [
   "  2. Medium",
   "Press enter to confirm",
 ].join("\n");
+
+test("herdr-core verifies the captured Codex approval and question with one digit", () => {
+  for (const kind of ["permission", "question"]) {
+    const name = kind === "permission" ? "approval" : kind;
+    const { text } = JSON.parse(readFileSync(new URL(`./__fixtures__/hc-${name}.screen.json`, import.meta.url), "utf8"));
+    const prompt = codexDriver.parseBlockedPane(text, "herdr-core");
+    assert.equal(prompt.kind, kind);
+    if (prompt.kind === "permission" || prompt.kind === "question") {
+      assert.equal(prompt.verified.form, "digit-confirms");
+    }
+    assert.equal(codexDriver.parseBlockedPane(text.split("\n").slice(1).join("\n"), "herdr-core").kind, "blind-permission");
+  }
+});
+
+test("herdr-core compares approval command text exactly and ignores cursor movement", () => {
+  const { text } = JSON.parse(readFileSync(new URL("./__fixtures__/hc-approval.screen.json", import.meta.url), "utf8"));
+  const fingerprint = (capture: string) => {
+    const prompt = codexDriver.parseBlockedPane(capture, "herdr-core");
+    assert.equal(prompt.kind, "permission");
+    if (prompt.kind === "permission") return prompt.verified.fingerprint;
+  };
+  const moved = text.replace("› 1.", "  1.").replace("  2.", "› 2.");
+  assert.equal(fingerprint(text), fingerprint(moved));
+  assert.notEqual(fingerprint(text), fingerprint(text.replace("$ /usr/bin/printf CCTAG_BENIGN", "$ /usr/bin/printf  CCTAG_BENIGN")));
+});
 
 function snapshot(text: string) {
   return { text, draft: null, complete: true };

@@ -22,6 +22,11 @@ export interface TranscriptIdentity {
   readonly inode: string;
 }
 
+export interface CodexRollout {
+  readonly sessionId: string;
+  readonly transcriptIdentity: TranscriptIdentity;
+}
+
 export interface AgentRef {
   readonly target: string;
   readonly pid: number | null;
@@ -37,6 +42,7 @@ export interface AgentInfo {
   agent: AgentKind;
   sessionId: string | null;
   transcriptIdentity?: TranscriptIdentity;
+  codexRollouts?: readonly CodexRollout[];
   cwd: string;
   evidence: StatusEvidence;
   /** Raw Orca worktree state for picker icons only; not status evidence. */

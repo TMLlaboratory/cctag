@@ -14,7 +14,7 @@ import {
   transcriptSizeIfAvailable,
   transcriptSizeSafe,
 } from "./agents/transcript.js";
-import { driverFor } from "./agents/driver.js";
+import { agentTranscriptPath, driverFor } from "./agents/driver.js";
 import {
   classifiedStatus,
   EMPTY_TRANSCRIPT_BOUNDARIES,
@@ -313,7 +313,7 @@ export class BackgroundWatcher {
     // every record therefore postdates it — see the offset choice below.
     let transcriptAppeared = false;
     if (existing !== undefined && !sessionRotated && (sessionId === "" || existing.transcriptPath === "")) {
-      const resolved = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      const resolved = agentTranscriptPath(agent, driver);
       if (resolved !== existing.transcriptPath) {
         sessionRotated = true;
         // Two guards on reading a newly-resolved transcript from the start.
@@ -336,7 +336,7 @@ export class BackgroundWatcher {
     }
 
     if (!existing || existing.pairingKey !== pairing.key || sessionRotated || forceRebaseline) {
-      const tPath = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+      const tPath = agentTranscriptPath(agent, driver);
       const capturedOffset =
         tPath && !transcriptAppeared
           ? agent.evidence.kind === "hint"
@@ -487,7 +487,7 @@ export class BackgroundWatcher {
           const snapshot = await this.terminals.read(agent.ref.target, 40, "screen");
           return {
             snapshot,
-            fingerprint: snapshot.complete ? promptFingerprint(driver.parseBlockedPane(snapshot.text)) : null,
+            fingerprint: snapshot.complete ? promptFingerprint(driver.parseBlockedPane(snapshot.text, agent.backend)) : null,
           };
         },
       });
