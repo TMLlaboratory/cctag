@@ -156,11 +156,14 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   has no status, which cctag treats as unknown.
 - **Writes.** For Claude Code on herdr and herdr-core, cctag checks a complete
   visible composer and the current foreground process before each write in
-  the message submission sequence. The captured default (manual) and auto
-  modes have matching full-width rules, an inverse-video caret, and valid
-  visible footer text. Each footer row must begin with at least two spaces
-  followed by visible text. A paint with no footer text is refused. Only a
-  synthetic test covers that layout. The captured `/model` dropdown is also
+  the message submission sequence. The composer has full-width rules and
+  valid visible footer text. Only the upper rule may contain the session name.
+  The caret is verified from inverse video or, on herdr-core, from the cursor
+  coordinates in a complete alternate-screen paint. Before stashing a
+  native-caret draft, cctag probes for unpainted trailing whitespace and
+  returns the caret to its original position. Each footer row must begin with
+  at least two spaces followed by visible text. A paint with no footer text is
+  refused. Only a synthetic test covers that layout. The captured `/model` dropdown is also
   refused because the footer area contains a selection marker.
   Legacy herdr gets the PID and process start time during guarded submission
   and model readback. Guarded model and message submission report a change

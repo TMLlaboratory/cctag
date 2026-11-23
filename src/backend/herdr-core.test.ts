@@ -16,6 +16,9 @@ const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
 const PAINTS = JSON.parse(readFileSync(new URL("hc-composer.ansi.json", FIXTURES), "utf8")) as Record<string, string>;
+const NATIVE_PAINT = JSON.parse(readFileSync(new URL("hc-alternate-native-composer.ansi.json", FIXTURES), "utf8")) as {
+  frame: string; cols: number; rows: number;
+};
 const EMPTY = PAINTS["review-empty"]!;
 const EMPTY_PROBE = PAINTS["review-empty-probed"]!;
 const EMPTY_SEND = [EMPTY, EMPTY, EMPTY_PROBE, EMPTY_PROBE, EMPTY, EMPTY];
@@ -53,6 +56,7 @@ function fakeHc(
   options: {
     screens?: string[];
     paints?: string[];
+    size?: { cols: number; rows: number };
     changedAt?: number;
     legacySession?: boolean;
     send?: Record<string, unknown> | { error: { kind: string; message: string } };
@@ -152,7 +156,7 @@ if (args[0] === "ls") {
               socket.write(Buffer.concat([frame(0, JSON.stringify({ id: 1, result: {
                 channel: 1,
                 terminal: {
-                  address: terminal.address, state: "live", cols: 200, screen: "exact",
+                  address: terminal.address, state: "live", ...(options.size ?? { cols: 200 }), screen: "exact",
                   foreground: { pid: terminal.pid, name: "claude" },
                   status: { app: terminal.agent, state: terminal.status },
                 },
@@ -445,6 +449,27 @@ test("core refuses a trailing space exposed by the final probe and reverses its 
       (error) => error instanceof SubmitRefused && error.reason === "stash-unverified" && error.composer.probe === null);
     assert.deepEqual(writes(fake).map((args) => args.slice(4)), [
       ["x"], ["backspace"], ["ctrl+s"], ["right", "x"], ["backspace", "left"],
+    ]);
+  });
+});
+
+test("core reverses a native draft's hidden trailing-space probe before stashing", async () => {
+  const { frame, cols, rows } = NATIVE_PAINT;
+  const paint = (draft: string, caret: number) => frame
+    .replace("❯\u00a0", "❯\u00a0" + draft).replace("\x1b[65;3H", "\x1b[65;" + (caret + 3) + "H");
+  const middle = paint("abc", 1);
+  const inserted = paint("axbc", 2);
+  const end = paint("abc", 3);
+  const hidden = paint("abc x", 5);
+  await withCore([SUBMIT_TERMINAL], {
+    size: { cols, rows },
+    paints: [middle, middle, inserted, inserted, middle, middle, end, end, hidden, hidden, end, end, middle],
+  }, async (backend, fake) => {
+    await assert.rejects(backend.submit(await submitRef(backend), "go", CTX),
+      (error) => error instanceof SubmitRefused && error.reason === "draft" &&
+        error.composer.probe === null && error.composer.stash === "untouched");
+    assert.deepEqual(writes(fake).map((args) => args.slice(4)), [
+      ["x"], ["backspace"], ["right", "right"], ["right", "x"], ["backspace", "left"], ["left", "left"],
     ]);
   });
 });

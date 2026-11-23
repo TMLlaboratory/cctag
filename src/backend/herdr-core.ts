@@ -53,6 +53,7 @@ interface HcTerminal {
   state: string;
   title?: string | null;
   cols?: number;
+  rows?: number;
   screen?: string;
   foreground?: { pid?: number; cwd?: string; name?: string } | null;
   status?: { app?: string | null; state?: string | null } | null;
@@ -296,7 +297,7 @@ export class HcBackend implements Terminals {
       if (session.sessionId !== ref.sessionId || session.startedAt !== ref.processStartedAt) throw refuse("agent-changed");
       if (current?.status?.state === "blocked" || observed.terminal.status?.state === "blocked") throw refuse("gate");
       const status = observed.terminal.status?.state;
-      const view = parseClaudeHcComposer(observed.ansi, observed.terminal.cols);
+      const view = parseClaudeHcComposer(observed.ansi, observed.terminal.cols, observed.terminal.rows);
       if (status !== current?.status?.state || (status !== "idle" && status !== "done")) throw refuse("not-idle");
       return view;
     };

@@ -25,7 +25,8 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
     return view;
   };
   const matches = (view: ClaudeComposer, expected: ClaudeComposer) =>
-    view.draft === expected.draft && view.caret === expected.caret && view.frame === expected.frame;
+    view.draft === expected.draft && view.caret === expected.caret &&
+    view.frame === expected.frame && view.nativeCaret === expected.nativeCaret && view.stashed === expected.stashed;
   const recheck = async (expected: ClaudeComposer, reason: SubmitRefused["reason"], compareRawRow = false) => {
     notCancelled();
     const latest = await read();
@@ -74,6 +75,21 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
     composer = { ...composer, probe: null };
     return { suggestion, reversed };
   };
+  const proveEnd = async (base: ClaudeComposer, reason: SubmitRefused["reason"]) => {
+    // Right exposes an unpainted trailing space when the following letter makes it visible.
+    await key(["right", "x"], base, reason, { probe: "x" });
+    const appended = base.draft + "x";
+    const pastSpace = base.draft + " x";
+    const proof = await waitFor((view) =>
+      view.frame === base.frame && view.nativeCaret === base.nativeCaret && view.stashed === base.stashed &&
+      (view.draft === appended || view.draft === pastSpace) &&
+      view.caret === view.draft.length, "probe-unverified");
+    const occupied = proof.draft === pastSpace;
+    await key(occupied ? ["backspace", "left"] : ["backspace"], proof, "probe-unverified");
+    await waitFor((view) => matches(view, base), "probe-unverified");
+    composer = { ...composer, probe: null };
+    return !occupied;
+  };
   if (hasUnsendableC0Controls(text)) throw refuse("unsafe-text");
   notCancelled();
   const initial = await read();
@@ -86,6 +102,20 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
     if (!suggestion) {
       // A menu or image conversion can interrupt submission before the draft comes back.
       if (text.trimStart().startsWith("/") || ctx.hasImages) throw refuse("draft");
+      if (ready.nativeCaret) {
+        const distance = ready.draft.length - ready.caret;
+        const end = { ...ready, caret: ready.draft.length };
+        if (distance > 0) {
+          await key(Array<string>(distance).fill("right"), ready, "probe-unverified");
+          await waitFor((view) => matches(view, end), "probe-unverified");
+        }
+        const complete = await proveEnd(end, "probe-unverified");
+        if (distance > 0) {
+          await key(Array<string>(distance).fill("left"), end, "probe-unverified");
+          await waitFor((view) => matches(view, ready), "probe-unverified");
+        }
+        if (!complete) throw refuse("draft");
+      }
       await key(["ctrl+s"], ready, "stash-unverified", { stash: "uncertain" });
       ready = await waitFor((view) => view.stashed, "stash-unverified");
       composer = { ...composer, stash: "stashed" };
@@ -94,18 +124,7 @@ export async function submitClaudeComposer(text: string, ctx: SubmitContext, ops
   }
 
   const changed = composer.stash === "stashed" ? "stash-unverified" : "draft";
-  if (!ready.draft) {
-    // Right can expose a hidden space even when the next painted cell still matches the empty row.
-    await key(["right", "x"], ready, changed, { probe: "x" });
-    const proof = await waitFor((view) =>
-      view.frame === ready.frame && (view.draft === "x" || view.draft === " x") &&
-      view.caret === view.draft.length, "probe-unverified");
-    const occupied = proof.draft === " x";
-    await key(occupied ? ["backspace", "left"] : ["backspace"], proof, "probe-unverified");
-    await waitFor((view) => matches(view, ready), "probe-unverified");
-    composer = { ...composer, probe: null };
-    if (occupied) throw refuse(changed);
-  }
+  if (!ready.draft && !(await proveEnd(ready, changed))) throw refuse(changed);
   await recheck(ready, changed, ready.draft !== "");
   notCancelled();
   return ops.send(composer);
