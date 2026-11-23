@@ -1,6 +1,6 @@
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 import type { AgentDriver } from "../agents/driver.js";
-import { BackendUnavailable, CoreNotRunning, type AgentInfo, type BackendName, type AgentRef, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
+import { BackendUnavailable, CoreNotRunning, type AgentInfo, type BackendName, type AgentRef, type HcCodexPromptContext, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
 import { backendForTarget } from "./target.js";
 
 export * from "./types.js";
@@ -46,7 +46,7 @@ export interface Terminals {
   list(requiredBackend?: BackendName): Promise<ListResult>;
   get(target: string): Promise<AgentInfo | null>;
   exists(target: string): Promise<boolean>;
-  read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot>;
+  read(target: string, lines: number, region: "screen" | "history", hcCodex?: HcCodexPromptContext): Promise<ScreenSnapshot>;
   submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome>;
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt, purpose?: "claude-model-switch"): AnswerChannel;
   openModelAnswer(ref: AgentRef, prompt: VerifiedModelMenuPrompt): ModelAnswerChannel;
@@ -132,8 +132,8 @@ export function createTerminals(backends: TerminalBackends): Terminals {
     exists(target: string): Promise<boolean> {
       return backendFor(target).exists(target);
     },
-    read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
-      return backendFor(target).read(target, lines, region);
+    read(target: string, lines: number, region: "screen" | "history", hcCodex?: HcCodexPromptContext): Promise<ScreenSnapshot> {
+      return backendFor(target).read(target, lines, region, hcCodex);
     },
     submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
       return backendFor(ref.target).submit(ref, text, ctx);

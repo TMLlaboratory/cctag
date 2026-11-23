@@ -22,14 +22,14 @@ import {
   WriteOutcomeUnknown,
   WRITE_OUTCOME_UNKNOWN_MESSAGE,
 } from "./backend/types.js";
-import type { AgentInfo, AgentRef, AgentStatus, BackendName, CodexRollout, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
+import type { AgentInfo, AgentRef, AgentStatus, BackendName, CodexRollout, HcCodexPromptContext, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
 import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
 import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
-import { readNewRecords, readRecentRecords, transcriptCreatedAfter, transcriptSizeIfAvailable, transcriptSizeSafe } from "./agents/transcript.js";
+import { readNewRecords, readRecentRecords, readVerifiedRecords, sameTranscriptIdentity, transcriptSizeSafe, verifiedTranscriptSize } from "./agents/transcript.js";
 import { agentTranscriptPath, driverFor, type AgentDriver, type AskUserQuestionPaneInfo, type BlockedPrompt } from "./agents/driver.js";
 import { isCodexSubmittedInput } from "./agents/codex/transcript.js";
 import { promptFingerprint } from "./agents/fingerprint.js";
@@ -55,23 +55,10 @@ import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
-import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED, HC_CODEX_SHARED_SERVER_NOTICE, codexDriver } from "./agents/codex/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED, HC_CODEX_SHARED_SERVER_NOTICE, codexDriver, parseVerifiedHcCodexPrompt } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function sameTranscriptIdentity(
-  left: TranscriptIdentity | undefined,
-  right: TranscriptIdentity | undefined,
-): boolean {
-  return (
-    left !== undefined &&
-    right !== undefined &&
-    left.path === right.path &&
-    left.device === right.device &&
-    left.inode === right.inode
-  );
 }
 
 interface CodexRolloutBaseline {
@@ -87,27 +74,39 @@ interface HcCodexInput {
 
 const HC_CODEX_INPUT_UNVERIFIED = "⚠️ Codex の入力先を確認できませんでした。端末で応答を確認してください。";
 
-function baselineCodexRollouts(rollouts: readonly CodexRollout[]): CodexRolloutBaseline[] {
-  return rollouts.map(({ transcriptIdentity: identity }) => ({ identity, offset: transcriptSizeIfAvailable(identity.path) }));
+function baselineCodexRollouts(rollouts: readonly CodexRollout[]): Promise<CodexRolloutBaseline[]> {
+  return Promise.all(rollouts.map(async ({ transcriptIdentity: identity }) => ({ identity, offset: await verifiedTranscriptSize(identity) })));
+}
+
+function codexTaskStart(record: Record<string, unknown>) {
+  const boundary = codexDriver.extractLifecycle([record])[0];
+  return boundary?.kind === "started" ? boundary : undefined;
 }
 
 async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCodexInput) {
   const matches = [];
+  const scanned = [...input.baselines];
   for (const rollout of rollouts) {
     const identity = rollout.transcriptIdentity;
     const baseline = input.baselines.find((entry) => sameTranscriptIdentity(entry.identity, identity));
-    const offset = baseline ? baseline.offset : transcriptCreatedAfter(identity.path, input.sentAt) ? 0 : null;
+    const offset = baseline ? baseline.offset : 0;
     if (offset === null) continue;
-    const { records, newOffset } = await readNewRecords(identity.path, offset);
+    const batch = await readVerifiedRecords(identity, baseline ? { offset } : { createdSince: input.sentAt });
+    if (!batch) continue;
+    const { records, newOffset } = batch;
+    const starts = records.map(codexTaskStart);
+    // Keep an unconsumed start visible to later polls, even if this rollout did not record our input.
+    const consumed = { identity, offset: starts.some(Boolean) ? offset : newOffset };
+    if (baseline) scanned[scanned.indexOf(baseline)] = consumed;
+    else scanned.push(consumed);
     const inputRecord = records.findIndex((record) => isCodexSubmittedInput(record, input.text, input.sentAt));
     if (inputRecord === -1) continue;
-    const isStart = (record: Record<string, unknown>) => codexDriver.extractLifecycle([record])[0]?.kind === "started";
-    const start = records.slice(0, inputRecord).map(isStart).lastIndexOf(true);
-    if (start === -1) continue;
-    const end = records.findIndex((record, index) => index > inputRecord && isStart(record));
-    matches.push({ rollout, records: records.slice(start, end === -1 ? undefined : end), offset, newOffset, superseded: end !== -1 });
+    const start = starts.slice(0, inputRecord).map(Boolean).lastIndexOf(true);
+    const turnId = starts[start]?.turnId;
+    if (!turnId) continue;
+    matches.push({ rollout, turnId, records: records.slice(start), offset, newOffset });
   }
-  return matches;
+  return { matches, scanned };
 }
 
 async function otherCodexRolloutStarted(
@@ -117,8 +116,10 @@ async function otherCodexRolloutStarted(
     if (sameTranscriptIdentity(transcriptIdentity, state.transcriptIdentity)) continue;
     const baseline = state.hcCodexRollouts?.find(({ identity }) => sameTranscriptIdentity(identity, transcriptIdentity));
     if (!baseline) return true;
-    if (baseline.offset === null) continue;
-    const { records, newOffset } = await readNewRecords(transcriptIdentity.path, baseline.offset);
+    if (baseline.offset === null) return true;
+    const batch = await readVerifiedRecords(transcriptIdentity, { offset: baseline.offset });
+    if (!batch) return true;
+    const { records, newOffset } = batch;
     baseline.offset = newOffset;
     if (state.driver.extractLifecycle(records).some(({ kind }) => kind === "started")) return true;
   }
@@ -247,6 +248,7 @@ interface TurnState {
   awaitingFirstRecordSince?: number;
   hcCodexInput?: HcCodexInput;
   hcCodexRollouts?: CodexRolloutBaseline[];
+  hcCodexTurnId?: string;
   /** OMP's consecutive-screen and one-notice-per-fingerprint memory. */
   ompStatus: OmpStatusMemory | null;
   ompNoticeText?: string;
@@ -361,6 +363,7 @@ export interface BlockedTerminalHandoff {
   sessionId: string;
   transcriptPath: string;
   transcriptIdentity?: TranscriptIdentity;
+  hcCodexTurnId?: string;
   offset: number;
   collected: string[];
   paneId: string;
@@ -503,7 +506,7 @@ export class TurnEngine {
 
       const sessionId = agent.sessionId ?? "";
       const tPath = agentTranscriptPath(agent, driver);
-      const offset = tPath ? transcriptSizeSafe(tPath) : 0;
+      const offset = tPath && !(backend === "herdr-core" && driver.kind === "codex") ? transcriptSizeSafe(tPath) : 0;
 
       // A pane sitting at one of the agent's startup dialogs reports `idle`, so
       // nothing above this catches it, and submitting anyway is actively
@@ -598,7 +601,7 @@ export class TurnEngine {
         if (backend === "herdr-core" && driver.kind === "codex") {
           const current = await this.terminals.get(paneId);
           if (!current?.codexRollouts) throw new SubmitRefused("agent-unverified", HC_CODEX_SHARED_SERVER_NOTICE);
-          const baselines = baselineCodexRollouts(current.codexRollouts);
+          const baselines = await baselineCodexRollouts(current.codexRollouts);
           if (baselines.some(({ offset }) => offset === null)) {
             throw new SubmitRefused("agent-unverified", "Codex の rollout を確認できなかったため送信しませんでした。端末の状態を確認してください。");
           }
@@ -606,7 +609,7 @@ export class TurnEngine {
           state.hcCodexInput = { text: normalized, sentAt, baselines };
           state.awaitingFirstRecordSince = sentAt;
         }
-        const canVerify = tPath !== "";
+        const canVerify = tPath !== "" && !state.hcCodexInput;
         const retries = prepared.imageCount > 0 && canVerify ? SUBMIT_RETRIES_WITH_IMAGES : 1;
         const outcome = await this.terminals.submit(agent.ref, normalized, {
           driver,
@@ -751,6 +754,7 @@ export class TurnEngine {
         sessionId: handoff.sessionId,
         transcriptPath: handoff.transcriptPath,
         transcriptIdentity: handoff.transcriptIdentity,
+        hcCodexTurnId: handoff.hcCodexTurnId,
         offset: handoff.offset,
         collected: [...handoff.collected],
         outboxBaseline: handoff.outboxBaseline,
@@ -1413,10 +1417,10 @@ export class TurnEngine {
         }
       }
 
-      let boundInput: Awaited<ReturnType<typeof matchHcCodexInput>>[number] | undefined;
+      let boundInput: Awaited<ReturnType<typeof matchHcCodexInput>>["matches"][number] | undefined;
       if (state.hcCodexInput) {
         const input = state.hcCodexInput;
-        const matches = await matchHcCodexInput(codexRollouts, input);
+        const { matches, scanned } = await matchHcCodexInput(codexRollouts, input);
         if (matches.length > 1) {
           await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
           return;
@@ -1431,13 +1435,23 @@ export class TurnEngine {
         state.sessionId = boundInput.rollout.sessionId;
         state.transcriptIdentity = boundInput.rollout.transcriptIdentity;
         state.transcriptPath = boundInput.rollout.transcriptIdentity.path;
-        state.hcCodexRollouts = baselineCodexRollouts(codexRollouts);
+        state.hcCodexRollouts = scanned;
+        state.hcCodexTurnId = boundInput.turnId;
       }
 
       const path = hcCodex && !codexRollouts.length ? "" : state.transcriptPath;
       if (path) {
         const readOffset = boundInput?.offset ?? state.offset;
-        const { records, newOffset } = boundInput ?? await readNewRecords(path, readOffset);
+        const batch = boundInput ?? (hcCodex
+          ? await readVerifiedRecords(state.transcriptIdentity!, { offset: readOffset })
+          : await readNewRecords(path, readOffset));
+        if (!batch) {
+          state.promptId = null;
+          await state.promptHandle?.update(HC_CODEX_INPUT_UNVERIFIED, []).catch(() => {});
+          await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
+          return;
+        }
+        const { records, newOffset } = batch;
         if (state.driver.kind === "omp") {
           const ownership = await this.revalidateOmpTranscript(state, agent);
           if (ownership === "lost") return;
@@ -1445,7 +1459,8 @@ export class TurnEngine {
         }
         const grew = newOffset > readOffset;
         state.offset = newOffset;
-        const output = state.driver.extractTurnOutput(records);
+        const nextStart = hcCodex ? records.findIndex((record, index) => (!boundInput || index > 0) && codexTaskStart(record)) : -1;
+        const output = state.driver.extractTurnOutput(nextStart === -1 ? records : records.slice(0, nextStart));
         state.collected.push(...output.texts);
         for (const name of output.toolNames) {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
@@ -1457,7 +1472,11 @@ export class TurnEngine {
           state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
           state.awaitingFirstRecordSince = undefined;
         }
-        if (boundInput?.superseded) {
+        if (hcCodex && output.lifecycle?.some(({ kind, turnId }) =>
+          kind !== "started" && turnId === state.hcCodexTurnId)) state.hcCodexTurnId = undefined;
+        if (nextStart !== -1) {
+          state.promptId = null;
+          await state.promptHandle?.update(CODEX_THREAD_SWITCHED, []).catch(() => {});
           await this.finalize(state, CODEX_THREAD_SWITCHED);
           return;
         }
@@ -1566,16 +1585,22 @@ export class TurnEngine {
         // Ownership of a prompt already delivered to Slack must not turn on one
         // failed read.
         let paneText: string;
+        const hcPrompt: HcCodexPromptContext | undefined = hcCodex && path && state.hcCodexTurnId &&
+          state.transcriptIdentity && agent.hcCodexPromptStamp
+          ? { ref: state.ref, stamp: agent.hcCodexPromptStamp, rollout: state.transcriptIdentity, offset: state.offset }
+          : undefined;
+        let hcScreen: ScreenSnapshot | null = null;
         try {
-          if (resolution.screen) {
+          if (hcCodex) {
+            hcScreen = hcPrompt
+              ? await this.terminals.read(state.paneId, 0, "screen", hcPrompt).catch(() => null)
+              : null;
+            paneText = hcScreen?.complete && hcScreen.hcCodexPromptKind ? hcScreen.text : "";
+          } else if (resolution.screen) {
             paneText = resolution.screen.text;
           } else {
-            const snapshot = await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion)
-              .catch((error: unknown) => {
-                if (!hcCodex) throw error;
-                return null;
-              });
-            paneText = !snapshot || (state.backend === "herdr-core" && !snapshot.complete) ? "" : snapshot.text;
+            const snapshot = await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion);
+            paneText = state.backend === "herdr-core" && !snapshot.complete ? "" : snapshot.text;
           }
           state.failures.read = 0;
         } catch (err) {
@@ -1593,9 +1618,11 @@ export class TurnEngine {
           );
           return;
         }
-        const prompt = state.driver.parseBlockedPane(hcCodex && !path ? "" : paneText, state.backend);
-        const fingerprint = hcCodex && (prompt.kind === "question" || prompt.kind === "permission")
-          ? prompt.verified.fingerprint
+        const prompt = hcScreen && hcPrompt
+          ? parseVerifiedHcCodexPrompt(hcScreen, hcPrompt)
+          : state.driver.parseBlockedPane(paneText, state.backend);
+        const fingerprint = hcPrompt && (prompt.kind === "question" || prompt.kind === "permission")
+          ? JSON.stringify([hcPrompt.stamp, hcPrompt.offset, prompt.verified.fingerprint])
           : promptFingerprint(prompt);
 
         if (state.phase === "running") {
@@ -1603,7 +1630,7 @@ export class TurnEngine {
           // next one in a multi-question flow — each is independently
           // parsed off the pane; see prompts.ts).
           await this.postPrompt(state, paneText, prompt, fingerprint);
-        } else if (fingerprint !== null && fingerprint !== state.promptFingerprint) {
+        } else if ((hcCodex || fingerprint !== null) && fingerprint !== state.promptFingerprint) {
           // Includes the case where the posted prompt had no identity at all.
           // What was posted for it is a raw screen dump with no usable buttons,
           // so replacing that with a prompt we *can* read is strictly better —

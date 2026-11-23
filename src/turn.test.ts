@@ -20,7 +20,7 @@ import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -2576,8 +2576,8 @@ test("a Codex thread resumed mid-turn on Orca ends the turn instead of replaying
 
 test("herdr-core Codex binds a new rollout after /new without replaying the same input in the old rollout", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-input-"));
-  const old = { sessionId: "old", transcriptIdentity: { path: join(dir, "old.jsonl"), device: "1", inode: "11" } };
-  const next = { sessionId: "next", transcriptIdentity: { path: join(dir, "new.jsonl"), device: "1", inode: "22" } };
+  const oldPath = join(dir, "old.jsonl");
+  const nextPath = join(dir, "new.jsonl");
   const text = "identical user text";
   const record = (type: string, payload: Record<string, unknown>) =>
     JSON.stringify({ type, timestamp: new Date(Date.now() + 1000).toISOString(), payload }) + "\n";
@@ -2586,7 +2586,9 @@ test("herdr-core Codex binds a new rollout after /new without replaying the same
     record("event_msg", { type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text }] } }) +
     record("response_item", { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: reply }] }) +
     record("event_msg", { type: "task_complete", turn_id: "1" });
-  writeFileSync(old.transcriptIdentity.path, records("historical reply"));
+  writeFileSync(oldPath, records("historical reply"));
+  const old = { sessionId: "old", transcriptIdentity: rolloutIdentity(oldPath) };
+  let next = old;
   const paneId = "hc:t1";
   const pairing = { ...fakePairing(), paneId };
   const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
@@ -2605,7 +2607,8 @@ test("herdr-core Codex binds a new rollout after /new without replaying the same
       };
     },
     async submit() {
-      writeFileSync(next.transcriptIdentity.path, records("new reply"));
+      writeFileSync(nextPath, records("new reply"));
+      next = { sessionId: "next", transcriptIdentity: rolloutIdentity(nextPath) };
       sent = true;
       return { status: "started", draftStashed: false };
     },
@@ -2620,6 +2623,72 @@ test("herdr-core Codex binds a new rollout after /new without replaying the same
   } finally {
     engine.abortAll();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function rolloutIdentity(path: string) {
+  const { dev, ino } = statSync(path, { bigint: true });
+  return { path, device: String(dev), inode: String(ino) };
+}
+
+test("a later herdr-core Codex poll clips a new start and rejects a replaced rollout", async (t) => {
+  for (const scenario of ["next task in same rollout", "another rollout start during binding", "replaced path"]) {
+    await t.test(scenario, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-later-"));
+      const path = join(dir, "bound.jsonl");
+      const otherPath = join(dir, "other.jsonl");
+      writeFileSync(path, "");
+      writeFileSync(otherPath, "");
+      const rollout = { sessionId: "bound", transcriptIdentity: rolloutIdentity(path) };
+      const other = { sessionId: "other", transcriptIdentity: rolloutIdentity(otherPath) };
+      const paneId = "hc:t1";
+      const pairing = { ...fakePairing(), paneId };
+      const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+      const { notifier, posts } = fakeNotifier();
+      const event = (payload: object) => JSON.stringify({ type: "event_msg", timestamp: new Date().toISOString(), payload }) + "\n";
+      const reply = (text: string) => JSON.stringify({ type: "response_item", payload: {
+        type: "message", role: "assistant", content: [{ type: "output_text", text }],
+      } }) + "\n";
+      let polls = 0;
+      let submitted = false;
+      const engine = engineFor(fakeBackend(() => "working", () => "", {
+        async get() {
+          if (submitted && ++polls === 2) {
+            const newTask = event({ type: "task_started", turn_id: "later" }) + reply("unrelated reply");
+            if (scenario === "replaced path") {
+              renameSync(path, join(dir, "original.jsonl"));
+              writeFileSync(path, " ".repeat(statSync(join(dir, "original.jsonl")).size) + "\n" + reply("unrelated reply"));
+            } else if (scenario === "next task in same rollout") {
+              appendFileSync(path, newTask);
+            }
+          }
+          return {
+            ...fakeAgent(submitted ? "working" : "idle", "herdr-core"),
+            ref, agent: "codex", sessionId: null, cwd: dir, codexRollouts: [other, rollout],
+          };
+        },
+        async submit() {
+          appendFileSync(path, event({ type: "task_started", turn_id: "active" }) +
+            event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }) +
+            reply("verified reply"));
+          if (scenario === "another rollout start during binding") {
+            appendFileSync(otherPath, event({ type: "task_started", turn_id: "parallel" }));
+          }
+          submitted = true;
+          return { status: "started", draftStashed: false };
+        },
+      }, "herdr-core"), notifier, 5000);
+      try {
+        await engine.startTurn(pairing, "U1", "request");
+        for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+        assert.equal(engine.isBusy(paneId), false);
+        assert.ok(posts.includes("verified reply"), JSON.stringify(posts));
+        assert.ok(!posts.some((post) => post.includes("unrelated reply")));
+      } finally {
+        engine.abortAll();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   }
 });
 

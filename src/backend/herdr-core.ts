@@ -5,8 +5,9 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { isClaudeModelSwitchConfirmation } from "../agents/claude/prompts.js";
-import { ownedCodexRollouts, HC_CODEX_SHARED_SERVER_NOTICE } from "../agents/codex/driver.js";
+import { codexDriver, ownedCodexRollouts, HC_CODEX_SHARED_SERVER_NOTICE } from "../agents/codex/driver.js";
 import { isHcCodexIdleComposer } from "../agents/codex/prompts.js";
+import { sameTranscriptIdentity, verifiedTranscriptSize } from "../agents/transcript.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -32,6 +33,8 @@ import {
   type AgentRef,
   type AgentStatus,
   type CodexRollout,
+  type HcCodexPromptContext,
+  type HcCodexPromptStamp,
   type ListResult,
   type ScreenSnapshot,
 } from "./types.js";
@@ -59,6 +62,15 @@ interface HcTerminal {
   foreground?: { argv?: string[]; pid?: number; cwd?: string; name?: string } | null;
   status?: { app?: string | null; state?: string | null; kind?: string | null } | null;
   turn?: number;
+  status_ms?: number;
+}
+
+function codexPromptStamp(terminal: HcTerminal): HcCodexPromptStamp | undefined {
+  const { turn, status_ms: statusMs, status } = terminal;
+  return status?.app === "codex" && status.state === "blocked" &&
+    typeof turn === "number" && Number.isSafeInteger(turn) && turn > 0 &&
+    typeof statusMs === "number" && Number.isSafeInteger(statusMs) && statusMs > 0
+    ? { turn, statusMs } : undefined;
 }
 
 /** What `hc ls --json` returns per terminal. */
@@ -259,6 +271,7 @@ export class HcBackend implements Terminals {
         sessionId: session?.sessionId ?? null,
         transcriptIdentity: session?.transcriptIdentity,
         codexRollouts: rollouts ?? undefined,
+        hcCodexPromptStamp: codexPromptStamp(terminal),
         cwd,
         evidence: { kind: "classified", status: terminal.status?.app === "codex" ? normalizeStatus(terminal.status.state) : "unknown" },
         terminalTitle: terminal.title?.trim() || null,
@@ -350,10 +363,35 @@ export class HcBackend implements Terminals {
     return terminal !== null && terminal.state === "live";
   }
 
-  async read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
+  async read(target: string, lines: number, region: "screen" | "history", hcCodex?: HcCodexPromptContext): Promise<ScreenSnapshot> {
+    if (hcCodex) {
+      if (target !== hcCodex.ref.target) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      const before = await this.assertCodexPrompt(hcCodex);
+      const screen = await this.json<{ text?: string; complete?: boolean; how?: string }>(["read"], [addressOf(target)]);
+      const after = await this.assertCodexPrompt(hcCodex);
+      if (before !== after || screen.how !== "screen" || screen.complete !== true || typeof screen.text !== "string") {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      }
+      return { text: screen.text, complete: true, draft: null, hcCodexPromptKind: after };
+    }
     const command = region === "history" && lines > 0 ? ["read", "--lines", String(lines)] : ["read"];
     const result = await this.json<{ text?: string; complete?: boolean }>(command, [addressOf(target)]);
     return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
+  }
+
+  private async assertCodexPrompt(context: HcCodexPromptContext): Promise<"permission" | "question"> {
+    const terminal = await this.assertWritable(context.ref, codexDriver);
+    const stamp = codexPromptStamp(terminal);
+    const kind = terminal.status?.kind;
+    const cwd = terminal.foreground?.cwd;
+    if (stamp?.turn !== context.stamp.turn || stamp.statusMs !== context.stamp.statusMs ||
+        (kind !== "permission" && kind !== "question") || !cwd ||
+        !(await this.codexRollouts(context.ref.pid!, cwd))?.some(({ transcriptIdentity }) =>
+          sameTranscriptIdentity(context.rollout, transcriptIdentity)) ||
+        await verifiedTranscriptSize(context.rollout) !== context.offset) {
+      throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+    }
+    return kind;
   }
 
   private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<HcTerminal> {
@@ -436,21 +474,9 @@ export class HcBackend implements Terminals {
     let firstWrite = true;
     let active = true;
     let answerStatus: "blocked" | "done" = "blocked";
-    let answerTurn: number | undefined;
-    let answerKind: string | null | undefined;
     let pendingText: string | null = null;
     const assertFingerprint = async (modelConfirmation: boolean): Promise<void> => {
       const before = await this.assertWritable(ref, prompt.driver);
-      if (prompt.driver.kind === "codex") {
-        if (before.status?.app !== "codex" || before.status.state !== "blocked" ||
-            !Number.isSafeInteger(before.turn) ||
-            (before.status.kind !== "question" && before.status.kind !== "permission") ||
-            !before.foreground?.cwd || !(await this.codexRollouts(ref.pid!, before.foreground.cwd))?.length) {
-          throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
-        }
-        answerTurn = before.turn;
-        answerKind = before.status.kind;
-      }
       answerStatus = modelConfirmation && before.status?.state === "done" ? "done" : "blocked";
       if (before.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       const snapshot = await this.read(ref.target, 0, "screen");
@@ -458,9 +484,6 @@ export class HcBackend implements Terminals {
       const current = prompt.driver.parseBlockedPane(snapshot.text, "herdr-core");
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
-      }
-      if (prompt.driver.kind === "codex" && current.kind !== answerKind) {
-        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       }
       if (modelConfirmation && !isClaudeModelSwitchConfirmation(current)) {
         throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
@@ -477,13 +500,10 @@ export class HcBackend implements Terminals {
     const write = async (action: () => Promise<void>, terminal = false, modelConfirmation = false): Promise<void> => {
       assertActive();
       if (modelSwitch && !modelConfirmation) throw new ExpectationLost("only the affirmative model-switch digit is allowed");
+      if (prompt.driver.kind === "codex") throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       if (firstWrite) await assertFingerprint(modelConfirmation);
       const current = await this.assertWritable(ref, prompt.driver);
       if (current.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
-      if (prompt.driver.kind === "codex" &&
-          (current.status.app !== "codex" || current.status.kind !== answerKind || current.turn !== answerTurn)) {
-        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
-      }
       await action();
       firstWrite = false;
       if (terminal) active = false;
@@ -493,8 +513,25 @@ export class HcBackend implements Terminals {
     };
 
     return {
-      digit: (n, terminal = prompt.form === "digit-confirms") => {
+      digit: async (n, terminal = prompt.form === "digit-confirms") => {
         assertNoPendingText();
+        if (prompt.driver.kind === "codex") {
+          assertActive();
+          const context = prompt.hcCodex;
+          if (!context || context.ref.pid !== ref.pid || context.ref.processStartedAt !== ref.processStartedAt ||
+              !terminal || !Number.isInteger(n) || n < 1 || n > 9) {
+            throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+          }
+          const snapshot = await this.read(ref.target, 0, "screen", context);
+          const current = prompt.driver.parseBlockedPane(snapshot.text, "herdr-core");
+          if ((current.kind !== "question" && current.kind !== "permission") ||
+              current.kind !== snapshot.hcCodexPromptKind || current.verified.fingerprint !== prompt.fingerprint) {
+            throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+          }
+          active = false;
+          await keys(String(n))();
+          return;
+        }
         return write(keys(String(n)), terminal, modelSwitch && n === 1 && terminal);
       },
       text: async (value) => {

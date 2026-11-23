@@ -1,5 +1,6 @@
-import { createReadStream, statSync } from "node:fs";
+import { constants, createReadStream, statSync } from "node:fs";
 import { open } from "node:fs/promises";
+import type { TranscriptIdentity } from "../backend/types.js";
 const RECENT_RECORD_LIMIT = 256;
 const RECENT_BYTE_LIMIT = 256 * 1024;
 const BACKWARD_SCAN_CHUNK_SIZE = 64 * 1024;
@@ -14,6 +15,49 @@ export function transcriptSizeIfAvailable(path: string): number | null {
 
 export function transcriptSizeSafe(path: string): number {
   return transcriptSizeIfAvailable(path) ?? 0;
+}
+
+export function sameTranscriptIdentity(left?: TranscriptIdentity, right?: TranscriptIdentity): boolean {
+  return left !== undefined && right !== undefined &&
+    left.path === right.path && left.device === right.device && left.inode === right.inode;
+}
+
+async function withVerifiedTranscript<T>(
+  identity: TranscriptIdentity,
+  read: (file: Awaited<ReturnType<typeof open>>, size: number, birthtimeNs: bigint) => T | Promise<T>,
+): Promise<T | null> {
+  const file = await open(identity.path, constants.O_RDONLY | constants.O_NONBLOCK).catch(() => null);
+  if (!file) return null;
+  try {
+    const stat = await file.stat({ bigint: true });
+    if (!stat.isFile() || String(stat.dev) !== identity.device || String(stat.ino) !== identity.inode ||
+        stat.size > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return await read(file, Number(stat.size), stat.birthtimeNs);
+  } catch {
+    return null;
+  } finally {
+    await file.close();
+  }
+}
+
+export function verifiedTranscriptSize(identity: TranscriptIdentity, createdSince?: number): Promise<number | null> {
+  return withVerifiedTranscript(identity, (_file, size, birthtimeNs) =>
+    createdSince === undefined || (birthtimeNs > 0n && birthtimeNs >= BigInt(createdSince) * 1_000_000n)
+      ? size : null);
+}
+
+export function readVerifiedRecords(identity: TranscriptIdentity, from: { offset: number } | { createdSince: number }) {
+  return withVerifiedTranscript(identity, async (file, size, birthtimeNs) => {
+    const offset = "offset" in from ? from.offset : 0;
+    if ("createdSince" in from && (birthtimeNs <= 0n || birthtimeNs < BigInt(from.createdSince) * 1_000_000n)) return null;
+    if (size < offset) return null;
+    if (size === offset) return parseRecords(Buffer.alloc(0), offset);
+    const parts: Buffer[] = [];
+    // Read from the checked descriptor and stop at its observed size.
+    for await (const part of file.createReadStream({ start: offset, end: size - 1, autoClose: false })) parts.push(part);
+    const chunk = Buffer.concat(parts);
+    return chunk.length === size - offset ? parseRecords(chunk, offset) : null;
+  });
 }
 
 /**
@@ -79,7 +123,10 @@ export async function readNewRecords(
     stream.on("end", () => resolve(Buffer.concat(parts)));
     stream.on("error", reject);
   });
+  return parseRecords(chunk, offset);
+}
 
+function parseRecords(chunk: Buffer, offset: number): { records: Record<string, unknown>[]; newOffset: number } {
   const text = chunk.toString("utf8");
   const lastNewline = text.lastIndexOf("\n");
   if (lastNewline === -1) {

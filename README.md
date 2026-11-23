@@ -120,7 +120,7 @@ listed in the terminal-backend matrix below.
 | `@cctag model` | ✅ `/model <name>` | ✅ model + reasoning-level picker |
 | `@cctag mode` / `@cctag plan` | ✅ | — *(switch Plan mode in the terminal)* |
 | Plan-file attach on ExitPlanMode | ✅ | — |
-| Background watcher (terminal-initiated work) | ✅ | ✅ |
+| Background watcher (terminal-initiated work) | ✅ | ✅ herdr-core needs a uniquely verified rollout |
 | Slack → agent image/file attachments | ✅ real image attachments | ✅ *(read via an `exec` step)* |
 | Agent → Slack file uploads (`.cctag/outbox`) | ✅ | ✅ |
 | Agent → Slack uploads detected from the transcript | ✅ `SendUserFile` | — *(no equivalent tool)* |

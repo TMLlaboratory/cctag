@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 
 import type { AnswerChannel, Terminals } from "../../backend/index.js";
-import { BackendUnavailable, type AgentInfo, type CodexRollout } from "../../backend/types.js";
+import { BackendUnavailable, type AgentInfo, type CodexRollout, type HcCodexPromptContext, type ScreenSnapshot } from "../../backend/types.js";
 import { promptFingerprint } from "../fingerprint.js";
 import type {
   AgentDriver,
@@ -358,6 +358,14 @@ export const codexDriver: AgentDriver = {
     return result(`✅ モデルを ${modelName} (${effortLevelKey(levelMatch.label)}) に切り替えました。`, submitOutcome);
   },
 };
+
+export function parseVerifiedHcCodexPrompt(snapshot: ScreenSnapshot, hcCodex: HcCodexPromptContext): BlockedPrompt {
+  const prompt = codexDriver.parseBlockedPane(snapshot.complete ? snapshot.text : "", "herdr-core");
+  if ((prompt.kind !== "permission" && prompt.kind !== "question")) return prompt;
+  if (prompt.kind !== snapshot.hcCodexPromptKind) return codexDriver.parseBlockedPane("", "herdr-core");
+  const { fingerprint, form } = prompt.verified;
+  return { ...prompt, verified: createVerifiedPrompt(fingerprint, codexDriver, form, { hcCodex }) };
+}
 
 export function parseCodexModelMenuPrompt(paneText: string): VerifiedModelMenuPrompt | null {
   if (!isModelListScreen(paneText) && !isEffortListScreen(paneText)) return null;

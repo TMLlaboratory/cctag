@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, Socket, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import type { Notifier } from "../notifier.js";
 import type { Pairing, PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { claudeDriver } from "../agents/claude/driver.js";
-import { codexDriver, HC_CODEX_SHARED_SERVER_NOTICE } from "../agents/codex/driver.js";
+import { codexDriver, HC_CODEX_SHARED_SERVER_NOTICE, parseVerifiedHcCodexPrompt } from "../agents/codex/driver.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE, type HcBackendOptions } from "./herdr-core.js";
 import { createTerminals, type SubmitContext, type Terminals } from "./index.js";
@@ -35,6 +35,8 @@ interface FakeTerminal {
   foregroundName?: string;
   argv?: string[];
   kind?: string;
+  turn?: number;
+  statusMs?: number;
   name?: string | null;
   title?: string;
 }
@@ -91,7 +93,7 @@ if (args[0] === "ls") {
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
     foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: t.foregroundName ?? "claude", argv: t.argv },
     status: t.status == null ? null : { app: t.agent, state: t.status, kind: t.kind },
-    turn: 2,
+    turn: t.turn ?? 2, status_ms: t.statusMs ?? 100,
   });
 } else if (args[0] === "read") {
   find(ops[0]);
@@ -262,30 +264,50 @@ test("refuses Codex writes when the PID, start time, or foreground executable ch
   }, async (file) => execResult(file === "ps" ? startTime : "p202\n"));
 });
 
-test("a Codex approval answer with an incomplete screen sends no key", async () => {
+test("Codex keys require the published blocked turn and a complete plain screen", async (t) => {
+  for (const scenario of ["same prompt", "later hc turn", "new blocked observation", "incomplete screen"] as const) {
+    await t.test(scenario, async () => checkCodexApproval(scenario));
+  }
+});
+
+async function checkCodexApproval(scenario: string) {
   let rollout = "";
   const id = "00000000-0000-0000-0000-000000000001";
-  const parsed = codexDriver.parseBlockedPane(CODEX_APPROVAL.text, "herdr-core");
-  assert.equal(parsed.kind, "permission");
-  if (parsed.kind !== "permission") return;
   await withCore([{ ...CODEX, status: "blocked", kind: "permission" }], {
     screens: [CODEX_APPROVAL.text],
-    incomplete: true,
+    incomplete: scenario === "incomplete screen",
   }, async (backend, fake) => {
     rollout = join(fake.sessionsDir, `rollout-fixture-${id}.jsonl`);
     writeFileSync(rollout, JSON.stringify({ type: "session_meta", payload: { id, cwd: "/moved/here", thread_source: "user" } }) + "\n");
     const agent = await backend.get("hc:t1");
     assert.equal(agent?.sessionId, id);
-    assert.ok(agent);
-    await assert.rejects(backend.openAnswer(agent.ref, parsed.verified).digit(2), /screen is incomplete/);
+    assert.ok(agent?.transcriptIdentity && agent.hcCodexPromptStamp);
+    const context = { ref: agent.ref, rollout: agent.transcriptIdentity, stamp: agent.hcCodexPromptStamp, offset: statSync(rollout).size };
+    const capture = () => backend.read(agent.ref.target, 0, "screen", context);
+    if (scenario === "incomplete screen") {
+      await assert.rejects(capture(), ExpectationLost);
+    } else {
+      const prompt = parseVerifiedHcCodexPrompt(await capture(), context);
+      assert.ok(prompt.kind === "permission");
+      const answer = () => backend.openAnswer(agent.ref, prompt.verified).digit(2);
+      if (scenario === "later hc turn") fake.setTerminal({ turn: 3 });
+      if (scenario === "new blocked observation") fake.setTerminal({ statusMs: 101 });
+      if (scenario === "same prompt") {
+        await answer();
+        assert.deepEqual(writes(fake), [["keys", "--json", "--", "t1", "2"]]);
+        return;
+      }
+      await assert.rejects(answer(), ExpectationLost);
+    }
     assert.deepEqual(writes(fake), []);
   }, async (file, args) => {
     if (file === "ps") return execResult("Tue Nov 24 01:00:00 2026");
-    if (file === "stat") return execResult("1 2");
+    const { dev, ino } = statSync(rollout, { bigint: true });
+    if (file === "stat") return execResult(`${dev} ${ino}`);
     if (args[0] === "-Fpa") return execResult("p202\nf8\nau\n");
-    return execResult(`p202\nf8\nau\ntREG\nD0x1\ni2\nn${rollout}\n`);
+    return execResult(`p202\nf8\nau\ntREG\nD0x${dev.toString(16)}\ni${ino}\nn${rollout}\n`);
   });
-});
+}
 
 test("a terminal whose Claude Code has no session record is not offered", async () => {
   await withCore([{ address: "t1", agent: "claude-code", status: "idle" }], {}, async (backend) => {

@@ -27,6 +27,18 @@ export interface CodexRollout {
   readonly transcriptIdentity: TranscriptIdentity;
 }
 
+export interface HcCodexPromptStamp {
+  readonly turn: number;
+  readonly statusMs: number;
+}
+
+export interface HcCodexPromptContext {
+  readonly ref: AgentRef;
+  readonly stamp: HcCodexPromptStamp;
+  readonly rollout: TranscriptIdentity;
+  readonly offset: number;
+}
+
 export interface AgentRef {
   readonly target: string;
   readonly pid: number | null;
@@ -43,6 +55,7 @@ export interface AgentInfo {
   sessionId: string | null;
   transcriptIdentity?: TranscriptIdentity;
   codexRollouts?: readonly CodexRollout[];
+  hcCodexPromptStamp?: HcCodexPromptStamp;
   cwd: string;
   evidence: StatusEvidence;
   /** Raw Orca worktree state for picker icons only; not status evidence. */
@@ -57,6 +70,7 @@ export interface ScreenSnapshot {
   text: string;
   draft: string | null;
   complete: boolean;
+  hcCodexPromptKind?: "permission" | "question";
 }
 
 export interface SubmitComposerState {

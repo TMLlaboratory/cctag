@@ -40,9 +40,9 @@ buttons and thread replies cannot answer them.
   Multi-select questions show checkboxes and also accept a reply listing the
   option numbers. Use the terminal for a free-text multi-select answer on
   herdr-core.
-- **Codex Plan mode questions** (herdr-core): click a choice in Slack. Add
-  notes at the terminal. For a sequence of questions, cctag posts each one as
-  it appears.
+- **Codex Plan mode questions** (herdr-core): click a choice when cctag can
+  verify the question. Verification is independent for each screen. Add notes
+  or answer an unverified question at the terminal.
 - **Permission / command-approval prompts** (Claude Code or Codex CLI; e.g.
   "Do you want to run `rm -rf ...`?" or Codex's command approval): one button
   per choice, first option styled primary, anything that looks like a refusal
@@ -183,6 +183,10 @@ background watcher (polling every ~7s) notices once it settles
 (working → idle/done) and posts the new output to the paired thread,
 prefixed with 🖥️. It never replays old history, so pairing mid-task only
 reports what happens *after* pairing.
+
+The herdr-core watcher needs one verified Codex rollout. While Codex keeps
+multiple rollouts open after `/new` or resume, terminal-initiated output may
+only be visible in the terminal.
 
 If terminal-driven work hits a Claude Code or Codex CLI prompt, the watcher
 hands the terminal to the same prompt flow: supported prompts are posted as

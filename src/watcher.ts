@@ -10,9 +10,12 @@ import {
   readLastMatchingRecordBefore,
   readNewRecords,
   readRecentRecords,
+  readVerifiedRecords,
+  sameTranscriptIdentity,
   transcriptCreatedAfter,
   transcriptSizeIfAvailable,
   transcriptSizeSafe,
+  verifiedTranscriptSize,
 } from "./agents/transcript.js";
 import { agentTranscriptPath, driverFor } from "./agents/driver.js";
 import {
@@ -31,24 +34,12 @@ import { createOmpStatusMemory, resolveOmpStatus, type OmpStatusResolution } fro
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-function sameTranscriptIdentity(
-  left: TranscriptIdentity | undefined,
-  right: TranscriptIdentity | undefined,
-): boolean {
-  return (
-    left !== undefined &&
-    right !== undefined &&
-    left.path === right.path &&
-    left.device === right.device &&
-    left.inode === right.inode
-  );
-}
-
 interface WatchState {
   pairingKey: string;
   sessionId: string;
   transcriptPath: string;
   transcriptIdentity?: TranscriptIdentity;
+  hcCodexTurnId?: string;
   agentKind: AgentKind;
   offset: number;
   /** When this watch was (re)baselined. A transcript created after it holds
@@ -279,6 +270,7 @@ export class BackgroundWatcher {
     }
     this.agentlessPanes.delete(pairing.paneId);
     const driver = driverFor(agent.agent);
+    const hcCodex = agent.backend === "herdr-core" && agent.agent === "codex";
 
     const existing = this.watches.get(pairing.paneId);
     const sessionId = agent.sessionId ?? "";
@@ -295,7 +287,8 @@ export class BackgroundWatcher {
       existing !== undefined &&
       ((sessionId !== "" && sessionId !== existing.sessionId) ||
         existing.agentKind !== agent.agent ||
-        (agent.agent === "omp" && !sameTranscriptIdentity(existing.transcriptIdentity, agent.transcriptIdentity)));
+        ((agent.agent === "omp" || (hcCodex && existing.transcriptIdentity !== undefined)) &&
+          !sameTranscriptIdentity(existing.transcriptIdentity, agent.transcriptIdentity)));
 
     // A session id is the cheap way to notice the CLI restarted, but not every
     // agent reports one — Codex routinely doesn't, which is exactly why both
@@ -331,7 +324,9 @@ export class BackgroundWatcher {
           existing.transcriptPath === "" &&
           resolved !== "" &&
           !forceRebaseline &&
-          transcriptCreatedAfter(resolved, existing.startedAt);
+          (hcCodex
+            ? !!agent.transcriptIdentity && await verifiedTranscriptSize(agent.transcriptIdentity, existing.startedAt) !== null
+            : transcriptCreatedAfter(resolved, existing.startedAt));
       }
     }
 
@@ -339,7 +334,9 @@ export class BackgroundWatcher {
       const tPath = agentTranscriptPath(agent, driver);
       const capturedOffset =
         tPath && !transcriptAppeared
-          ? agent.evidence.kind === "hint"
+          ? hcCodex
+            ? await verifiedTranscriptSize(agent.transcriptIdentity!)
+            : agent.evidence.kind === "hint"
             ? transcriptSizeIfAvailable(tPath)
             : transcriptSizeSafe(tPath)
           : 0;
@@ -368,7 +365,7 @@ export class BackgroundWatcher {
           settle.markTurnRunning();
           initialStatus = "working";
         }
-      } else if (tPath && !transcriptAppeared) {
+      } else if (tPath && !transcriptAppeared && !hcCodex) {
         // herdr's own status drives this watch, but a turn already running at
         // baseline — a Spoke restarted mid-turn — must still be known to be
         // running, or the idle grace and the screen check behind it never apply
@@ -426,7 +423,14 @@ export class BackgroundWatcher {
           return;
         }
       }
-      const { records, newOffset } = await readNewRecords(state.transcriptPath, previousOffset);
+      const batch = hcCodex
+        ? await readVerifiedRecords(state.transcriptIdentity!, { offset: previousOffset })
+        : await readNewRecords(state.transcriptPath, previousOffset);
+      if (!batch) {
+        this.watches.delete(pairing.paneId);
+        return;
+      }
+      const { records, newOffset } = batch;
       if (agent.evidence.kind === "hint") {
         const currentSize = transcriptSizeIfAvailable(state.transcriptPath);
         if (currentSize !== null && currentSize < newOffset) {
@@ -443,6 +447,12 @@ export class BackgroundWatcher {
       // already completed has to survive into the adopted turn.
       state.writes.ingest(output);
       const lifecycle = output.lifecycle ?? [];
+      if (hcCodex) {
+        for (const { kind, turnId } of lifecycle) {
+          if (kind === "started") state.hcCodexTurnId = turnId;
+          else if (turnId === state.hcCodexTurnId) state.hcCodexTurnId = undefined;
+        }
+      }
       sawStartThisTick = lifecycle.some((event) => event.kind === "started");
       sawCompletionThisTick = lifecycle.some((event) => event.kind !== "started");
       state.settle.observe(lifecycle);
@@ -507,6 +517,7 @@ export class BackgroundWatcher {
         sessionId: state.sessionId,
         transcriptPath: state.transcriptPath,
         transcriptIdentity: state.transcriptIdentity,
+        hcCodexTurnId: state.hcCodexTurnId,
         offset: state.offset,
         collected: state.collected,
         backend: backendForTarget(agent.ref.target),

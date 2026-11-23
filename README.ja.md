@@ -105,7 +105,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 | `@cctag model` | ✅ `/model <name>` | ✅ モデル＋推論レベルピッカー |
 | `@cctag mode` / `@cctag plan` | ✅ | — *(Plan modeは端末で切り替える)* |
 | ExitPlanModeでのプランファイル添付 | ✅ | — |
-| バックグラウンドウォッチャー（ターミナル起点の作業） | ✅ | ✅ |
+| バックグラウンドウォッチャー（ターミナル起点の作業） | ✅ | ✅ herdr-coreではrolloutを一意に確認できる場合 |
 | Slack→エージェントへの画像・ファイル添付 | ✅ 本物の画像添付になる | ✅ *(`exec`経由で読み込む)* |
 | エージェント→Slackへのファイル送信（`.cctag/outbox`） | ✅ | ✅ |
 | transcriptからの送信ファイル自動検出 | ✅ `SendUserFile` | — *(対応するツールが存在しない)* |
