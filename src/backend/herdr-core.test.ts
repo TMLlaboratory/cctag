@@ -12,12 +12,15 @@ import { claudeDriver } from "../agents/claude/driver.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import { createTerminals, type SubmitContext, type Terminals } from "./index.js";
-import type { BlindPermissionPrompt, VerifiedPrompt } from "./prompt.js";
+import { createBlindPermissionPrompt, type VerifiedPrompt } from "./prompt.js";
 import { BackendUnavailable, CoreNotRunning, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
 
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
+const MODEL_SWITCH = JSON.parse(
+  readFileSync(new URL("hc-model-switch-confirmation.screen.json", FIXTURES), "utf8"),
+) as { text: string; capture: { status: string } };
 
 interface FakeTerminal {
   address: string;
@@ -65,7 +68,7 @@ function fakeHc(
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 const ops = args.includes("--") ? args.slice(args.indexOf("--") + 1) : [];
-const env = { HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET };
+const env = { HC_SOCKET: process.env.HC_SOCKET, HC_TERMINAL_ID: process.env.HC_TERMINAL_ID, HC_SCOPE: process.env.HC_SCOPE, HC_TERMINAL_SOCKET: process.env.HC_TERMINAL_SOCKET };
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({ args, env }) + "\\n");
 const terminals = ${JSON.stringify(terminals)};
 const screens = ${JSON.stringify(options.screens ?? ["screen text"])};
@@ -146,7 +149,7 @@ const CTX: SubmitContext = {
 };
 
 const CLAUDE = { address: "t1", agent: "claude-code", status: "blocked", pid: 101 };
-const BLIND = { driver: claudeDriver, form: "key-then-enter" } as BlindPermissionPrompt;
+const BLIND = createBlindPermissionPrompt(claudeDriver, "key-confirms");
 
 function writes(fake: Fake): string[][] {
   return fake.calls().filter(({ args }) => args[0] === "keys" || args[0] === "send").map(({ args }) => args);
@@ -229,22 +232,23 @@ test("a stopped core is reported as unavailable and hc is never run, so cctag ca
   }
 });
 
-test("hc runs without the Spoke's own HC_TERMINAL_ID and HC_SCOPE", async () => {
-  const saved = { id: process.env.HC_TERMINAL_ID, scope: process.env.HC_SCOPE };
-  process.env.HC_TERMINAL_ID = "t99";
-  process.env.HC_SCOPE = "scope";
+test("hc uses the probed socket without inheriting the Spoke's terminal context", async () => {
+  const inherited = { HC_SOCKET: "/unrelated/core.sock", HC_TERMINAL_ID: "t99", HC_SCOPE: "scope", HC_TERMINAL_SOCKET: "/unrelated/t99.sock" };
+  const saved = Object.keys(inherited).map((key) => [key, process.env[key]] as const);
+  Object.assign(process.env, inherited);
   try {
     await withCore([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }], {}, async (backend, fake) => {
       await backend.submit(ref("t1"), "hello", CTX);
       const send = fake.calls().find((call) => call.args[0] === "send");
       assert.deepEqual(send?.args, ["send", "--json", "--", "t1", "hello"]);
-      assert.deepEqual(send?.env, {}, "no HC_* variable reached hc");
+      assert.ok(fake.calls().every(({ env }) => env.HC_SOCKET === fake.socket));
+      assert.deepEqual(send?.env, { HC_SOCKET: fake.socket });
     });
   } finally {
-    if (saved.id === undefined) delete process.env.HC_TERMINAL_ID;
-    else process.env.HC_TERMINAL_ID = saved.id;
-    if (saved.scope === undefined) delete process.env.HC_SCOPE;
-    else process.env.HC_SCOPE = saved.scope;
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -259,6 +263,19 @@ test("a message that starts with a hyphen is sent as text, not read as a flag", 
         ["send", "--json", "--", "t1", "-1 for that"],
       ],
     );
+  });
+});
+
+test("submit observes cancellation after the foreground check and sends nothing", async () => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
+    await assert.rejects(backend.submit(ref("t1"), "cancel this", {
+      ...CTX,
+      cancelled() {
+        assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get"]);
+        return true;
+      },
+    }), (error: unknown) => error instanceof SubmitRefused && error.reason === "cancelled");
+    assert.deepEqual(writes(fake), []);
   });
 });
 
@@ -380,7 +397,6 @@ test("a replaced Claude foreground or session refuses submit, answers, and Shift
         await assert.rejects(backend.submit(agent.ref, "/model", CTX), (error: unknown) =>
           error instanceof SubmitRefused && error.reason === "agent-unverified" && notice.test(error.message));
         await assert.rejects(backend.openAnswer(agent.ref, verified(PLAN_SCREEN.text)).digit(1), stale);
-        await assert.rejects(backend.openBlind(agent.ref, BLIND).answer("y"), stale);
         await assert.rejects(backend.openComposer(agent.ref, claudeDriver).backTab(), stale);
         assert.deepEqual(writes(fake), []);
       });
@@ -425,18 +441,63 @@ test("a compound answer rechecks the session and blocked state before a forced s
   }
 });
 
-test("Shift+Tab and blind y/n answers use hc's key names", async () => {
+test("a stale blind permission click sends no keys even while blocked", async () => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
+    await assert.rejects(backend.openBlind(ref("t1"), BLIND).answer("y"), (error: unknown) =>
+      error instanceof ExpectationLost && /ターミナルで回答/.test(error.userMessage ?? ""));
+    assert.deepEqual(fake.calls(), []);
+  });
+});
+
+test("Shift+Tab uses hc's key name after verifying the foreground", async () => {
   await withCore([CLAUDE], {}, async (backend, fake) => {
     await backend.openComposer(ref("t1"), claudeDriver).backTab();
-    await backend.openBlind(ref("t1"), BLIND).answer("y");
-    assert.deepEqual(
-      writes(fake),
-      [
-        ["keys", "--json", "--", "t1", "shift+tab"],
-        ["keys", "--json", "--", "t1", "y"],
-        ["keys", "--json", "--", "t1", "enter"],
-      ],
-    );
+    assert.deepEqual(writes(fake), [["keys", "--json", "--", "t1", "shift+tab"]]);
+  });
+});
+
+test("the Claude model command confirms the captured switch menu on done", async () => {
+  await withCore([{ ...CLAUDE, status: MODEL_SWITCH.capture.status }], {
+    screens: [MODEL_SWITCH.text, MODEL_SWITCH.text, ""],
+  }, async (backend, fake) => {
+    const terminals = createTerminals({ herdr: null, orca: null, "herdr-core": backend });
+    const agent = await terminals.get("hc:t1");
+    assert.ok(agent);
+    await claudeDriver.runModelCommand!(terminals, agent, "sonnet");
+    assert.deepEqual(writes(fake), [
+      ["send", "--json", "--", "t1", "/model sonnet"],
+      ["keys", "--json", "--", "t1", "1"],
+    ]);
+    const calls = fake.calls().map(({ args }) => args);
+    const keyIndex = calls.findIndex(([command]) => command === "keys");
+    assert.deepEqual(calls.slice(keyIndex - 3, keyIndex), [
+      ["get", "--json", "--", "t1"],
+      ["read", "--json", "--", "t1"],
+      ["get", "--json", "--", "t1"],
+    ]);
+  });
+});
+
+test("done does not authorize ordinary permissions or a model confirmation without the model command", async () => {
+  await withCore([{ ...CLAUDE, status: "done" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+    await assert.rejects(backend.openAnswer(ref("t1"), verified(MODEL_SWITCH.text)).digit(1), /入力待ち状態が変わりました/);
+    await assert.rejects(backend.openAnswer(ref("t1"), verified(PLAN_SCREEN.text), "claude-model-switch").digit(1), /入力待ち状態が変わりました/);
+    assert.deepEqual(writes(fake), []);
+  });
+});
+
+test("a model confirmation refuses if its observed done state changes during the screen read", async () => {
+  await withCore([{ ...CLAUDE, status: "done" }], { screens: [MODEL_SWITCH.text] }, async (backend, fake) => {
+    const prompt = verified(MODEL_SWITCH.text);
+    const driver = {
+      ...claudeDriver,
+      parseBlockedPane(text: string) {
+        fake.setTerminal({ status: "blocked" });
+        return claudeDriver.parseBlockedPane(text);
+      },
+    };
+    await assert.rejects(backend.openAnswer(ref("t1"), { ...prompt, driver }, "claude-model-switch").digit(1), /入力待ち状態が変わりました/);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
   });
 });
 

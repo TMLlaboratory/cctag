@@ -27,7 +27,9 @@ would have to keep. Pin an exact version if that matters to you.
 
 - Before writing to a herdr-core terminal, cctag rechecks that the paired
   Claude Code process and session still own the foreground. Prompt answers
-  also require a complete visible screen and a terminal that is still blocked.
+  require a complete visible screen. If the approval cannot be read, cctag
+  directs the user to the terminal. A verified Claude model-switch confirmation
+  can also be answered while Claude reports `done`.
 
 - A permission prompt in auto mode is again read as one prompt while its
   countdown runs. By 2.1.325, Claude Code had reworded the countdown to "will

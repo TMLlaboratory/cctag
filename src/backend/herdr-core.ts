@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
+import { isClaudeModelSwitchConfirmation } from "../agents/claude/driver.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -289,11 +290,6 @@ export class HcBackend implements Terminals {
     return terminal;
   }
 
-  private async assertBlocked(ref: AgentRef, driver: AgentDriver): Promise<void> {
-    const terminal = await this.assertWritable(ref, driver);
-    if (terminal.status?.state !== "blocked") throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
-  }
-
   async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
     try {
       await this.assertWritable(ref, ctx.driver);
@@ -302,6 +298,7 @@ export class HcBackend implements Terminals {
       throw err;
     }
     let result: { started?: boolean };
+    if (ctx.cancelled()) throw new SubmitRefused("cancelled", "herdr-core submit was cancelled before writing");
     try {
       result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
     } catch (err) {
@@ -314,8 +311,8 @@ export class HcBackend implements Terminals {
     return { status: result.started === true ? "started" : "accepted", draftStashed: false };
   }
 
-  openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel {
-    const channel = this.createAnswerChannel(ref, prompt);
+  openAnswer(ref: AgentRef, prompt: VerifiedPrompt, purpose?: "claude-model-switch"): AnswerChannel {
+    const channel = this.createAnswerChannel(ref, prompt, purpose === "claude-model-switch");
     return { digit: channel.digit, text: channel.text, move: channel.move, complete: channel.complete, confirm: channel.confirm };
   }
 
@@ -332,18 +329,24 @@ export class HcBackend implements Terminals {
    * pastes it with Enter through `hc send --force`. Anything else after
    * `text()` would need the text typed but not submitted, and is refused.
    */
-  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt): ModelAnswerChannel {
+  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt, modelSwitch = false): ModelAnswerChannel {
     const address = addressOf(ref.target);
     let firstWrite = true;
     let active = true;
+    let answerStatus: "blocked" | "done" = "blocked";
     let pendingText: string | null = null;
-    const assertFingerprint = async (): Promise<void> => {
-      await this.assertBlocked(ref, prompt.driver);
+    const assertFingerprint = async (modelConfirmation: boolean): Promise<void> => {
+      const before = await this.assertWritable(ref, prompt.driver);
+      answerStatus = modelConfirmation && before.status?.state === "done" ? "done" : "blocked";
+      if (before.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       const snapshot = await this.read(ref.target, 0, "screen");
       if (!snapshot.complete) throw new ExpectationLost("the verified prompt screen is incomplete");
       const current = prompt.driver.parseBlockedPane(snapshot.text);
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
+      }
+      if (answerStatus === "done" && !isClaudeModelSwitchConfirmation(current)) {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       }
     };
     const assertActive = (): void => {
@@ -354,10 +357,11 @@ export class HcBackend implements Terminals {
         throw new ExpectationLost("herdr-core cannot type text without submitting it", HC_TYPED_TEXT_UNSUPPORTED);
       }
     };
-    const write = async (action: () => Promise<void>, terminal = false): Promise<void> => {
+    const write = async (action: () => Promise<void>, terminal = false, modelConfirmation = false): Promise<void> => {
       assertActive();
-      if (firstWrite) await assertFingerprint();
-      await this.assertBlocked(ref, prompt.driver);
+      if (firstWrite) await assertFingerprint(modelConfirmation);
+      const current = await this.assertWritable(ref, prompt.driver);
+      if (current.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       await action();
       firstWrite = false;
       if (terminal) active = false;
@@ -369,7 +373,7 @@ export class HcBackend implements Terminals {
     return {
       digit: (n, terminal = prompt.form === "digit-confirms") => {
         assertNoPendingText();
-        return write(keys(String(n)), terminal);
+        return write(keys(String(n)), terminal, modelSwitch && n === 1 && terminal);
       },
       text: async (value) => {
         assertActive();
@@ -403,15 +407,10 @@ export class HcBackend implements Terminals {
     };
   }
 
-  openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel {
-    const address = addressOf(ref.target);
+  openBlind(_ref: AgentRef, _prompt: BlindPermissionPrompt): BlindChannel {
     return {
-      answer: async (choice) => {
-        await this.assertBlocked(ref, prompt.driver);
-        await this.json(["keys"], [address, choice]);
-        if (prompt.form === "key-confirms") return;
-        await this.assertBlocked(ref, prompt.driver);
-        await this.json(["keys"], [address, "enter"]);
+      answer: async () => {
+        throw new ExpectationLost("herdr-core cannot verify the permission prompt", "許可リクエストを確認できませんでした。ターミナルで回答してください。");
       },
     };
   }

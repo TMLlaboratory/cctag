@@ -283,25 +283,27 @@ async function confirmOrcaAnswerReview(
   }
 }
 
+export function isClaudeModelSwitchConfirmation(prompt: BlockedPrompt): boolean {
+  if (prompt.kind !== "permission") return false;
+  const { snippet, choices } = prompt.menu;
+  return /^\s*Switch model\?\s*$/m.test(snippet) && choices.length === 2 &&
+    /^Yes, switch to \S/.test(choices[0]!.label) && choices[1]!.label === "No, go back";
+}
+
 /**
- * Runs a CLI slash command (`/model <name>`, ...) rather than a normal
- * conversational turn. These don't reliably show up in the session
- * transcript the way an LLM reply does, so this reads the result straight
- * off the pane. If a confirmation menu appears (e.g. switching models
- * mid-conversation asks "Switch model? Yes/No"), it's auto-confirmed with
- * the first option, since the user asking for the command already expressed
- * that intent.
+ * The model command's local output does not reliably appear as a transcript
+ * turn. Read it from the pane and confirm a model switch the user requested.
  */
-async function runClaudeSlashCommand(
+async function runClaudeModelCommand(
   terminals: Terminals,
   driver: AgentDriver,
   agent: AgentInfo,
-  command: string,
+  argsText: string,
 ): Promise<ModelCommandResult> {
   // Atomic submit — same reason as TurnEngine.startTurn: a separate
   // send-text + Enter races Claude Code's paste coalescing and can leave the
   // command unsent. Terminals.submit keeps it one server-side operation.
-  const submitOutcome = await terminals.submit(agent.ref, command, {
+  const submitOutcome = await terminals.submit(agent.ref, `/model ${argsText}`, {
     driver,
     cancelled: () => false,
     transcriptGrew: () => false,
@@ -326,7 +328,8 @@ async function runClaudeSlashCommand(
     if (menu && menu.choices.length > 0) {
       const parsed = driver.parseBlockedPane(paneText);
       if (parsed.kind === "question" || parsed.kind === "permission") {
-        await terminals.openAnswer(agent.ref, parsed.verified).digit(Number(menu.choices[0].num));
+        const purpose = agent.backend === "herdr-core" && isClaudeModelSwitchConfirmation(parsed) ? "claude-model-switch" : undefined;
+        await terminals.openAnswer(agent.ref, parsed.verified, purpose).digit(Number(menu.choices[0].num));
       }
       continue;
     }
@@ -654,6 +657,6 @@ export const claudeDriver: AgentDriver = {
   },
 
   async runModelCommand(terminals, agent, argsText) {
-    return runClaudeSlashCommand(terminals, claudeDriver, agent, `/model ${argsText}`);
+    return runClaudeModelCommand(terminals, claudeDriver, agent, argsText);
   },
 };

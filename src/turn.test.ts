@@ -236,7 +236,7 @@ function engineFor(herdr: FakeBackend, notifier: Notifier, turnTimeoutMs: number
   );
 }
 
-function adopt(engine: TurnEngine, pairing: Pairing, backend: BackendName = "herdr"): Promise<boolean> {
+function adopt(engine: TurnEngine, pairing: Pairing, backend: BackendName = "herdr", ref = fakeAgent("blocked", backend).ref): Promise<boolean> {
   return engine.adoptBlockedTerminal(pairing, {
     backend,
     driver: claudeDriver,
@@ -244,8 +244,8 @@ function adopt(engine: TurnEngine, pairing: Pairing, backend: BackendName = "her
     transcriptPath: "",
     offset: 0,
     collected: [],
-    paneId: PANE,
-    ref: fakeAgent("blocked", backend).ref,
+    paneId: pairing.paneId,
+    ref,
     cwd: "/tmp/nonexistent-cctag-test",
     outboxBaseline: {},
     writes: new WrittenFileTracker(),
@@ -1662,6 +1662,72 @@ test("an unparseable prompt does not blind the check for every prompt after it",
       2,
       "the readable prompt that replaced it must be posted too",
     );
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("herdr-core unreadable approvals direct the user to the terminal without actions", async (t) => {
+  for (const [name, text, complete] of [
+    ["unparseable", "approval without choices", true],
+    ["incomplete", PERMISSION_PANE, false],
+  ] as const) {
+    await t.test(name, async () => {
+      const pairing = { ...fakePairing(), paneId: "hc:t1" };
+      const agent = fakeAgent("blocked", "herdr-core");
+      agent.ref = { target: pairing.paneId, pid: 101, processStartedAt: 123, sessionId: "s1" };
+      const { notifier, posts, postedBlocks } = fakeNotifier();
+      const backend = fakeBackend(() => "blocked", undefined, {
+        async get() { return agent; },
+        async read() { return { text, draft: null, complete }; },
+        openBlind() { assert.fail("a stale click reached the blind channel"); },
+      }, "herdr-core");
+      const engine = engineFor(backend, notifier, 600_000);
+      try {
+        assert.ok(await adopt(engine, pairing, "herdr-core", agent.ref));
+        await sleep(100);
+        assert.match(posts[1] ?? "", /ターミナルで回答してください/);
+        assert.deepEqual(postedBlocks[1], []);
+        assert.deepEqual(await engine.answerPermissionButton(pairing.paneId, 1, "y", pairing.key), {
+          ok: false, reason: "not-pending",
+        });
+      } finally {
+        engine.abortAll();
+      }
+    });
+  }
+});
+
+test("herdr-core closes the old turn and removes actions when its Claude identity changes", async () => {
+  const pairing = { ...fakePairing(), paneId: "hc:t1" };
+  const oldRef = { target: pairing.paneId, pid: 101, processStartedAt: 123, sessionId: "s1" };
+  const agent = fakeAgent("blocked", "herdr-core");
+  agent.ref = oldRef;
+  const { notifier, posts, postedBlocks, updates } = fakeNotifier();
+  let reads = 0;
+  const backend = fakeBackend(() => "blocked", undefined, {
+    async get() { return agent; },
+    async read() {
+      return { text: permissionPane(`printf %s ${++reads}`), draft: null, complete: true };
+    },
+    openAnswer() { assert.fail("an old prompt reached the answer channel"); },
+  }, "herdr-core");
+  const engine = engineFor(backend, notifier, 600_000);
+  try {
+    assert.ok(await adopt(engine, pairing, "herdr-core", oldRef));
+    await sleep(100);
+    const promptId = promptIdInButtonBlock(postedBlocks[1]);
+    assert.ok(promptId);
+    agent.sessionId = "s2";
+    agent.ref = { ...oldRef, sessionId: "s2" };
+    await sleep(5_200);
+    assert.equal(reads, 1, "the replacement session's prompt must not be read by the old turn");
+    assert.ok(posts.some((text) => text.includes("ターンを終了しました")));
+    assert.ok(updates.some(({ text, blocks }) => text.includes("この確認は終了しました") && blocks.length === 0));
+    assert.equal(engine.isBusy(pairing.paneId), false);
+    assert.deepEqual(await engine.answerPermissionButton(pairing.paneId, promptId, "1", pairing.key), {
+      ok: false, reason: "not-pending",
+    });
   } finally {
     engine.abortAll();
   }

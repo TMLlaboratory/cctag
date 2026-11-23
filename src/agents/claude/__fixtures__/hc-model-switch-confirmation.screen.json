@@ -1,0 +1,11 @@
+{
+  "text": "  Switch model?\n  ❯ 1. Yes, switch to Sonnet 5.5\n    2. No, go back",
+  "complete": true,
+  "how": "screen",
+  "capture": {
+    "claude": "2.1.330",
+    "hc": "0.1.22",
+    "status": "done",
+    "excerpt": "Only the three confirmation rows were retained."
+  }
+}

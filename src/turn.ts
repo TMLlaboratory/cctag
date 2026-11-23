@@ -1049,6 +1049,19 @@ export class TurnEngine {
     fingerprint: string | null,
   ): Promise<void> {
     const paneId = state.paneId;
+    if (state.backend === "herdr-core" && prompt.kind === "blind-permission") {
+      state.promptId = null;
+      state.pendingPrompt = undefined;
+      state.promptFingerprint = fingerprint;
+      state.answering = false;
+      state.promptHandle = await this.notifier.postMessage(
+        state.pairing.channel,
+        state.pairing.threadTs ?? "",
+        "⚠️ 入力待ちの画面を確認できませんでした。ターミナルで回答してください。",
+      );
+      state.phase = "awaiting-permission";
+      return;
+    }
     const promptId = nextPromptId();
     state.promptId = promptId;
     state.promptFingerprint = fingerprint;
@@ -1266,6 +1279,16 @@ export class TurnEngine {
         return;
       }
 
+      if (state.backend === "herdr-core" && state.driver.kind === "claude" && (
+        agent.agent !== "claude" || agent.ref.pid !== state.ref.pid ||
+        agent.ref.processStartedAt !== state.ref.processStartedAt || agent.ref.sessionId !== state.ref.sessionId
+      )) {
+        state.promptId = null;
+        await state.promptHandle?.update("⚠️ Claude Code の接続先が切り替わったため、この確認は終了しました。", []).catch(() => {});
+        await this.finalize(state, "⚠️ Claude Code の接続先が切り替わったため、ターンを終了しました。");
+        return;
+      }
+
       const sessionChanged = Boolean(agent.sessionId && agent.sessionId !== state.sessionId);
       const identityChanged =
         state.driver.kind === "omp" &&
@@ -1433,9 +1456,8 @@ export class TurnEngine {
           if (resolution.screen) {
             paneText = resolution.screen.text;
           } else {
-            paneText = (
-              await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion)
-            ).text;
+            const snapshot = await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion);
+            paneText = state.backend === "herdr-core" && !snapshot.complete ? "" : snapshot.text;
           }
           state.failures.read = 0;
         } catch (err) {
