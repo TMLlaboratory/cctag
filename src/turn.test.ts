@@ -2635,6 +2635,7 @@ test("herdr-core Codex rejects unverified or competing rollout evidence", async 
   for (const scenario of [
     "next task in same rollout", "blocked with a competing start", "replaced path",
     "unreadable eligible candidate", "unreadable possibly fresh candidate", "verified pre-existing candidate",
+    "matching writer with a vanished pre-send candidate",
   ]) {
     await t.test(scenario, async () => {
       const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-later-"));
@@ -2650,6 +2651,7 @@ test("herdr-core Codex rejects unverified or competing rollout evidence", async 
       const { notifier, posts, postedBlocks } = fakeNotifier();
       const blocked = scenario === "blocked with a competing start";
       const unreadable = scenario.startsWith("unreadable");
+      const vanished = scenario === "matching writer with a vanished pre-send candidate";
       const previouslyUnseen = scenario === "verified pre-existing candidate" || scenario === "unreadable possibly fresh candidate";
       const { text: approval } = JSON.parse(readFileSync(
         new URL("./agents/codex/__fixtures__/hc-approval.screen.json", import.meta.url), "utf8",
@@ -2673,9 +2675,9 @@ test("herdr-core Codex rejects unverified or competing rollout evidence", async 
             }
           }
           return {
-            ...fakeAgent(submitted ? (blocked ? "blocked" : previouslyUnseen ? "done" : "working") : "idle", "herdr-core"),
+            ...fakeAgent(submitted ? (blocked ? "blocked" : previouslyUnseen || vanished ? "done" : "working") : "idle", "herdr-core"),
             ref, agent: "codex", sessionId: null, cwd: dir,
-            codexRollouts: previouslyUnseen && !submitted ? [rollout] : [other, rollout],
+            codexRollouts: (previouslyUnseen && !submitted) || (vanished && submitted) ? [rollout] : [other, rollout],
             hcCodexPromptStamp: blocked ? { turn: 2, statusMs: 100 } : undefined,
           };
         },
@@ -2687,8 +2689,12 @@ test("herdr-core Codex rejects unverified or competing rollout evidence", async 
           appendFileSync(path, event({ type: "task_started", turn_id: "active" }) +
             event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }) +
             reply("verified reply"));
-          if (scenario === "verified pre-existing candidate") {
+          if (scenario === "verified pre-existing candidate" || vanished) {
             appendFileSync(path, event({ type: "task_complete", turn_id: "active" }));
+          }
+          if (vanished) {
+            appendFileSync(otherPath, event({ type: "task_started", turn_id: "disappeared" }) +
+              event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }));
           }
           if (blocked) {
             appendFileSync(otherPath, event({ type: "task_started", turn_id: "parallel" }));
@@ -2706,8 +2712,8 @@ test("herdr-core Codex rejects unverified or competing rollout evidence", async 
         await engine.startTurn(pairing, "U1", "request");
         for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
         assert.equal(engine.isBusy(paneId), false);
-        assert.equal(posts.includes("verified reply"), !unreadable, JSON.stringify(posts));
-        if (unreadable) assert.ok(posts.some((post) => post.includes("Codex の入力先を確認できませんでした")));
+        assert.equal(posts.includes("verified reply"), !unreadable && !vanished, JSON.stringify(posts));
+        if (unreadable || vanished) assert.ok(posts.some((post) => post.includes("Codex の入力先を確認できませんでした")));
         if (blocked) {
           assert.ok(posts.includes(CODEX_THREAD_SWITCHED));
           // The startup screen may be read before submission. A blocked prompt must not be captured.

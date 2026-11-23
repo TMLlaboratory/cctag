@@ -111,6 +111,9 @@ async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCod
     if (!turnId) continue;
     matches.push({ rollout, turnId, records: records.slice(start), offset, newOffset });
   }
+  // Closing a writer does not rule out an input recorded after its pre-send offset.
+  if (matches.length && input.baselines.some(({ identity }) =>
+    !rollouts.some(({ transcriptIdentity }) => sameTranscriptIdentity(identity, transcriptIdentity)))) return null;
   const selected = matches[0]?.rollout.transcriptIdentity;
   return {
     matches,
