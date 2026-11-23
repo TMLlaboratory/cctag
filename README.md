@@ -140,7 +140,7 @@ must be available.
 
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
-| Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ the features above. Answer unverified prompts and multi-select free-text questions in the terminal |
+| Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ the features above. Use the terminal for unverified prompts and for free-text answers to multi-select questions |
 | Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal | — |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) | — |
 
@@ -153,9 +153,10 @@ herdr-core is not running. Start the core yourself — through the Herdr app,
 launchd or `hc server start` — because a core takes the environment of whatever
 started it and hands it to every terminal.
 
-cctag lists local Claude Code terminals with a `claude` or `claude-code`
-foreground process, an absent or `claude-code` status app, and a readable
-session file. A PID recorded in the file must match the foreground PID.
+cctag considers live local terminals that `hc ls` identifies as
+`claude-code`. Listing requires a `claude` or `claude-code` foreground
+process, an absent or `claude-code` status app, and a valid session record.
+A PID recorded in the file must match the foreground PID.
 Writes require a recorded PID and start time. Before each write, cctag
 rechecks the PID, session ID and recorded start time against the values
 observed at the start of the operation. See [herdr-core discovery and writes](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows).

@@ -301,9 +301,10 @@ On each poll it checks for a confirmation menu before deciding from
 from the pane and trims the footer before relaying the result to Slack.
 
 On herdr-core, the driver reads the full visible screen without scrollback.
-When it recognizes Claude's `Switch model?` confirmation, cctag verifies
-that the same Claude session and the same prompt are still present on a
-complete screen, with the state unchanged across the read. The confirmation
+When it recognizes Claude's `Switch model?` confirmation, cctag compares
+the dialog in that complete capture with the dialog in a second complete
+capture. It verifies the same Claude process and session, and checks that the
+state stays unchanged before and after the second read. The confirmation
 can be answered in either `blocked` or `done`. cctag sends the affirmative
 key at most once per command. Claude Code resolves the model argument, and
 cctag authorizes the key from the verified dialog. If the screen or the
@@ -338,18 +339,20 @@ plan`.
 
 ## 5.6.2 Plan Mode over Slack
 
-Claude Code Plan Mode works on Herdr, Orca and herdr-core. When a plan-mode turn finishes,
-Claude Code shows a "Here is Claude's plan / ready to execute?" approval prompt
-(a kind of permission menu). On detecting it, cctag:
+Claude Code Plan Mode works on Herdr, Orca and herdr-core. When a plan-mode
+turn finishes, Claude Code shows a "Here is Claude's plan / ready to execute?"
+approval prompt. On herdr-core, answer at the terminal if cctag cannot
+verify the approval menu from a complete screen. When cctag recognizes the
+plan approval menu, it enables approval and feedback in the Slack thread.
 
-- **attaches the full plan as a `.md` file**. The plan is written to
+- cctag **attaches the full plan as a `.md` file** when it can locate it. The plan is written to
   `~/.claude/plans/<slug>.md`, and its path shows in the footer — but a
   narrow pane wraps and truncates that path, so the parsed path is only a
   hint: if it doesn't resolve to an existing file, cctag falls back to the
   **most-recently-modified file** in the plans directory (which Claude Code
-  writes right before the prompt) — see `resolvePlanFile()`;
-- posts **approval buttons** (proceed / proceed with auto mode);
-- lets you **reply with changes in the thread**. The approval menu has a
+  writes right before the prompt). See `resolvePlanFile()`.
+- cctag posts **approval buttons** (proceed / proceed with auto mode).
+- You can **reply with changes in the thread**. The approval menu has a
   "Tell Claude what to change" free-text option; a plain thread reply is fed
   into it (move the cursor to that option's number, type the feedback,
   Enter), which regenerates the plan and stays in plan mode — so you can

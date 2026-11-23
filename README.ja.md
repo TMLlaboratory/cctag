@@ -131,8 +131,9 @@ Herdr appは同じターミナルを表示するので、cctagが入力した内
 接続できないときは、herdr-coreが動いていないと報告する。coreは、Herdr app・launchd・`hc server start`の
 いずれかで自分で起動する。coreは起動した側の環境変数を受け継ぎ、すべてのターミナルに渡すためである。
 
-cctagが一覧に出すのは、前景プロセスが`claude`か`claude-code`で、状態の`app`が未報告か`claude-code`であり、
-セッションファイルを読み取れるローカルのClaude Code端末である。ファイルにPIDがあれば、前景のPIDと一致することが条件になる。
+cctagは、`hc ls`が`claude-code`と報告するローカルで稼働中の端末を確認する。一覧に出す条件は、
+前景プロセスが`claude`か`claude-code`で、状態の`app`が未報告か`claude-code`であり、有効なセッションレコードがあること。
+ファイルにPIDがあれば、前景のPIDとの一致も必要になる。
 書き込みにはファイルに記録されたPIDと開始時刻が必要で、書き込み直前にPID・セッションID・開始時刻を操作開始時の値と照合する。
 詳細は[herdr-coreの検出と書き込み](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows)を参照（英語）。
 
