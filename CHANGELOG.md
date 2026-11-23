@@ -41,6 +41,7 @@ would have to keep. Pin an exact version if that matters to you.
 - The captured default (manual) and auto permission modes pass the guarded
   composer check on herdr and herdr-core with a valid visible footer. A paint
   with no footer text is refused. There is no live capture of that layout.
+  The check now accepts a session name in the upper rule of the composer.
 
 - A permission prompt in auto mode is again read as one prompt while its
   countdown runs. By 2.1.325, Claude Code had reworded the countdown to "will

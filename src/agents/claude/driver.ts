@@ -12,6 +12,7 @@ import {
   UNSENDABLE_TEXT_MESSAGE,
 } from "../../backend/types.js";
 import type { AgentInfo, AgentRef, ScreenSnapshot } from "../../backend/types.js";
+import { COMPOSER_BOTTOM_RULE_RE, NAMED_COMPOSER_TOP_RULE_RE } from "./composer.js";
 import {
   findPlanFeedbackOption,
   MODE_ALIASES,
@@ -108,25 +109,18 @@ function answerListsMatch(
   );
 }
 
-// A session given a name with `/rename` draws that name into the rule above the
-// prompt (`──── design ─`), and only that rule; the one below stays plain.
-// Captured live on Claude Code 2.1.291. Requiring a bare rule above refused
-// every Slack message to a named session as "not idle" (#28).
-const COMPOSER_TOP_RULE_RE = /^[─━]+(?: .+ [─━]+)?$/u;
-const COMPOSER_BOTTOM_RULE_RE = /^[─━]+$/u;
-
 function composerFooterStart(rows: readonly string[], acceptTryPlaceholder = false): number | null {
   for (let i = 1; i < rows.length - 1; i++) {
     const inputRow = rows[i]!.trim();
     const isTryPlaceholder = acceptTryPlaceholder && /^❯\s+Try ".+"$/u.test(inputRow);
     if (inputRow !== "❯" && !isTryPlaceholder) continue;
-    if (!COMPOSER_TOP_RULE_RE.test(rows[i - 1]!.trim()) || !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) continue;
+    const upper = rows[i - 1]!.trim();
+    if ((!COMPOSER_BOTTOM_RULE_RE.test(upper) && !NAMED_COMPOSER_TOP_RULE_RE.test(upper)) ||
+      !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) continue;
     if (rows.slice(i + 2).some((row) => row.trim())) return i - 1;
   }
   return null;
 }
-
-const NAMED_COMPOSER_TOP_RULE_RE = /^[─━]+ .+ [─━]+$/u;
 
 // Recovered only under a named rule: that is the one layout Orca's extractor is
 // known to miss (it lifts the text into `draft` only below a bare rule, Orca

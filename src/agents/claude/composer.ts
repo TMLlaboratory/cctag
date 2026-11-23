@@ -10,7 +10,9 @@ export interface ClaudeComposer {
   rawRow: string;
 }
 
-const RULE = /^[─━]+$/u;
+export const COMPOSER_BOTTOM_RULE_RE = /^[─━]+$/u;
+// /rename draws the session name into the upper rule only (Claude Code 2.1.291, #28).
+export const NAMED_COMPOSER_TOP_RULE_RE = /^[─━]+ .+ [─━]+$/u;
 const RESET = "\x1b[0m";
 const REVERSE = "\x1b[7m";
 const SGR = /\x1b\[[0-9;]*m/g;
@@ -35,7 +37,9 @@ function parseFrame(lines: string[], index: number, cols: number, column?: numbe
   const row = lines[index];
   const upper = stripVTControlCharacters(lines[index - 1] ?? "");
   const lower = stripVTControlCharacters(lines[index + 1] ?? "");
-  if (!row || !RULE.test(upper) || upper.length !== cols || lower !== upper) return null;
+  if (!row || !COMPOSER_BOTTOM_RULE_RE.test(lower) || lower.length !== cols) return null;
+  if (upper !== lower && (!NAMED_COMPOSER_TOP_RULE_RE.test(upper) ||
+    [...upper].reduce((width, char) => width + cellWidth(char.codePointAt(0)!), 0) !== cols)) return null;
   const footer = lines.slice(index + 2).map(stripVTControlCharacters).join("\n").trimEnd();
   if (footer.split("\n").some((line) => !/^ {2,}\S/u.test(line)) ||
     /(?:^|\s)❯|esc to (?:close|exit)/iu.test(footer)) return null;

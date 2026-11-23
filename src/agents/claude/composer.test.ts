@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import { parseClaudeHcComposer, parseClaudeHerdrComposer } from "./composer.js";
+
+const namedCapture: { cols: number; frame: string } = JSON.parse(
+  readFileSync(new URL("./__fixtures__/hc-named-composer.ansi.json", import.meta.url), "utf8"),
+);
+const namedRule = namedCapture.frame.split("\r\n").find((row) => row.includes(" test-name ─"))!;
+const plainNamedRule = stripVTControlCharacters(namedRule);
 
 for (const [backend, parse, width] of [
   ["hc", parseClaudeHcComposer, 200],
@@ -23,6 +30,30 @@ for (const [backend, parse, width] of [
     }
   });
 
+  test(`${backend} recognizes a named upper rule and keeps the name in the frame`, () => {
+    const capturedRows = captures["mode-auto"].split("\r\n");
+    const rows = backend === "hc" ? namedCapture.frame.split("\r\n") : capturedRows;
+    const prompt = rows.findIndex((row) => row.startsWith("❯\u00a0"));
+    assert.ok(prompt > 0);
+    // The named live paint uses a native cursor. Keep the supported caret from the earlier captures.
+    if (backend === "hc") {
+      rows[prompt] = capturedRows.find((row) => row.startsWith("❯\u00a0"))!;
+    } else {
+      rows[prompt - 1] = plainNamedRule.slice(-width);
+    }
+    const paint = rows.join("\r\n");
+    const parsed = parse(paint, width);
+    assert.ok(parsed?.idle);
+    const renamed = parse(paint.replace("test-name", "next-name"), width);
+    assert.ok(renamed?.idle);
+    assert.notEqual(parsed.frame, renamed.frame);
+    assert.equal(parse(paint.replace("test-name", "short"), width), null);
+    assert.ok(parse(paint.replace("test-name", "テスト名a"), width)?.idle);
+
+    rows[prompt + 1] = rows[prompt - 1]!;
+    assert.equal(parse(rows.join("\r\n"), width), null);
+  });
+
   test(`${backend} refuses the captured slash dropdown and a composer without focus or complete bounds`, () => {
     const paint = captures["mode-default"];
     assert.equal(parse(captures["slash-dropdown"], width), null);
@@ -42,3 +73,7 @@ for (const [backend, parse, width] of [
     assert.equal(parse(synthetic, width), null);
   });
 }
+
+test("hc still refuses the captured native caret in a named composer", () => {
+  assert.equal(parseClaudeHcComposer(namedCapture.frame, namedCapture.cols), null);
+});
