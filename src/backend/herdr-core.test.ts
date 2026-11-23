@@ -12,7 +12,7 @@ import { claudeDriver } from "../agents/claude/driver.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
 import { createTerminals, type SubmitContext, type Terminals } from "./index.js";
-import type { VerifiedPrompt } from "./prompt.js";
+import type { BlindPermissionPrompt, VerifiedPrompt } from "./prompt.js";
 import { BackendUnavailable, CoreNotRunning, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
 
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
@@ -25,6 +25,7 @@ interface FakeTerminal {
   state?: string;
   status?: string | null;
   pid?: number;
+  foregroundName?: string;
   name?: string | null;
   title?: string;
 }
@@ -34,6 +35,7 @@ interface Fake {
   socket: string;
   sessionsDir: string;
   calls(): { args: string[]; env: Record<string, string | undefined> }[];
+  setTerminal(changes: Partial<FakeTerminal>): void;
   startCore(): Promise<void>;
   cleanup(): Promise<void>;
 }
@@ -45,17 +47,18 @@ interface Fake {
  */
 function fakeHc(
   terminals: FakeTerminal[],
-  options: { screens?: string[]; send?: Record<string, unknown> | { error: { kind: string; message: string } } } = {},
+  options: { screens?: string[]; incomplete?: boolean; send?: Record<string, unknown> | { error: { kind: string; message: string } } } = {},
 ): Fake {
   const dir = mkdtempSync(join(tmpdir(), "cctag-hc-"));
   const bin = join(dir, "hc");
   const callsFile = join(dir, "calls.jsonl");
+  const terminalChanges = join(dir, "terminal-changes.json");
   const readCount = join(dir, "read-count");
   const sessionsDir = join(dir, "sessions");
   mkdirSync(sessionsDir);
   for (const t of terminals) {
     if (t.pid !== undefined) {
-      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({ pid: t.pid, sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}` }));
+      writeFileSync(join(sessionsDir, `${t.pid}.json`), JSON.stringify({ pid: t.pid, startedAt: 101_000, sessionId: `session-${t.pid}`, cwd: `/repo/${t.address}` }));
     }
   }
   const script = `#!${process.execPath}
@@ -73,17 +76,18 @@ const out = (value) => process.stdout.write(JSON.stringify(value));
 if (args[0] === "ls") {
   out({ terminals: terminals.map((t) => ({ address: t.address, agent: t.agent, state: t.state ?? "live", ...(t.status === undefined ? {} : { status: t.status }) })) });
 } else if (args[0] === "get") {
-  const t = find(ops[0]);
+  const t = { ...find(ops[0]), ...(fs.existsSync(${JSON.stringify(terminalChanges)})
+    ? JSON.parse(fs.readFileSync(${JSON.stringify(terminalChanges)}, "utf8")) : {}) };
   out({
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
-    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: "claude" },
-    status: t.status === undefined ? null : { app: t.agent, state: t.status },
+    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: t.foregroundName ?? "claude" },
+    status: t.status == null ? null : { app: t.agent, state: t.status },
   });
 } else if (args[0] === "read") {
   find(ops[0]);
   const n = Number(fs.existsSync(${JSON.stringify(readCount)}) ? fs.readFileSync(${JSON.stringify(readCount)}, "utf8") : "0");
   fs.writeFileSync(${JSON.stringify(readCount)}, String(n + 1));
-  out({ text: screens[Math.min(n, screens.length - 1)], complete: true, how: "screen" });
+  out({ text: screens[Math.min(n, screens.length - 1)], complete: ${!options.incomplete}, how: "screen" });
 } else if (args[0] === "send") {
   if (send.error) fail(send.error.kind, send.error.message, 9);
   out(send);
@@ -110,6 +114,7 @@ if (args[0] === "ls") {
             .filter(Boolean)
             .map((line) => JSON.parse(line))
         : [],
+    setTerminal: (changes) => writeFileSync(terminalChanges, JSON.stringify(changes)),
     startCore: () =>
       new Promise((resolve) => {
         server = createServer((socket) => socket.destroy());
@@ -140,8 +145,15 @@ const CTX: SubmitContext = {
   pollIntervalMs: 1,
 };
 
+const CLAUDE = { address: "t1", agent: "claude-code", status: "blocked", pid: 101 };
+const BLIND = { driver: claudeDriver, form: "key-then-enter" } as BlindPermissionPrompt;
+
+function writes(fake: Fake): string[][] {
+  return fake.calls().filter(({ args }) => args[0] === "keys" || args[0] === "send").map(({ args }) => args);
+}
+
 function ref(address: string): AgentRef {
-  return { target: `hc:${address}`, pid: null, processStartedAt: null };
+  return { target: `hc:${address}`, pid: 101, processStartedAt: 101_000, sessionId: "session-101" };
 }
 
 function verified(screen: string): VerifiedPrompt {
@@ -237,7 +249,7 @@ test("hc runs without the Spoke's own HC_TERMINAL_ID and HC_SCOPE", async () => 
 });
 
 test("a message that starts with a hyphen is sent as text, not read as a flag", async () => {
-  await withCore([{ address: "t1" }], {}, async (backend, fake) => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
     await backend.submit(ref("t1"), "--force", CTX);
     await backend.submit(ref("t1"), "-1 for that", CTX);
     assert.deepEqual(
@@ -251,25 +263,25 @@ test("a message that starts with a hyphen is sent as text, not read as a flag", 
 });
 
 test("submit reports whether the agent started a turn", async () => {
-  await withCore([{ address: "t1" }], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
+  await withCore([CLAUDE], { send: { started: true, status: "working", turn: 2 } }, async (backend) => {
     assert.deepEqual(await backend.submit(ref("t1"), "go", CTX), { status: "started", draftStashed: false });
   });
-  await withCore([{ address: "t1" }], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
+  await withCore([CLAUDE], { send: { started: false, status: "idle", turn: 1 } }, async (backend) => {
     assert.deepEqual(await backend.submit(ref("t1"), "/model", CTX), { status: "accepted", draftStashed: false });
   });
 });
 
 test("submit turns hc's refusal of a blocked terminal into a gate refusal, and other failures into an unknown outcome", async () => {
-  await withCore([{ address: "t1" }], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
+  await withCore([CLAUDE], { send: { error: { kind: "blocked", message: "t1 is blocked (permission)" } } }, async (backend) => {
     await assert.rejects(backend.submit(ref("t1"), "go", CTX), (err: unknown) => err instanceof SubmitRefused && err.reason === "gate");
   });
-  await withCore([{ address: "t1" }], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
+  await withCore([CLAUDE], { send: { error: { kind: "unavailable", message: "the core is stopping" } } }, async (backend) => {
     await assert.rejects(backend.submit(ref("t1"), "go", CTX), WriteOutcomeUnknown);
   });
 });
 
 test("read asks for history lines only for the history region and strips the side pane", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const screen = await backend.read("hc:t1", 200, "screen");
     await backend.read("hc:t1", 200, "history");
     assert.deepEqual(
@@ -291,38 +303,38 @@ test("the captured hc screens parse as a question and a plan approval", () => {
 });
 
 test("an answer checks the prompt is still on screen, then presses keys by hc's key names", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
     const channel = backend.openAnswer(ref("t1"), prompt);
     await channel.move("Down", 2);
     await channel.digit(1, false);
     await channel.confirm("Amber");
-    const writes = fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args);
-    assert.deepEqual(writes, [
+    assert.deepEqual(writes(fake), [
       ["keys", "--json", "--", "t1", "down", "down"],
       ["keys", "--json", "--", "t1", "1"],
       ["keys", "--json", "--", "t1", "enter"],
     ]);
-    assert.equal(fake.calls().filter((call) => call.args[0] === "read").length, 1);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "keys", "get", "keys", "get", "keys"]);
+    assert.deepEqual(fake.calls()[1]?.args, ["read", "--json", "--", "t1"]);
   });
 });
 
 test("typed text is pasted together with its Enter, and nothing else may follow it", async () => {
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(stripSidePane(QUESTION_SCREEN.text));
     const channel = backend.openAnswer(ref("t1"), prompt);
     await channel.move("Down", 2);
     await channel.text("Cが好き");
     await channel.confirm("Cが好き");
     assert.deepEqual(
-      fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args),
+      writes(fake),
       [
         ["keys", "--json", "--", "t1", "down", "down"],
         ["send", "--force", "--json", "--", "t1", "Cが好き"],
       ],
     );
   });
-  await withCore([{ address: "t1" }], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [QUESTION_SCREEN.text] }, async (backend, fake) => {
     const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
     await channel.text("1,3");
     await assert.rejects(channel.move("Down", 1), (err: unknown) => err instanceof ExpectationLost && err.userMessage === HC_TYPED_TEXT_UNSUPPORTED);
@@ -331,19 +343,94 @@ test("typed text is pasted together with its Enter, and nothing else may follow 
 });
 
 test("an answer is refused when the prompt on screen is no longer the verified one", async () => {
-  await withCore([{ address: "t1" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
     const channel = backend.openAnswer(ref("t1"), verified(stripSidePane(QUESTION_SCREEN.text)));
     await assert.rejects(channel.digit(1), ExpectationLost);
-    assert.deepEqual(fake.calls().filter((call) => call.args[0] !== "read"), []);
+    assert.deepEqual(writes(fake), []);
   });
 });
 
+test("a matching prompt on an incomplete visible screen authorizes no input", async () => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text], incomplete: true }, async (backend, fake) => {
+    await assert.rejects(backend.openAnswer(ref("t1"), verified(PLAN_SCREEN.text)).digit(1), /screen is incomplete/);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read"]);
+  });
+});
+
+test("a replaced Claude foreground or session refuses submit, answers, and Shift+Tab", async (t) => {
+  for (const [name, terminal, session, notice] of [
+    ["different PID", { pid: 202 }, {}, /セッションが切り替わりました/],
+    ["different session", {}, { sessionId: "replacement" }, /セッションが切り替わりました/],
+    ["different start time", {}, { startedAt: 102_000 }, /セッションが切り替わりました/],
+    ["non-Claude executable with stale Claude status", { foregroundName: "zsh" }, {}, /前景で Claude Code/],
+    ["different status app", { agent: "other" }, {}, /前景で Claude Code/],
+    ["mismatched PID in session file", {}, { pid: 999 }, /前景で Claude Code/],
+    ["unverified start time", {}, { startedAt: null }, /前景で Claude Code/],
+  ] as const) {
+    await t.test(name, async () => {
+      await withCore([CLAUDE], {}, async (backend, fake) => {
+        const agent = await backend.get("hc:t1");
+        assert.ok(agent);
+        assert.deepEqual(agent.ref, ref("t1"));
+        fake.setTerminal(terminal);
+        writeFileSync(join(fake.sessionsDir, "101.json"), JSON.stringify({
+          pid: 101, sessionId: "session-101", cwd: "/repo/t1", startedAt: 101_000, ...session,
+        }));
+        const stale = (error: unknown) => error instanceof ExpectationLost && notice.test(error.userMessage ?? "");
+        await assert.rejects(backend.submit(agent.ref, "/model", CTX), (error: unknown) =>
+          error instanceof SubmitRefused && error.reason === "agent-unverified" && notice.test(error.message));
+        await assert.rejects(backend.openAnswer(agent.ref, verified(PLAN_SCREEN.text)).digit(1), stale);
+        await assert.rejects(backend.openBlind(agent.ref, BLIND).answer("y"), stale);
+        await assert.rejects(backend.openComposer(agent.ref, claudeDriver).backTab(), stale);
+        assert.deepEqual(writes(fake), []);
+      });
+    });
+  }
+});
+
+test("an answer rechecks the blocked state after reading the prompt", async () => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+    const prompt = verified(PLAN_SCREEN.text);
+    const driver = {
+      ...claudeDriver,
+      parseBlockedPane(text: string) {
+        fake.setTerminal({ status: "idle" });
+        return claudeDriver.parseBlockedPane(text);
+      },
+    };
+    await assert.rejects(backend.openAnswer(ref("t1"), { ...prompt, driver }).digit(1), /入力待ち状態が変わりました/);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get"]);
+    await assert.rejects(backend.openAnswer(ref("t1"), prompt).digit(1), /入力待ち状態が変わりました/);
+    assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "get"]);
+  });
+});
+
+test("a compound answer rechecks the session and blocked state before a forced send", async () => {
+  for (const change of ["session", "status"]) {
+    await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+      const answer = backend.openAnswer(ref("t1"), verified(PLAN_SCREEN.text));
+      await answer.digit(3, false);
+      await answer.text("feedback");
+      if (change === "status") {
+        fake.setTerminal({ status: "idle" });
+      } else {
+        writeFileSync(join(fake.sessionsDir, "101.json"), JSON.stringify({
+          pid: 101, sessionId: "session-101", cwd: "/repo/t1", startedAt: 102_000,
+        }));
+      }
+      await assert.rejects(answer.confirm("Tell Claude what to change"),
+        change === "status" ? /入力待ち状態が変わりました/ : /セッションが切り替わりました/);
+      assert.deepEqual(fake.calls().map(({ args }) => args[0]), ["get", "read", "get", "keys", "get"]);
+    });
+  }
+});
+
 test("Shift+Tab and blind y/n answers use hc's key names", async () => {
-  await withCore([{ address: "t1" }], {}, async (backend, fake) => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
     await backend.openComposer(ref("t1"), claudeDriver).backTab();
-    await backend.openBlind(ref("t1"), { form: "key-then-enter" } as never).answer("y");
+    await backend.openBlind(ref("t1"), BLIND).answer("y");
     assert.deepEqual(
-      fake.calls().map((call) => call.args),
+      writes(fake),
       [
         ["keys", "--json", "--", "t1", "shift+tab"],
         ["keys", "--json", "--", "t1", "y"],
@@ -374,12 +461,12 @@ test("a multi-select free-text answer on herdr-core is refused before any key is
 });
 
 test("plan feedback moves to the option, then pastes the feedback with its Enter", async () => {
-  await withCore([{ address: "t1" }], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
+  await withCore([CLAUDE], { screens: [PLAN_SCREEN.text] }, async (backend, fake) => {
     const prompt = verified(PLAN_SCREEN.text);
     const channel = backend.openAnswer(ref("t1"), prompt);
     await claudeDriver.answerPlanFeedback!(channel, 3, "改行1つだけにして");
     assert.deepEqual(
-      fake.calls().filter((call) => call.args[0] !== "read").map((call) => call.args),
+      writes(fake),
       [
         ["keys", "--json", "--", "t1", "3"],
         ["send", "--force", "--json", "--", "t1", "改行1つだけにして"],

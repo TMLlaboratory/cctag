@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
@@ -34,8 +34,10 @@ import {
 const execFileAsync = promisify(execFile);
 const PREFIX = "hc:";
 const KNOWN_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done"]);
-const ANSWER_PANE_LINES = 200;
 const CLAUDE_APP = "claude-code";
+const HC_CLAUDE_UNVERIFIED = "herdr-core の前景で Claude Code を確認できませんでした。端末の状態を確認してください。";
+const HC_CLAUDE_CHANGED = "herdr-core の Claude Code セッションが切り替わりました。端末の状態を確認してください。";
+const HC_BLOCKED_CHANGED = "herdr-core の入力待ち状態が変わりました。端末の状態を確認してください。";
 export const HC_TYPED_TEXT_UNSUPPORTED =
   "herdr-core では、文字を入力したまま送信せずに次の操作へ進めないため、この回答は送れません。端末で答えてください。";
 export const HC_UNSUPPORTED_AGENTS_NOTICE =
@@ -107,11 +109,16 @@ function probeSocket(path: string): Promise<void> {
 }
 
 /** Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under. */
-async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string } | null> {
+async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string; startedAt: number | null } | null> {
   try {
-    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as { sessionId?: unknown; cwd?: unknown };
-    if (typeof raw.sessionId !== "string" || typeof raw.cwd !== "string") return null;
-    return { sessionId: raw.sessionId, cwd: raw.cwd };
+    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as {
+      pid?: unknown; sessionId?: unknown; cwd?: unknown; startedAt?: unknown;
+    };
+    if (typeof raw.sessionId !== "string" || !raw.sessionId || typeof raw.cwd !== "string") return null;
+    if (raw.pid !== undefined && raw.pid !== pid) return null;
+    const startedAt = raw.pid === pid && typeof raw.startedAt === "number" &&
+      Number.isSafeInteger(raw.startedAt) && raw.startedAt > 0 ? raw.startedAt : null;
+    return { sessionId: raw.sessionId, cwd: raw.cwd, startedAt };
   } catch {
     return null;
   }
@@ -119,6 +126,14 @@ async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessio
 
 function normalizeStatus(raw: string | null | undefined): AgentStatus {
   return raw && KNOWN_STATUSES.has(raw as AgentStatus) ? (raw as AgentStatus) : "unknown";
+}
+
+function claudeForegroundPid(terminal: HcTerminal): number | null {
+  const { pid, name } = terminal.foreground ?? {};
+  const executable = typeof name === "string" ? basename(name) : "";
+  return terminal.state === "live" && typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 &&
+    (executable === "claude" || executable === CLAUDE_APP) &&
+    (terminal.status?.app == null || terminal.status.app === CLAUDE_APP) ? pid : null;
 }
 
 export interface HcBackendOptions {
@@ -149,7 +164,7 @@ export class HcBackend implements Terminals {
    */
   private async raw(args: string[]): Promise<string> {
     await probeSocket(this.socket);
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, HC_SOCKET: this.socket };
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
     delete env.HC_TERMINAL_SOCKET;
@@ -193,12 +208,12 @@ export class HcBackend implements Terminals {
   }
 
   private async agentFrom(terminal: HcTerminal): Promise<AgentInfo | null> {
-    const pid = terminal.foreground?.pid;
-    if (terminal.state !== "live" || typeof pid !== "number") return null;
+    const pid = claudeForegroundPid(terminal);
+    if (pid === null) return null;
     const session = await claudeSession(pid, this.sessionsDir);
     if (!session) return null;
     return {
-      ref: { target: `${PREFIX}${terminal.address}`, pid: null, processStartedAt: null },
+      ref: { target: `${PREFIX}${terminal.address}`, pid, processStartedAt: session.startedAt, sessionId: session.sessionId },
       backend: "herdr-core",
       agent: "claude",
       sessionId: session.sessionId,
@@ -257,7 +272,35 @@ export class HcBackend implements Terminals {
     return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
   }
 
-  async submit(ref: AgentRef, text: string, _ctx: SubmitContext): Promise<SubmitOutcome> {
+  private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<HcTerminal> {
+    const address = addressOf(ref.target);
+    const terminal = await this.terminal(address);
+    const pid = terminal ? claudeForegroundPid(terminal) : null;
+    if (driver.kind !== "claude" || terminal?.address !== address || pid === null ||
+        ref.pid === null || ref.processStartedAt === null || !ref.sessionId) {
+      throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
+    }
+    if (pid !== ref.pid) throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);
+    const session = await claudeSession(pid, this.sessionsDir);
+    if (session?.startedAt == null) throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
+    if (session.sessionId !== ref.sessionId || session.startedAt !== ref.processStartedAt) {
+      throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);
+    }
+    return terminal;
+  }
+
+  private async assertBlocked(ref: AgentRef, driver: AgentDriver): Promise<void> {
+    const terminal = await this.assertWritable(ref, driver);
+    if (terminal.status?.state !== "blocked") throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+  }
+
+  async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    try {
+      await this.assertWritable(ref, ctx.driver);
+    } catch (err) {
+      if (err instanceof ExpectationLost) throw new SubmitRefused("agent-unverified", err.message);
+      throw err;
+    }
     let result: { started?: boolean };
     try {
       result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
@@ -295,7 +338,9 @@ export class HcBackend implements Terminals {
     let active = true;
     let pendingText: string | null = null;
     const assertFingerprint = async (): Promise<void> => {
-      const snapshot = await this.read(ref.target, ANSWER_PANE_LINES, prompt.driver.readRegion);
+      await this.assertBlocked(ref, prompt.driver);
+      const snapshot = await this.read(ref.target, 0, "screen");
+      if (!snapshot.complete) throw new ExpectationLost("the verified prompt screen is incomplete");
       const current = prompt.driver.parseBlockedPane(snapshot.text);
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
@@ -312,6 +357,7 @@ export class HcBackend implements Terminals {
     const write = async (action: () => Promise<void>, terminal = false): Promise<void> => {
       assertActive();
       if (firstWrite) await assertFingerprint();
+      await this.assertBlocked(ref, prompt.driver);
       await action();
       firstWrite = false;
       if (terminal) active = false;
@@ -361,17 +407,20 @@ export class HcBackend implements Terminals {
     const address = addressOf(ref.target);
     return {
       answer: async (choice) => {
+        await this.assertBlocked(ref, prompt.driver);
         await this.json(["keys"], [address, choice]);
         if (prompt.form === "key-confirms") return;
+        await this.assertBlocked(ref, prompt.driver);
         await this.json(["keys"], [address, "enter"]);
       },
     };
   }
 
-  openComposer(ref: AgentRef, _driver: AgentDriver): ComposerChannel {
+  openComposer(ref: AgentRef, driver: AgentDriver): ComposerChannel {
     const address = addressOf(ref.target);
     return {
       backTab: async () => {
+        await this.assertWritable(ref, driver);
         await this.json(["keys"], [address, "shift+tab"]);
       },
     };
