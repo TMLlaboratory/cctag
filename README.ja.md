@@ -121,7 +121,7 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
-| Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて | ✅ 上の表のすべて。ただし複数選択の質問への自由記述の回答は端末で行う |
+| Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて | ✅ 上の表の機能。確認できないプロンプトへの回答と、複数選択の質問への自由記述は端末で行う |
 | Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える | — |
 | oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） | — |
 
@@ -130,9 +130,11 @@ Herdr appは同じターミナルを表示するので、cctagが入力した内
 起動しない。coreのソケット（`HC_SOCKET`、未設定なら`~/.local/state/herdr-core/default/default.sock`）に
 接続できないときは、herdr-coreが動いていないと報告する。coreは、Herdr app・launchd・`hc server start`の
 いずれかで自分で起動する。coreは起動した側の環境変数を受け継ぎ、すべてのターミナルに渡すためである。
-状態はClaude Codeがcoreに報告する値を使い、トランスクリプトはClaude Codeが実行中のセッションごとに書く
-`~/.claude/sessions/<pid>.json`から特定する。`hc`はEnterを押さずに文字を入力できないため、
-複数選択の質問への自由記述の回答は送らず、端末で答えるよう案内する。
+
+cctagが一覧に出すのは、前景プロセスが`claude`か`claude-code`で、状態の`app`が未報告か`claude-code`であり、
+セッションファイルを読み取れるローカルのClaude Code端末である。ファイルにPIDがあれば、前景のPIDと一致することが条件になる。
+書き込みにはファイルに記録されたPIDと開始時刻が必要で、書き込み直前にPID・セッションID・開始時刻を操作開始時の値と照合する。
+詳細は[herdr-coreの検出と書き込み](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows)を参照（英語）。
 
 Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
 `omp`では、プロセスが書き込みで開いているtranscriptも検証する。端末に書き込む直前にも本人性を確認し直す。
