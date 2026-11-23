@@ -58,3 +58,11 @@ legacy shell startup rows are omitted.
 
 - `hc-question.screen.json` — single-select question with the qa-guide pane to its right; the core reported `status.state: blocked`.
 - `hc-plan-approval.screen.json` — the plan-approval menu (`Ready to code?`); the core reported `blocked` with the message `approve plan`.
+
+- `hc-alternate-japanese-suggestion.ansi.json` contains a sanitized read-only
+  `observeHcScreen` paint from a live named Claude Code fullscreen session on
+  2026-11-24 (#77). The 119-column, 70-row geometry, composer rules, dim
+  suggestion row, and visible caret at row 65, column 3 are preserved. The
+  inactive screen and preceding content were blanked, footer text was
+  replaced in place, and the session name, window title and status metadata
+  were sanitized.

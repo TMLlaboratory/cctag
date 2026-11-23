@@ -12,6 +12,10 @@ const plainNamedRule = stripVTControlCharacters(namedRule);
 const alternateCapture: { cols: number; rows: number; frame: string } = JSON.parse(
   readFileSync(new URL("./__fixtures__/hc-alternate-native-composer.ansi.json", import.meta.url), "utf8"),
 );
+const japaneseSuggestion: { cols: number; rows: number; frame: string } = JSON.parse(
+  readFileSync(new URL("./__fixtures__/hc-alternate-japanese-suggestion.ansi.json", import.meta.url), "utf8"),
+);
+const suggestionText = "それでお願い、A4横1ページで作って";
 
 for (const [backend, parse, width] of [
   ["hc", parseClaudeHcComposer, 200],
@@ -86,6 +90,37 @@ test("hc reads the native caret in the captured named alternate screen", () => {
   assert.equal(parsed.caret, 0);
   assert.match(parsed.frame, / test-name ─/u);
   assert.match(frame, /Update available/u);
+});
+
+test("hc reads the captured Japanese suggestion at its native caret", () => {
+  const { frame, cols, rows } = japaneseSuggestion;
+  const parsed = parseClaudeHcComposer(frame, cols, rows);
+  assert.ok(parsed?.nativeCaret && parsed.idle && parsed.nativeProbeFits);
+  assert.equal(parsed.draft, suggestionText);
+  assert.equal(parsed.caret, 0);
+  assert.equal(parsed.rawRow, `❯\u00a0\x1b[0m\x1b[2m${suggestionText}\x1b[0m`);
+});
+
+test("hc maps fullwidth symbols, katakana and halfwidth kana to native caret columns", () => {
+  const { frame, cols, rows } = japaneseSuggestion;
+  const draft = "ー・！Ａｱ｡￥";
+  const paint = frame.replace(suggestionText, draft);
+  const atColumn = (column: number) => parseClaudeHcComposer(
+    paint.replace("\x1b[65;3H", `\x1b[65;${column}H`), cols, rows,
+  );
+  for (const [caret, column] of [3, 5, 7, 9, 11, 12, 13, 15].entries()) {
+    const parsed = atColumn(column);
+    assert.equal(parsed?.draft, draft);
+    assert.equal(parsed.caret, caret);
+  }
+  for (const column of [4, 6, 8, 10, 14]) assert.equal(atColumn(column), null);
+});
+
+test("hc refuses emoji and combining sequences in the native composer", () => {
+  const { frame, cols, rows } = japaneseSuggestion;
+  for (const draft of ["🚀", "か\u3099", "は\u309a", "ﾞ", "ﾟ", "ｶﾞ", "ﾊﾟ"]) {
+    assert.equal(parseClaudeHcComposer(frame.replace(suggestionText, draft), cols, rows), null, draft);
+  }
 });
 
 test("hc refuses incomplete or ambiguous alternate screen cursor evidence", () => {

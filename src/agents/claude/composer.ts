@@ -22,7 +22,7 @@ const ALTERNATE_SCREEN = /\x1b\[\?(?:47|1047|1049)h/u;
 const ALTERNATE_PAINT = /^\x1b\[\?1049h\x1b\[!p(\x1b\[\?25l)?(?:\x1b\[\?(?:1000|1002|1003|1004|1006|2004|2031)h)*\x1b\[3g(?:\x1b\[\d+G\x1bH)*\x1b\[H/u;
 const ALTERNATE_TRAILER = /^\x1b\[>4;2m\x1b\[\d+;\d+H\x1b\[0m(?:\x1b\[=\d+;\d+u)?(?:\x1b\(B)?(?:\x1b\]2;[^\p{Cc}]*\x1b\\)?(?:\x1b\[\?9001l)?\x1b\]7501;[^\p{Cc}]*\x1b\\$/u;
 const NATIVE_INPUT_STYLE = /\x1b\[(?:0|2|38;2;\d+;\d+;\d+)m/g;
-const NATIVE_INPUT_TEXT = /^[\x20-\x7e\u3000-\u303e\u3041-\u3096\u30a1-\u30fa\u3400-\u4dbf\u4e00-\u9fff]*$/u;
+const NATIVE_INPUT_TEXT = /^[\x20-\x7e\u3000-\u303e\u3041-\u3096\u30a0-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff01-\uff9d\uffe0-\uffe6]*$/u;
 
 export function parseClaudeHcComposer(ansi: string, cols: number, rows?: number): ClaudeComposer | null {
   if (!ansi.startsWith("\x18\x1b[!p") || !ansi.includes("\x1b[H\x1b[2J")) return null;
@@ -67,7 +67,7 @@ function parseFrame(lines: string[], index: number, cols: number, column?: numbe
   let caret: number;
   if (native) {
     draft = parts[0]!.replace(NATIVE_INPUT_STYLE, "");
-    // shortcut: map ASCII and the wide characters from measured CJK suggestions, until other layouts are verified.
+    // shortcut: exclude emoji and combining sequences (including halfwidth voicing marks) until grapheme carets are verified.
     if (!NATIVE_INPUT_TEXT.test(draft)) return null;
     caret = 0;
     let cell = 3;

@@ -160,8 +160,10 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   valid visible footer text. Only the upper rule may contain the session name.
   The caret is verified from inverse video or, on herdr-core, from the cursor
   coordinates in a complete alternate-screen paint that matches the captured
-  layout. Native-caret drafts accept printable ASCII and the supported wide
-  Japanese character ranges. Before writing, cctag requires enough display
+  layout. Native-caret drafts accept printable ASCII and supported Japanese
+  characters, including two-cell fullwidth forms and single-cell halfwidth
+  katakana and punctuation. Halfwidth voicing marks and combining sequences
+  are refused. Before writing, cctag requires enough display
   cells for the probe character and one unpainted space inside the verified
   width. Before stashing a native-caret draft, cctag probes for unpainted
   trailing whitespace and returns the caret to its original position. Each
