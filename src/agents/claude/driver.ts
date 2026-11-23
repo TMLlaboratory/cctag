@@ -292,15 +292,6 @@ export function isClaudeModelSwitchConfirmation(prompt: BlockedPrompt): boolean 
     /^Yes, switch to \S/.test(choices[0]!.label) && choices[1]!.label === "No, go back";
 }
 
-function matchesRequestedModel(request: string, affirmativeLabel: string): boolean {
-  const name = affirmativeLabel.slice("Yes, switch to ".length).toLowerCase();
-  const requested = request.trim().toLowerCase();
-  if (!/^(?:claude )?[a-z]+ \d+(?:\.\d+)*$/.test(name)) return false;
-  // A family label alone cannot tell us whether Claude resolved an alias to this version.
-  return requested === name ||
-    (/^(haiku|sonnet|opus)$/.test(requested) && name === `${requested} 5.5`);
-}
-
 /**
  * The model command's local output does not reliably appear as a transcript
  * turn. Read it from the pane and confirm a model switch the user requested.
@@ -349,8 +340,7 @@ async function runClaudeModelCommand(
     if (menu && menu.choices.length > 0) {
       const parsed = driver.parseBlockedPane(paneText);
       if (hc) {
-        if (parsed.kind !== "permission" || !isClaudeModelSwitchConfirmation(parsed) ||
-            !matchesRequestedModel(argsText, parsed.menu.choices[0]!.label)) return confirmAtTerminal();
+        if (parsed.kind !== "permission" || !isClaudeModelSwitchConfirmation(parsed)) return confirmAtTerminal();
         if (!confirmed) {
           confirmed = true;
           try {

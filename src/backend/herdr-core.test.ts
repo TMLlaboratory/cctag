@@ -491,31 +491,19 @@ test("the Claude model command confirms the captured switch menu once even if it
   });
 });
 
-test("the Claude model command accepts an exact model display label", async () => {
-  await withCore([{ ...CLAUDE, status: "done" }], { screens: [MODEL_SWITCH.text, MODEL_SWITCH.text, ""] }, async (backend, fake) => {
-    const agent = await backend.get("hc:t1");
-    assert.ok(agent);
-    await claudeDriver.runModelCommand!(backend, agent, "Sonnet 5.5");
-    assert.deepEqual(writes(fake).filter(([command]) => command === "keys"), [["keys", "--json", "--", "t1", "1"]]);
-  });
-});
-
-test("the Claude model command leaves ambiguous confirmation to the terminal", async (t) => {
-  for (const [name, request, screens, incomplete] of [
-    ["different requested model", "haiku", [MODEL_SWITCH.text], false],
-    ["unverified alias version", "sonnet", [MODEL_SWITCH.text.replace("5.5", "4.6")], false],
-    ["unresolved model ID", "claude-sonnet-5-5", [MODEL_SWITCH.text], false],
-    ["incomplete candidate", "sonnet", [MODEL_SWITCH.text], true],
-    ["non-model permission", "sonnet", [PLAN_SCREEN.text], false],
-    ["changed screen before confirming", "sonnet", [MODEL_SWITCH.text, PLAN_SCREEN.text], false],
+test("the Claude model command leaves unverified screens to the terminal", async (t) => {
+  for (const [name, screens, incomplete] of [
+    ["incomplete candidate", [MODEL_SWITCH.text], true],
+    ["non-model permission", [PLAN_SCREEN.text], false],
+    ["changed screen before confirming", [MODEL_SWITCH.text, PLAN_SCREEN.text], false],
   ] as const) {
     await t.test(name, async () => {
       await withCore([{ ...CLAUDE, status: "done" }], { screens: [...screens], incomplete }, async (backend, fake) => {
         const agent = await backend.get("hc:t1");
         assert.ok(agent);
-        const result = await claudeDriver.runModelCommand!(backend, agent, request);
+        const result = await claudeDriver.runModelCommand!(backend, agent, "sonnet");
         assert.match(result.reply, /ターミナルで回答/);
-        assert.deepEqual(writes(fake), [["send", "--json", "--", "t1", `/model ${request}`]]);
+        assert.deepEqual(writes(fake), [["send", "--json", "--", "t1", "/model sonnet"]]);
       });
     });
   }
