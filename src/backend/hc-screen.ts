@@ -1,6 +1,8 @@
 import { createConnection } from "node:net";
 
 const MAX_SCREEN_BYTES = 8 * 1024 * 1024;
+// herdr-core splits the initial paint into 16 KiB frames and ends it with its status report.
+const PAINT_END = /\x1b\]7501;[^\x1b]*\x1b\\$/u;
 
 export interface HcObservedScreen<T> {
   terminal: T;
@@ -15,6 +17,7 @@ export function observeHcScreen<T>(path: string, terminal: string): Promise<HcOb
     let framed = false;
     let channel: number | undefined;
     let record: T | undefined;
+    let paint = Buffer.alloc(0);
     const finish = (screen: HcObservedScreen<T> | null) => {
       clearTimeout(timeout);
       socket.destroy();
@@ -51,17 +54,21 @@ export function observeHcScreen<T>(path: string, terminal: string): Promise<HcOb
           if (pending.length < size + 9) return;
           const source = pending.readUInt32LE(0);
           const kind = pending[4];
-          const payload = pending.subarray(9, 9 + size).toString();
+          const payload = pending.subarray(9, 9 + size);
           pending = pending.subarray(9 + size);
           if (source === 0 && kind === 0) {
-            const reply = JSON.parse(payload);
+            const reply = JSON.parse(payload.toString());
             if (reply.id !== 1 || !Number.isSafeInteger(reply.result?.channel) || reply.result.channel <= 0 || !reply.result.terminal) {
               return finish(null);
             }
             channel = reply.result.channel;
             record = reply.result.terminal as T;
           } else if (source === channel && kind === 0 && record) {
-            return finish({ terminal: record, ansi: payload });
+            // Joined as bytes: a frame boundary can split a UTF-8 character.
+            paint = Buffer.concat([paint, payload]);
+            if (paint.length > MAX_SCREEN_BYTES) return finish(null);
+            const ansi = paint.toString();
+            if (PAINT_END.test(ansi)) return finish({ terminal: record, ansi });
           } else if (source === channel && kind === 2) {
             return finish(null);
           }
