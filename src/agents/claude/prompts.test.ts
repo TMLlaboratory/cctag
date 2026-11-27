@@ -1211,7 +1211,9 @@ test("a reworded countdown that wraps is dropped with its wrap", () => {
   const screen = (countdown: string[]) =>
     [
       " Bash command",
-      " │ rm -f $D/*.snap.txt",
+      "╌".repeat(60),
+      " │ echo sample",
+      "╌".repeat(60),
       " │ Dangerous rm operation not ruled out",
       ...countdown,
       " Do you want to proceed?",
@@ -1268,7 +1270,9 @@ test("the auto-deny countdown is dropped however its wrap falls", () => {
   const screen = (countdown: string[]) =>
     [
       " Bash command",
-      " │ rm -f $D/*.snap.txt",
+      "╌".repeat(60),
+      " │ echo sample",
+      "╌".repeat(60),
       " │ Dangerous rm operation",
       ...countdown,
       " Do you want to proceed?",
@@ -1307,4 +1311,21 @@ test("a command that merely mentions the countdown text stays in the prompt", ()
     "   2. No",
   ].join("\n");
   assert.ok(parsePermissionMenu(screen)?.snippet.includes("echo 'Claude Code will automatically deny"));
+});
+
+test("long permission context preserves arguments and ambiguous countdown text", () => {
+  const banner = " ⚠ Claude Code will automatically block this request in 1:56, to avoid holding up an unattended session";
+  const args = [" │ echo 'first argument", "", "", "", "─".repeat(60), " │ " + "sample ".repeat(12), " │ last argument'"];
+  for (const tail of [
+    [banner, " another argument"],
+    [" ⚠ Claude Code sample label 1:56", " another argument"],
+  ]) {
+    const screen = [
+      "─".repeat(60), " Bash command", "╌".repeat(60), ...args, "╌".repeat(60),
+      " │ Dangerous rm operation", ...tail, " Do you want to proceed?", " ❯ 1. Yes", "   2. No",
+    ].join("\n");
+    const snippet = parsePermissionMenu(screen)?.snippet ?? "";
+    assert.ok(snippet.includes(args.join("\n")));
+    assert.ok(snippet.includes(tail.join("\n")));
+  }
 });
