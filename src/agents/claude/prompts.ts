@@ -30,42 +30,44 @@ const CURSOR_LINE_RE = /❯\s*\d+\./;
  * rule characters also keeps it from matching a table border, which carries
  * ├ ┼ ┤ └ ┴ ┘ and so fails the anchored test anyway.
  */
-const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
+const PROMPT_REGION_RULE_RE = /^\s*[─━]{20,}\s*$/;
 
-/**
- * The line Claude Code adds to a permission prompt on an unattended session,
- * `⚠ Claude Code will automatically deny this request in 1:36`, which redraws
- * every second and comes and goes with terminal focus. Left in the snippet it
- * changed the fingerprint on every poll, so one pending prompt read as a chain
- * of prompts answered at the keyboard: each post was marked answered and the
- * same prompt re-posted, and a button press failed its screen check. It is a
- * timer, not part of what is being asked, so it is dropped before the context
- * window is counted — dropped after, its coming and going shifted the window by
- * a line and changed the fingerprint anyway. A pane narrower than the banner
- * wraps it, and the rows that finish its sentence go with it.
- */
-const AUTO_DENY_COUNTDOWN_RE = /^\s*⚠\s*Claude Code will automatically deny this request in \d+:\d{2}\b/;
-const AUTO_DENY_COUNTDOWN_REST = ", to avoid blocking progress on an unattended session";
+const COMMAND_RULE_RE = /^\s*╌{20,}\s*$/;
+const COUNTDOWN_BANNER_RE = /^\s*⚠\s*Claude Code\b/;
+const COUNTDOWN_TEXT_RE = /^⚠ClaudeCodewillautomatically(?:denythisrequestin\d+:[0-5]\d,toavoidblockingprogresson|blockthisrequestin\d+:[0-5]\d,toavoidholdingup)anunattendedsession$/;
 
-function withoutAutoDenyCountdown(lines: string[]): string[] {
-  const kept: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const banner = AUTO_DENY_COUNTDOWN_RE.exec(lines[i]);
-    if (!banner) {
-      kept.push(lines[i]);
-      continue;
-    }
-    // Not "drop the next row": a pane wide enough for the whole banner puts the prompt's own text there.
-    let drawn = lines[i].slice(banner[0].length).trim();
-    while (i + 1 < lines.length) {
-      const next = lines[i + 1].trim();
-      const joined = [`${drawn} ${next}`, `${drawn}${next}`].find((text) => AUTO_DENY_COUNTDOWN_REST.startsWith(text));
-      if (next === "" || joined === undefined) break;
-      drawn = joined;
-      i++;
-    }
-  }
-  return kept;
+function permissionContext(lines: string[], start: number): string[] {
+  let first = start;
+  while (first > 0 && !PROMPT_REGION_RULE_RE.test(lines[first - 1])) first--;
+  let context = lines.slice(first, start);
+
+  let question = start - 1;
+  while (question >= 0 && lines[question].trim() === "") question--;
+  if (lines[question]?.trim() !== "Do you want to proceed?") return context;
+
+  const header = lines.slice(0, question).map((line) => line.trim()).lastIndexOf("Bash command");
+  if (header < 0) return context;
+  const rules = lines.slice(header, question).flatMap((line, i) => COMMAND_RULE_RE.test(line) ? [i] : []);
+  if (rules.length !== 2) return context;
+  const [open, close] = rules;
+  if (close <= open + 1 || first > header + close) return context;
+
+  context = lines.slice(header, start);
+  question -= header;
+
+  const banner = context.findIndex((line, i) => i > close && COUNTDOWN_BANNER_RE.test(line));
+  if (banner <= close + 1 || banner >= question) return context;
+  if (!/^\s*│ Dangerous rm operation\b/.test(context[close + 1])) return context;
+  if (!context.slice(close + 1, banner).every((line) => /^\s*│/.test(line))) return context;
+
+  let end = question;
+  while (end > banner && context[end - 1].trim() === "") end--;
+  const bannerRows = context.slice(banner, end);
+  // A loose warning match could swallow an argument or an unrelated row after it.
+  if (bannerRows.some((line) => line.trim() === "") ||
+      !COUNTDOWN_TEXT_RE.test(bannerRows.join("").replace(/\s+/g, ""))) return context;
+
+  return [...context.slice(0, banner), ...context.slice(end)];
 }
 
 export function permissionAnchorIndex(paneText: string): number {
@@ -77,7 +79,7 @@ export function permissionAnchorIndex(paneText: string): number {
 }
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
-  const lines = withoutAutoDenyCountdown(paneText.split("\n"));
+  const lines = paneText.split("\n");
 
   let cursorIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -105,25 +107,8 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
     if (choices[i].num !== String(i + 1)) return null; // must be consecutive 1..n
   }
 
-  // Reach back for context, but never past the rule that bounds the prompt
-  // region. Eight lines is right for a permission menu, whose subject — the
-  // command being asked about — sits just above the options. A plan approval
-  // has only its one question line, so the same reach crossed the full-width
-  // rule above it and pasted in whatever the agent had last printed.
-  // Observed live in a paired pane: four lines of an unrelated analysis
-  // section, a stray wrap-marker arrow, and the rule itself, all inside the
-  // Slack code block, which read as a garbled prompt.
-  let snippetStart = Math.max(0, start - 8);
-  for (let i = start - 1; i >= snippetStart; i--) {
-    if (PROMPT_REGION_RULE_RE.test(lines[i])) {
-      snippetStart = i + 1;
-      break;
-    }
-  }
-  const snippet = lines
-    .slice(snippetStart, end + 1)
+  const snippet = [...permissionContext(lines, start), ...lines.slice(start, end + 1)]
     .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
   return { choices, snippet };

@@ -346,7 +346,10 @@ export function permissionBlocks(paneId: string, promptId: number, menu: Permiss
   const header = headerOverride ?? (danger ? "🚨 許可リクエスト（危険な可能性）" : "⚠️ 許可リクエスト");
   const blocks: unknown[] = [
     { type: "section", text: { type: "mrkdwn", text: `*${header}*` } },
-    { type: "section", text: { type: "mrkdwn", text: "```\n" + menu.snippet.slice(0, 2900) + "\n```" } },
+    ...(menu.snippet.match(/[\s\S]{1,2900}/gu) ?? []).map((text) => ({
+      type: "section",
+      text: { type: "plain_text", text, emoji: false },
+    })),
     {
       type: "actions",
       elements: menu.choices.slice(0, 5).map((c) => ({

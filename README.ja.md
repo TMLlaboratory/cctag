@@ -33,13 +33,17 @@ herdrバックエンドを使う構成では、cctagは[herdr](https://herdr.dev
 エージェントの発見、キー入力の注入、状態検知はHerdr経由で行い、ターン出力はエージェント自身の
 構造化されたJSONLトランスクリプトから読み取る。Herdrは各paneで動いている`claude`か`codex`を報告し、
 cctagは対応ドライバを選ぶ。HerdrではClaude CodeとCodex CLIを利用できる。Orcaでの組み合わせは
-[ターミナルバックエンド](#ターミナルバックエンド-herdrとorca)の表を参照。
+[ターミナルバックエンド](#ターミナルバックエンド-herdrとorcaとherdr-core)の表を参照。
 
 cctagはherdrに加えて[Orca](https://github.com/stablyai/orca)のターミナルで動くエージェントも、
 同じSpokeから操作できる。`@cctag connect`では、Orca上のClaude Codeと`omp`は
 同じ`orca · <ディレクトリ名>`グループに表示され、`omp`の行には`[omp]`が付く。
 herdrのpane IDと既存のペアリング形式は変わらない。
-詳細は[ターミナルバックエンド](#ターミナルバックエンド-herdrとorca)を参照。
+
+[herdr-core](https://github.com/herdrdev/herdr-core)（Herdr appの土台で、herdrのTUIとは別の製品）の
+ターミナルで動くClaude Codeも、`hc` CLI経由で同じSpokeから操作できる。これらは
+`herdr-core · <ディレクトリ名>`グループに表示される。
+詳細は[ターミナルバックエンド](#ターミナルバックエンド-herdrとorcaとherdr-core)を参照。
 
 ## 実際の使われ方
 
@@ -78,14 +82,14 @@ cctagはスレッドを、**すでに動いている**エージェントのセ�
 場つなぎの表示ではなく意図的な宣言で、インターフェースはまだ動く。それが問題になるなら
 バージョンを固定して使うこと。
 
-テキスト入出力のターンは対応する組み合わせで動作する: Claude CodeはherdrまたはOrca、Codex CLIはherdrまたはOrca、
+テキスト入出力のターンは対応する組み合わせで動作する: Claude Codeはherdr・Orca・herdr-core、Codex CLIはherdrまたはOrca、
 `omp`はOrca。Claude CodeとCodex CLIの対応する権限確認・コマンド承認プロンプトはSlackのボタンにでき、
 Slack上または端末から人が回答できる。Orca上のCodex CLIの承認と`omp`の質問や承認はSlackに端末で回答するよう通知され、Slackからは
 回答できない。
 
 Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを回答後にしかセッショントランスクリプトへ
 書き込まない（Claude Codeの`AskUserQuestion`は結果とアトミックに書き込まれる）。そのためcctagは、
-選択中のバックエンド（herdrまたはOrca）経由でターミナル画面から読む。`omp`は別経路で端末回答専用の
+選択中のバックエンド（herdr・Orca・herdr-core）経由でターミナル画面から読む。`omp`は別経路で端末回答専用の
 通知を出す。`src/agents/claude/prompts.ts`、`src/agents/codex/prompts.ts`、
 `src/agents/omp/prompts.ts`参照。
 
@@ -108,18 +112,27 @@ Claude CodeとCodex CLIは、保留中の権限確認・質問プロンプトを
 
 未対応機能は黙って失敗せず、その旨を返信する（例: Codexの`@cctag mode plan`、`omp`の`@cctag model`）。
 
-### ターミナルバックエンド: herdrとOrca
+### ターミナルバックエンド: herdrとOrcaとherdr-core
 
-1つのSpokeで両方のバックエンドを同時に使える。各バックエンドは、設定したパスにCLIがあれば有効になる。
+1つのSpokeで3つのバックエンドを同時に使える。各バックエンドは、設定したパスにCLIがあれば有効になる。
 変数を設定していない場合は`CCTAG_HERDR_BIN`が`/opt/homebrew/bin/herdr`、
-`CCTAG_ORCA_BIN`が`/opt/homebrew/bin/orca`を参照する。変数を空文字にすると、そのバックエンドは無効になる。
-少なくとも1つのバックエンドが有効でなければ起動できない。
+`CCTAG_ORCA_BIN`が`/opt/homebrew/bin/orca`、`CCTAG_HC_BIN`が`~/.local/bin/hc`を参照する。
+変数を空文字にすると、そのバックエンドは無効になる。少なくとも1つのバックエンドが有効でなければ起動できない。
 
-| | herdr | Orca |
-|---|:---:|:---:|
-| Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて |
-| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える |
-| oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） |
+| | herdr | Orca | herdr-core |
+|---|:---:|:---:|:---:|
+| Claude Code | ✅ 上の表のすべて | ✅ 上の表のすべて | ✅ 上の表のすべて。ただし複数選択の質問への自由記述の回答は端末で行う |
+| Codex CLI | ✅ | ✅ ターン・出力・状態。Codexが自前のapp-serverで動いていて（Orcaの既定の設定「Run each Codex terminal on its own server」）、最初のメッセージを送った後に限る。承認はSlackに「端末で答える」案内として出し、`model`は端末で変える | — |
+| oh-my-pi（`omp`） | — | ✅ ターン・出力・状態・`.cctag/outbox`へのファイル送信。受信添付はパスとして渡す。質問と承認は端末回答専用の通知（Slack回答、`mode`・`plan`・`model`は未対応） | — |
+
+herdr-coreはherdrのTUIとはエージェントを共有しない別のサーバである。cctagは`hc`でcoreとやりとりし、
+Herdr appは同じターミナルを表示するので、cctagが入力した内容はHerdr appにも表示される。cctagはcoreを
+起動しない。coreのソケット（`HC_SOCKET`、未設定なら`~/.local/state/herdr-core/default/default.sock`）に
+接続できないときは、herdr-coreが動いていないと報告する。coreは、Herdr app・launchd・`hc server start`の
+いずれかで自分で起動する。coreは起動した側の環境変数を受け継ぎ、すべてのターミナルに渡すためである。
+状態はClaude Codeがcoreに報告する値を使い、トランスクリプトはClaude Codeが実行中のセッションごとに書く
+`~/.claude/sessions/<pid>.json`から特定する。`hc`はEnterを押さずに文字を入力できないため、
+複数選択の質問への自由記述の回答は送らず、端末で答えるよう案内する。
 
 Orcaでは、cctagはエージェントのpane key・プロセス開始時刻・フォアグラウンドプロセスグループから本人性を確認する。
 `omp`では、プロセスが書き込みで開いているtranscriptも検証する。端末に書き込む直前にも本人性を確認し直す。
@@ -149,7 +162,7 @@ OrcaはClaude Codeの灰色の「次のプロンプトの提案」を、人が�
   唯一のSocket Mode接続を保持し、イベントのルーティングだけを行う — 誰のコーディングエージェント
   セッションも実行しないし、見ることもない。各Spokeは認証済みWebSocketでHubに接続し、
   有効にしたターミナルバックエンド経由でローカルのエージェントを操作する。対応する組み合わせは、
-  Claude CodeがherdrまたはOrca、Codex CLIがherdrまたはOrca、`omp`がOrca。
+  Claude Codeがherdr・Orca・herdr-core、Codex CLIがherdrまたはOrca、`omp`がOrca。
 
 **すでに誰かが運用しているHubに参加できる場合**は、下記の
 [Spoke利用者向け](#spoke利用者向け)だけで十分 — そこまで読み飛ばして構わない。Slack app関連の
@@ -158,8 +171,8 @@ OrcaはClaude Codeの灰色の「次のプロンプトの提案」を、人が�
 ## 必要なもの
 
 - **Node.js 20以上** — Hub・Spoke・スタンドアロンいずれの場合もマシン全てで必要。
-- **[herdr](https://herdr.dev) と [Orca](https://github.com/stablyai/orca) のどちらか、または両方**。
-  Claude Codeはどちらでも、Codex CLIはherdrで、`omp`はOrcaで使える。これらのセッションを実行する
+- **[herdr](https://herdr.dev)・[Orca](https://github.com/stablyai/orca)・[herdr-core](https://github.com/herdrdev/herdr-core) のうち少なくとも1つ**。
+  Claude Codeはどれでも、Codex CLIはherdrで、`omp`はOrcaで使える。これらのセッションを実行する
   マシン（スタンドアロン、または各Spoke）でのみ必要。Hub専用マシンはエージェントを実行しないため、
   どちらのバックエンドも不要。
 - **Slack appを作成できるワークスペース**（Socket Mode使用、公開サーバーやポート開放は不要）

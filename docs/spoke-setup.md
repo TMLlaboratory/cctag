@@ -23,19 +23,23 @@ git clone https://github.com/TMLlaboratory/cctag.git
 cd cctag
 npm install
 cp .env.example .env
-$EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN, CCTAG_ORCA_BIN
+$EDITOR .env   # CCTAG_HUB_URL, CCTAG_SPOKE_TOKEN, CCTAG_OWNER_USER_ID, CCTAG_HERDR_BIN, CCTAG_ORCA_BIN, CCTAG_HC_BIN
 npm run build
 npm run start:spoke   # or dev:spoke while iterating
 ```
 
-`CCTAG_HERDR_BIN` and `CCTAG_ORCA_BIN` select local CLI paths. When unset, the
-defaults are `/opt/homebrew/bin/herdr` and `/opt/homebrew/bin/orca`. A selected
+`CCTAG_HERDR_BIN`, `CCTAG_ORCA_BIN` and `CCTAG_HC_BIN` select local CLI paths.
+When unset, the defaults are `/opt/homebrew/bin/herdr`, `/opt/homebrew/bin/orca`
+and `~/.local/bin/hc`. A selected
 path that does not exist disables that backend; setting its variable to an
 empty string disables it explicitly. At least one backend must be available.
 Claude Code on Orca has the same cctag features as on Herdr. Orca also supports
 `omp` text turns, output, and status; OMP questions and approvals are reported
 in Slack but must be answered in the terminal. Codex CLI on Orca is listed once
 it has had its first message, with approvals and `model` in the terminal.
+On herdr-core, cctag drives Claude Code only, and it never starts the core:
+start it yourself (the Herdr app, launchd or `hc server start`) before the
+Spoke, or the backend reports that herdr-core is not running.
 
 Running from a binary install instead of this checkout? Put the same
 values at `~/.config/cctag/config.env` (see the config-discovery note under

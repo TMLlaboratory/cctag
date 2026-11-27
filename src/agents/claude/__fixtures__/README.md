@@ -40,3 +40,8 @@ Free-text frames, captured on 2026-10-10 from one live Claude Code 2.1.292 sessi
 Named-session frame, captured on 2026-10-12 from a live Claude Code 2.1.296 session on herdr 0.9.3 (detection manifest 2026.09.11.1):
 
 - `question-named-session-herdr.screen.json` — a single-select question in a session named `cctag`. The dialog's bottom rule carries the session name, and herdr reported the pane `idle` while this was on screen (issue #46). Stores the raw stdout of `herdr pane read <pane> --source visible` as `text`, cut to the dialog's 15 rows; the rows above it were the session's own transcript.
+
+herdr-core frames, captured on 2026-11-06 from live Claude Code 2.1.318 sessions in throwaway herdr-core terminals (hc 0.1.18, qa-guide installed). Each stores `text`, `complete` and `how` from `hc read <terminal> --json` (the visible screen, 120 rows). Redactions keep each row's display width: `<plan>` replaces the account-tier label, `<user>` the local user name, and `<hook-note>` a local Stop-hook message about another repository.
+
+- `hc-question.screen.json` — single-select question with the qa-guide pane to its right; the core reported `status.state: blocked`.
+- `hc-plan-approval.screen.json` — the plan-approval menu (`Ready to code?`); the core reported `blocked` with the message `approve plan`.
