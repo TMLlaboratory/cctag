@@ -1625,7 +1625,13 @@ export class TurnEngine {
    * those come from this turn's own transcript, so they're never ambiguous.
    */
   private async outboxOwnership(pairing: Pairing, cwd: string): Promise<{ sole: true } | { sole: false; reason: string }> {
-    const result = await this.terminals.list().catch(() => null);
+    const needsCore = backendForTarget(pairing.paneId) === "herdr-core" ||
+      this.pairings.list().some((p) => backendForTarget(p.paneId) === "herdr-core");
+    const result = await this.terminals.list(needsCore ? "herdr-core" : undefined).catch(() => null);
+    const pairings = this.pairings.list();
+    if (!needsCore && pairings.some((p) => backendForTarget(p.paneId) === "herdr-core")) {
+      return { sole: false, reason: "接続先が変更されたため、宛先スレッドを確認できませんでした" };
+    }
     if (!result || !result.complete) {
       // Ownership can't be established, so it can't be assumed either.
       const backendNames = result?.failures.map((failure) => failure.backend).join(", ");
@@ -1636,7 +1642,7 @@ export class TurnEngine {
       };
     }
     const cwdByPane = new Map(result.agents.map((a) => [a.ref.target, a.cwd]));
-    const sharing = this.pairings.list().filter((p) => p.key !== pairing.key && cwdByPane.get(p.paneId) === cwd);
+    const sharing = pairings.filter((p) => p.key !== pairing.key && cwdByPane.get(p.paneId) === cwd);
     if (sharing.length === 0) return { sole: true };
     return { sole: false, reason: "同じディレクトリに接続されたスレッドが他にもあり、どのスレッド宛てか判別できません" };
   }

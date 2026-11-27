@@ -1,6 +1,6 @@
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 import type { AgentDriver } from "../agents/driver.js";
-import { BackendUnavailable, type AgentInfo, type BackendName, type AgentRef, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
+import { BackendUnavailable, CoreNotRunning, type AgentInfo, type BackendName, type AgentRef, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
 import { backendForTarget } from "./target.js";
 
 export * from "./types.js";
@@ -43,7 +43,7 @@ export interface ComposerChannel {
 }
 
 export interface Terminals {
-  list(): Promise<ListResult>;
+  list(requiredBackend?: BackendName): Promise<ListResult>;
   get(target: string): Promise<AgentInfo | null>;
   exists(target: string): Promise<boolean>;
   read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot>;
@@ -83,11 +83,14 @@ export function createTerminals(backends: TerminalBackends): Terminals {
   };
 
   return {
-    async list(): Promise<ListResult> {
+    async list(requiredBackend?: BackendName): Promise<ListResult> {
       const agents: AgentInfo[] = [];
       const failures: ListResult["failures"] = [];
       const notices: string[] = [];
-      let complete = true;
+      let complete = !requiredBackend || backends[requiredBackend] !== null;
+      if (!complete && requiredBackend) {
+        failures.push({ backend: requiredBackend, reason: "Backend is disabled" });
+      }
       const results = await Promise.all(
         enabled.map(async ([name, backend]) => {
           try {
@@ -99,6 +102,8 @@ export function createTerminals(backends: TerminalBackends): Terminals {
       );
       for (const item of results) {
         if (!item.ok) {
+          if (item.name === "herdr-core" && item.error instanceof CoreNotRunning &&
+              enabled.length > 1 && requiredBackend !== item.name) continue;
           failures.push({ backend: item.name, reason: errorMessage(item.error) });
           complete = false;
           continue;

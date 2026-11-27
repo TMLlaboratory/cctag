@@ -111,4 +111,5 @@ export class WriteOutcomeUnknown extends Error {
 
 export class UnknownTarget extends Error {}
 export class BackendUnavailable extends Error {}
+export class CoreNotRunning extends BackendUnavailable {}
 

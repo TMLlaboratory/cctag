@@ -4,12 +4,16 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CommandHandler } from "../commands.js";
+import type { Notifier } from "../notifier.js";
+import type { Pairing, PairingStore } from "../pairing.js";
+import { TurnEngine } from "../turn.js";
 import { claudeDriver } from "../agents/claude/driver.js";
 import { stripSidePane } from "./side-pane.js";
 import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
-import type { SubmitContext } from "./index.js";
+import { createTerminals, type SubmitContext, type Terminals } from "./index.js";
 import type { VerifiedPrompt } from "./prompt.js";
-import { BackendUnavailable, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
+import { BackendUnavailable, CoreNotRunning, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
 
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
@@ -200,7 +204,8 @@ test("a stopped core is reported as unavailable and hc is never run, so cctag ca
   const fake = fakeHc([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }]);
   try {
     const backend = new HcBackend(fake.bin, { socket: fake.socket, sessionsDir: fake.sessionsDir });
-    const result = await backend.list();
+    await assert.rejects(backend.list(), CoreNotRunning);
+    const result = await createTerminals({ herdr: null, orca: null, "herdr-core": backend }).list();
     assert.equal(result.complete, false);
     assert.equal(result.failures[0]?.backend, "herdr-core");
     assert.match(result.failures[0]?.reason ?? "", /not running/);
@@ -381,4 +386,94 @@ test("plan feedback moves to the option, then pastes the feedback with its Enter
       ],
     );
   });
+});
+
+test("installed hc joins discovery only when its socket is active or core is required", async () => {
+  const fake = fakeHc([{ address: "t1", agent: "claude-code", status: "idle", pid: 101 }]);
+  try {
+    const core = new HcBackend(fake.bin, { socket: fake.socket, sessionsDir: fake.sessionsDir });
+    const legacyAgent = (target: string, backend: "herdr" | "orca") => ({
+      ref: { target, pid: null, processStartedAt: null },
+      backend,
+      agent: "claude" as const,
+      cwd: "/sample",
+      sessionId: "sample",
+      evidence: { kind: "classified" as const, status: "idle" as const },
+      terminalTitle: null,
+      terminalId: target,
+      displayId: target,
+    });
+    const herdrAgent = legacyAgent("w1:p1", "herdr");
+    const orcaAgent = legacyAgent("orca:w1:p1", "orca");
+    const mock = (agent: typeof herdrAgent): Terminals => ({
+      async list() { return { agents: [agent], failures: [], complete: true, notices: [] }; },
+      async get() { return agent; },
+      async exists() { return true; },
+      async read() { throw new Error("unexpected read"); },
+      async submit() { throw new Error("unexpected submit"); },
+      openAnswer() { throw new Error("unexpected answer"); },
+      openModelAnswer() { throw new Error("unexpected model answer"); },
+      openBlind() { throw new Error("unexpected blind answer"); },
+      openComposer() { throw new Error("unexpected composer"); },
+    });
+    const terminals = createTerminals({ herdr: mock(herdrAgent), orca: mock(orcaAgent), "herdr-core": core });
+    assert.deepEqual(await terminals.list(), {
+      agents: [herdrAgent, orcaAgent], failures: [], complete: true, notices: [],
+    });
+    assert.equal(await terminals.get(herdrAgent.ref.target), herdrAgent);
+    assert.equal(await terminals.get(orcaAgent.ref.target), orcaAgent);
+    assert.equal((await terminals.list("herdr-core")).complete, false);
+
+    const pairings: Pairing[] = [];
+    const store = {
+      list: () => pairings,
+      byPane: () => undefined,
+      add: (pairing: Pairing) => pairings.push(pairing),
+    } as unknown as PairingStore;
+    const replies: string[] = [];
+    const picker: unknown[] = [];
+    const uploads: string[] = [];
+    const notifier: Notifier = {
+      async postReply(_channel, _thread, message) { replies.push(message); },
+      async postMessage(_channel, _thread, _message, blocks) {
+        picker.push(...(blocks ?? []));
+        return { async update() {} };
+      },
+      async uploadFile(_channel, _thread, file) { uploads.push(file.filename); },
+    };
+    const engine = new TurnEngine(terminals, notifier, {
+      turnTimeoutMs: 1000, pollIntervalMs: 10, limits: { maxFileBytes: 1024, maxFileCount: 1 },
+    }, store);
+    const commands = new CommandHandler(terminals, store, engine, notifier, "owner", ["herdr", "orca", "herdr-core"]);
+    const mention = { channel: "channel", threadTs: "1.1", userId: "owner", ts: "1.2" };
+    await commands.handleMention({ ...mention, text: "list" });
+    assert.match(replies.at(-1) ?? "", /\/sample/);
+    assert.doesNotMatch(replies.at(-1) ?? "", /不完全|herdr-core/);
+    await commands.handleMention({ ...mention, text: "connect" });
+    assert.ok(JSON.stringify(picker).includes(orcaAgent.ref.target));
+    await commands.handlePairSelect({ ...mention, terminalId: orcaAgent.ref.target });
+    const pairing = pairings[0];
+    assert.equal(pairing?.paneId, orcaAgent.ref.target);
+
+    const cwd = join(fake.sessionsDir, "sample");
+    const outbox = join(cwd, ".cctag", "outbox");
+    mkdirSync(outbox, { recursive: true });
+    writeFileSync(join(outbox, "sample.txt"), "sample");
+    await engine.uploadOutboxAdditions(pairing, cwd, {}, []);
+    assert.deepEqual(uploads, ["sample.txt"]);
+    pairings.push({ ...pairing, key: "other", paneId: "hc:t1" });
+    await engine.uploadOutboxAdditions(pairing, cwd, {}, []);
+    assert.deepEqual(uploads, ["sample.txt"]);
+    assert.match(replies.at(-1) ?? "", /herdr-coreのインスタンス一覧/);
+    assert.deepEqual(fake.calls(), []);
+
+    await fake.startCore();
+    assert.equal((await terminals.list()).agents.at(-1)?.ref.target, "hc:t1");
+    const brokenCore = new HcBackend(join(fake.sessionsDir, "missing-hc"), { socket: fake.socket });
+    const incomplete = await createTerminals({ herdr: mock(herdrAgent), orca: null, "herdr-core": brokenCore }).list();
+    assert.equal(incomplete.complete, false);
+    assert.equal(incomplete.failures[0]?.backend, "herdr-core");
+  } finally {
+    await fake.cleanup();
+  }
 });

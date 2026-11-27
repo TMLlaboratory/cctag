@@ -19,6 +19,7 @@ import { stripSidePane } from "./side-pane.js";
 import { backendForTarget } from "./target.js";
 import {
   BackendUnavailable,
+  CoreNotRunning,
   ExpectationLost,
   SubmitRefused,
   UnknownTarget,
@@ -86,16 +87,22 @@ export function defaultHcSocket(env: NodeJS.ProcessEnv = process.env): string {
   return env.HC_SOCKET || join(homedir(), ".local", "state", "herdr-core", "default", "default.sock");
 }
 
-function probeSocket(path: string): Promise<boolean> {
-  return new Promise((resolve) => {
+function probeSocket(path: string): Promise<void> {
+  return new Promise((resolve, reject) => {
     const socket = createConnection({ path });
-    const done = (ok: boolean) => {
+    socket.setTimeout(2_000, () => {
       socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(2_000, () => done(false));
-    socket.once("connect", () => done(true));
-    socket.once("error", () => done(false));
+      reject(new BackendUnavailable(`herdr-core socket probe timed out: ${path}`));
+    });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve();
+    });
+    socket.once("error", (err: NodeJS.ErrnoException) => {
+      reject(err.code === "ENOENT" || err.code === "ECONNREFUSED"
+        ? new CoreNotRunning(`herdr-core is not running (nothing listens on ${path}); cctag does not start it`)
+        : new BackendUnavailable(err.message));
+    });
   });
 }
 
@@ -141,9 +148,7 @@ export class HcBackend implements Terminals {
    * `<hc from=…>`, which also stops slash commands from working.
    */
   private async raw(args: string[]): Promise<string> {
-    if (!(await probeSocket(this.socket))) {
-      throw new BackendUnavailable(`herdr-core is not running (nothing listens on ${this.socket}); cctag does not start it`);
-    }
+    await probeSocket(this.socket);
     const env = { ...process.env };
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
@@ -208,8 +213,10 @@ export class HcBackend implements Terminals {
   async list(): Promise<ListResult> {
     let listed: HcListedTerminal[];
     try {
-      listed = (await this.json<{ terminals?: HcListedTerminal[] }>(["ls"])).terminals ?? [];
+      listed = (await this.json<{ terminals: HcListedTerminal[] }>(["ls"])).terminals;
+      if (!Array.isArray(listed)) throw new BackendUnavailable("hc ls did not return a terminal list");
     } catch (err) {
+      if (err instanceof CoreNotRunning) throw err;
       return { agents: [], failures: [{ backend: "herdr-core", reason: errorMessage(err) }], complete: false, notices: [] };
     }
     // Remote machines' terminals (`machine/t7`) belong to the Spoke on that machine.
