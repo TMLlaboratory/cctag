@@ -12,9 +12,9 @@ npm run build
 Those four are exactly what CI runs on every pull request, so a green local run
 means a green CI run. There is no linter to satisfy.
 
-Nothing here needs a Slack workspace, a running herdr, or a running Orca: the
-tests drive both terminal backends through fakes of their CLIs (`herdr` and
-`orca`), and nothing in the suite starts a real one. That is also the limit of
+Nothing here needs a Slack workspace, a running herdr, Orca or herdr-core: the
+tests drive the terminal backends through fakes of their CLIs (`herdr`, `orca`
+and `hc`), and nothing in the suite starts a real one. That is also the limit of
 what the suite can tell you — see *What tests can't cover* below.
 
 `npm test` passes a glob to `node --test`, which only expands it on **Node 21+**,
@@ -48,7 +48,8 @@ Roughly half of what cctag does can only be verified against a live pane, and
 reviewers cannot check it for you:
 
 - **Anything read off the screen.** Permission and question dialogs are parsed
-  from the pane (`herdr pane read`, or `orca terminal read --screen` on Orca),
+  from the pane (`herdr pane read`, `orca terminal read --screen` on Orca, or
+  `hc read` on herdr-core),
   because none of the agents writes a pending prompt to its transcript until
   after it is answered. The rendering changes without notice —
   a multi-select question broke this way, because a checkbox appears on the
@@ -59,10 +60,15 @@ reviewers cannot check it for you:
   state from prioritized detection rules that ship in a remotely-updated
   manifest, so its answers can change with no herdr release. `herdr agent
   explain <pane> --json` shows which rule won, which is the fastest way to tell a
-  cctag bug from a herdr one.
+  cctag bug from a herdr one. herdr-core instead takes status only from what the
+  agent reports, so a version of the agent that reports differently — or not
+  at all — changes what cctag sees.
 - **Anything about keystrokes actually landing.** Submitting text and its Enter
   used to be two calls and raced the TUI's paste handling; several fixes in this
-  area are only meaningful against real hardware.
+  area are only meaningful against real hardware. On herdr-core, `hc send`
+  pastes and presses Enter after a pause in typing, and `hc keys` presses named
+  keys only; how those land in a given agent version is something only a live
+  terminal shows.
 
 Sending an unintended keystroke into someone's terminal is the worst failure
 this project has. When cctag cannot read a screen, the correct behavior is to

@@ -1,4 +1,5 @@
 import type { BackendName } from "./types.js";
+import type { SubmitOutcome } from "./index.js";
 import {
   EMPTY_SUBMIT_COMPOSER_STATE,
   SubmitRefused,
@@ -7,6 +8,8 @@ import {
   type SubmitComposerState,
   WriteOutcomeUnknown,
 } from "./types.js";
+
+const STASH_RETURN_UNVERIFIED = "戻ったか確認できません。端末で確認し、戻っておらず入力欄が空（提案も表示されていない）のときだけ Ctrl+S を押してください。";
 
 export function submitRefusedText(
   reason: SubmitRefused["reason"],
@@ -20,6 +23,9 @@ export function submitRefusedText(
       break;
     case "draft":
       message = `⚠️ ${backend} の入力欄に未送信の文字があります。送信していません。ターミナルで確認してください。`;
+      break;
+    case "existing-stash":
+      message = `⚠️ ${backend} に退避済みの書きかけがあります。送信していません。端末で確認してください。`;
       break;
     case "probe-unverified":
       message = `⚠️ ${backend} の入力欄が提案か書きかけかを確かめられなかったため、送信していません。`;
@@ -36,6 +42,15 @@ export function submitRefusedText(
     case "agent-changed":
       message = `⚠️ ${backend} の接続先エージェントが切り替わったため、送信しませんでした。再度送信してください。`;
       break;
+    case "agent-unverified":
+      message = `⚠️ ${backend} の接続先を確認するためのプロセス情報が不足しています。送信していません。Claude Code を新しい版に更新するか、端末から入力してください。`;
+      break;
+    case "foreground-unverified":
+      message = `⚠️ ${backend} の端末で動いている Claude Code のプロセスを確認できなかったため、送信していません。端末から入力してください。`;
+      break;
+    case "legacy-claude-images":
+      message = "⚠️ 旧 Herdr の Claude Code では、画像の自動変換で送信が止まることがあるため、画像付きのメッセージは送信していません。端末から画像を送るか、画像を外して Slack から送り直してください。";
+      break;
     case "cancelled":
       message = `⚠️ ${backend} への送信を中止しました。`;
       break;
@@ -43,27 +58,36 @@ export function submitRefusedText(
       message = UNSENDABLE_TEXT_MESSAGE;
       break;
   }
-  return withComposerState(message, composer);
+  return withComposerState(message, composer, backend);
 }
 
-export function writeOutcomeUnknownText(error: WriteOutcomeUnknown): string {
-  return withComposerState(WRITE_OUTCOME_UNKNOWN_MESSAGE, error.composer);
+export function writeOutcomeUnknownText(error: WriteOutcomeUnknown, backend: BackendName): string {
+  return withComposerState(WRITE_OUTCOME_UNKNOWN_MESSAGE, error.composer, backend);
 }
 
 export function draftStashedText(backend: BackendName): string {
   return `📥 ${backend} の入力欄の書きかけを一時退避して送りました。Claude Code 2.1.287 では送信の後に入力欄へ戻ります。戻っていなければ、入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。`;
 }
 
-function withComposerState(message: string, composer: SubmitComposerState): string {
+export function submitDraftNotice(outcome: SubmitOutcome, backend: BackendName): string {
+  if (!outcome.draftStashed) return "";
+  return backend === "orca" ? draftStashedText(backend) : `⚠️ ${backend} は入力を受け付けました。退避した書きかけが${STASH_RETURN_UNVERIFIED}`;
+}
+
+function withComposerState(message: string, composer: SubmitComposerState, backend: BackendName): string {
   const notes: string[] = [];
   if (composer.probe !== null) {
-    notes.push(`確かめのために打った \`${composer.probe}\` が入力欄に1文字残っているかもしれません。`);
+    notes.push(backend === "orca"
+      ? `確かめのために打った \`${composer.probe}\` が入力欄に1文字残っているかもしれません。`
+      : `入力欄に、確認のために打った \`${composer.probe}\` 1文字や提案の文字が残っている可能性があります。端末で確認してください。`);
   }
 
   if (composer.stash === "uncertain") {
     notes.push(
       "書きかけが Ctrl+S で退避されたかどうかを確かめられませんでした。端末で入力欄を見てください。入力欄に文字があるときに Ctrl+S を押すと、その文字が退避され、前に退避したものは消えます。",
     );
+  } else if (composer.stash === "stashed" && composer.submitUncertain && backend !== "orca") {
+    notes.push(`退避した書きかけが入力欄に${STASH_RETURN_UNVERIFIED}`);
   } else if (composer.stash === "stashed" && composer.submitUncertain) {
     notes.push(
       "送信の前に、入力欄の書きかけを Ctrl+S で退避しました。送信されていれば、Claude Code が入力欄に戻していることがあります（2.1.287）。まず端末で入力欄を見て、書きかけが戻っておらず入力欄が空（打った文字も灰色の提案も無い）のときだけ Ctrl+S を押してください。",

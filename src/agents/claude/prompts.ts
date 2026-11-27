@@ -33,39 +33,48 @@ const CURSOR_LINE_RE = /❯\s*\d+\./;
 const PROMPT_REGION_RULE_RE = /^\s*[─━—-]{20,}\s*$/;
 
 /**
- * The line Claude Code adds to a permission prompt on an unattended session,
- * `⚠ Claude Code will automatically deny this request in 1:36`, which redraws
- * every second and comes and goes with terminal focus. Left in the snippet it
- * changed the fingerprint on every poll, so one pending prompt read as a chain
- * of prompts answered at the keyboard: each post was marked answered and the
- * same prompt re-posted, and a button press failed its screen check. It is a
- * timer, not part of what is being asked, so it is dropped before the context
- * window is counted — dropped after, its coming and going shifted the window by
- * a line and changed the fingerprint anyway. A pane narrower than the banner
- * wraps it, and the rows that finish its sentence go with it.
+ * The countdown Claude Code adds to a permission prompt on an unattended
+ * session (`⚠ Claude Code will automatically block this request in 1:56, to
+ * avoid holding up an unattended session` on 2.1.325), which redraws every
+ * second and comes and goes with terminal focus. It is recognized by its shape
+ * — a `⚠ Claude Code …` row carrying an m:ss timer — rather than by the rest
+ * of its words: the 2.1.281 wording ("deny … blocking progress") stopped
+ * matching once Claude Code reworded it (by 2.1.325), and every pending prompt
+ * read as a new one again.
+ *
+ * Not searched for anywhere on the screen: the description row above the
+ * command is the agent's own text, and a match there would have dropped the
+ * command rows under it from what the approver sees. Only the rows between the
+ * last command or rule row and the options — Claude Code's own banner and
+ * question — are looked at, and the question itself is kept.
  */
-const AUTO_DENY_COUNTDOWN_RE = /^\s*⚠\s*Claude Code will automatically deny this request in \d+:\d{2}\b/;
-const AUTO_DENY_COUNTDOWN_REST = ", to avoid blocking progress on an unattended session";
+const COUNTDOWN_BANNER_RE = /^\s*⚠\s*Claude Code\b.*\b\d+:\d{2}\b/;
+const COMMAND_OR_RULE_ROW_RE = /^\s*[│╌─━]/;
 
-function withoutAutoDenyCountdown(lines: string[]): string[] {
-  const kept: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const banner = AUTO_DENY_COUNTDOWN_RE.exec(lines[i]);
-    if (!banner) {
-      kept.push(lines[i]);
-      continue;
-    }
-    // Not "drop the next row": a pane wide enough for the whole banner puts the prompt's own text there.
-    let drawn = lines[i].slice(banner[0].length).trim();
-    while (i + 1 < lines.length) {
-      const next = lines[i + 1].trim();
-      const joined = [`${drawn} ${next}`, `${drawn}${next}`].find((text) => AUTO_DENY_COUNTDOWN_REST.startsWith(text));
-      if (next === "" || joined === undefined) break;
-      drawn = joined;
-      i++;
+function withoutCountdownBanner(lines: string[]): string[] {
+  let options = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (CURSOR_LINE_RE.test(lines[i])) {
+      options = i;
+      break;
     }
   }
-  return kept;
+  while (options > 0 && NUMBERED_LINE_RE.test(lines[options - 1])) options--;
+  if (options <= 0) return lines;
+
+  let tail = options;
+  while (tail > 0 && !COMMAND_OR_RULE_ROW_RE.test(lines[tail - 1])) tail--;
+  if (tail === 0) return lines;
+  let question = options - 1;
+  while (question >= tail && lines[question].trim() === "") question--;
+
+  const banner = lines.findIndex((line, i) => i >= tail && i < options && COUNTDOWN_BANNER_RE.test(line));
+  if (banner === -1) return lines;
+  let end = banner + 1;
+  while (end < question && lines[end].trim() !== "") end++;
+  // Only the block right above the question: a row left between is not the banner's to drop.
+  if (lines.slice(end, Math.max(end, question)).some((line) => line.trim() !== "")) return lines;
+  return [...lines.slice(0, banner), ...lines.slice(end)];
 }
 
 export function permissionAnchorIndex(paneText: string): number {
@@ -77,7 +86,7 @@ export function permissionAnchorIndex(paneText: string): number {
 }
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
-  const lines = withoutAutoDenyCountdown(paneText.split("\n"));
+  const lines = withoutCountdownBanner(paneText.split("\n"));
 
   let cursorIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {

@@ -40,3 +40,29 @@ Free-text frames, captured on 2026-10-10 from one live Claude Code 2.1.292 sessi
 Named-session frame, captured on 2026-10-12 from a live Claude Code 2.1.296 session on herdr 0.9.3 (detection manifest 2026.09.11.1):
 
 - `question-named-session-herdr.screen.json` — a single-select question in a session named `cctag`. The dialog's bottom rule carries the session name, and herdr reported the pane `idle` while this was on screen (issue #46). Stores the raw stdout of `herdr pane read <pane> --source visible` as `text`, cut to the dialog's 15 rows; the rows above it were the session's own transcript.
+
+herdr-core frames, captured on 2026-11-06 from live Claude Code 2.1.318 sessions in throwaway herdr-core terminals (hc 0.1.18, qa-guide installed). Each stores `text`, `complete` and `how` from `hc read <terminal> --json` (the visible screen, 120 rows). Redactions keep each row's display width: `<plan>` replaces the account-tier label, `<user>` the local user name, and `<hook-note>` a local Stop-hook message about another repository.
+
+The composer ANSI captures were taken from logged-out scratch sessions
+running Claude Code 2.1.330 on 2026-11-22. They keep the prompt rows,
+colors, caret styling and rules. Paths are replaced with placeholders and
+legacy shell startup rows are omitted.
+
+- `hc-composer.ansi.json` contains read-only observer paints from herdr-core
+  0.1.21 at 200 columns. It includes a middle caret, whitespace at the end,
+  an intervening input after stash and the restored draft.
+- `herdr-composer.ansi.json` contains visible ANSI from the legacy herdr
+  0.9.5 socket API at 54 pane columns. It includes the local model result,
+  draft restoration and the local auth-error suggestion before and after
+  the reversible probe, both with and without a stash.
+
+- `hc-question.screen.json` — single-select question with the qa-guide pane to its right; the core reported `status.state: blocked`.
+- `hc-plan-approval.screen.json` — the plan-approval menu (`Ready to code?`); the core reported `blocked` with the message `approve plan`.
+
+- `hc-alternate-japanese-suggestion.ansi.json` contains a sanitized read-only
+  `observeHcScreen` paint from a live named Claude Code fullscreen session on
+  2026-11-24 (#77). The 119-column, 70-row geometry, composer rules, dim
+  suggestion row, and visible caret at row 65, column 3 are preserved. The
+  inactive screen and preceding content were blanked, footer text was
+  replaced in place, and the session name, window title and status metadata
+  were sanitized.

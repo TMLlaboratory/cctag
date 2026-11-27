@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,13 +8,15 @@ import { claudeDriver } from "../agents/claude/driver.js";
 import { codexDriver, parseCodexModelMenuPrompt } from "../agents/codex/driver.js";
 import { HerdrBackend } from "./herdr.js";
 import type { SubmitContext } from "./index.js";
-import { BackendUnavailable, ExpectationLost, type AgentRef } from "./types.js";
+import { BackendUnavailable, ExpectationLost, SubmitRefused, type AgentRef } from "./types.js";
 import type { VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 
 function fakeHerdrCli(
   statuses: (string | null)[] = ["idle"],
   paneId = "wT:p1",
   paneTexts: string[] = [],
+  socket?: string,
+  agentKind = "claude",
 ): {
   bin: string;
   calls(): string[][];
@@ -30,9 +33,14 @@ const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
 const statuses = ${JSON.stringify(statuses)};
 const paneTexts = ${JSON.stringify(paneTexts)};
+const socket = ${JSON.stringify(socket ?? null)};
+if (socket && args[0] !== "status" && fs.readFileSync(${JSON.stringify(callsFile)}, "utf8").includes('"status","server"')
+  && (process.env.HERDR_SOCKET_PATH !== socket || process.env.HERDR_CLIENT_SOCKET_PATH || process.env.HERDR_SESSION)) {
+  process.exit(42);
+}
 function agent(status) {
   return {
-    agent: "claude",
+    agent: ${JSON.stringify(agentKind)},
     agent_session: { kind: "id", value: "session-1" },
     agent_status: status,
     cwd: "/tmp/project",
@@ -42,7 +50,22 @@ function agent(status) {
     pane_id: ${JSON.stringify(paneId)}
   };
 }
-if (args[0] === "agent" && args[1] === "list") {
+if (args[0] === "status" && args[1] === "server") {
+  process.stdout.write(JSON.stringify({ running: true, compatible: true, socket }));
+} else if (args[0] === "pane" && args[1] === "layout") {
+  process.stdout.write(JSON.stringify({ result: { layout: { panes: [{ pane_id: ${JSON.stringify(paneId)}, rect: { width: 54 } }] } } }));
+} else if (args[0] === "pane" && args[1] === "get" && socket) {
+  process.stdout.write(JSON.stringify({ result: { pane: { terminal_id: "raw-terminal-id", scroll: { offset_from_bottom: 0 } } } }));
+} else if (args[0] === "pane" && args[1] === "process-info" && socket) {
+  const pid = ${process.pid};
+  const processes = [{ pid, name: "claude" }];
+  if (fs.readFileSync(${JSON.stringify(callsFile)}, "utf8").includes('"agent","prompt",${JSON.stringify(paneId)},"typed message"')) {
+    processes.push({ pid: pid + 1, name: "caffeinate" });
+  }
+  process.stdout.write(JSON.stringify({ result: { process_info: {
+    pane_id: ${JSON.stringify(paneId)}, foreground_process_group_id: pid, foreground_processes: processes
+  } } }));
+} else if (args[0] === "agent" && args[1] === "list") {
   process.stdout.write(JSON.stringify({ result: { agents: [agent("working")] } }));
 } else if (args[0] === "agent" && args[1] === "get") {
   const count = Number(fs.existsSync(${JSON.stringify(counterFile)}) ? fs.readFileSync(${JSON.stringify(counterFile)}, "utf8") : "0");
@@ -87,7 +110,7 @@ function submitContext(
   options: Partial<Pick<SubmitContext, "cancelled" | "transcriptGrew" | "pollIntervalMs">> = {},
 ): SubmitContext {
   return {
-    driver: claudeDriver,
+    driver: codexDriver,
     cancelled: options.cancelled ?? (() => false),
     transcriptGrew: options.transcriptGrew ?? (() => false),
     retryLimit,
@@ -186,7 +209,7 @@ test("Herdr rejects pane IDs in the reserved Orca namespace", async () => {
 });
 
 test("submit retries only while the agent remains idle or done", async () => {
-  const cli = fakeHerdrCli(["idle", "done", "working"]);
+  const cli = fakeHerdrCli(["idle", "done", "working"], REF.target, [], undefined, "codex");
   try {
     const backend = new HerdrBackend(cli.bin);
     const outcome = await backend.submit(REF, "hello", submitContext(6));
@@ -205,7 +228,7 @@ test("submit retries only while the agent remains idle or done", async () => {
 });
 
 test("submit respects its retry budget and stops on transcript growth or cancellation", async () => {
-  const budgetCli = fakeHerdrCli(["idle", "idle", "idle"]);
+  const budgetCli = fakeHerdrCli(["idle", "idle", "idle"], REF.target, [], undefined, "codex");
   try {
     const backend = new HerdrBackend(budgetCli.bin);
     await backend.submit(REF, "budget", submitContext(2));
@@ -235,7 +258,7 @@ test("submit respects its retry budget and stops on transcript growth or cancell
 
 test("submit does not resend when the agent is missing or not idle", async () => {
   for (const status of [null, "blocked"] as const) {
-    const cli = fakeHerdrCli([status]);
+    const cli = fakeHerdrCli([status], REF.target, [], undefined, "codex");
     try {
       const backend = new HerdrBackend(cli.bin);
       await backend.submit(REF, "hello", submitContext(6));
@@ -246,6 +269,113 @@ test("submit does not resend when the agent is missing or not idle", async () =>
     } finally {
       cli.cleanup();
     }
+  }
+});
+
+const HERDR_PAINTS = JSON.parse(readFileSync(new URL(
+  "../agents/claude/__fixtures__/herdr-composer.ansi.json", import.meta.url,
+), "utf8")) as Record<string, string>;
+
+test("legacy Claude pins the socket, checks for hidden space, and replaces a verified standalone suggestion", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-visible-"));
+  const socketPath = join(dir, "herdr.sock");
+  assert.equal(HERDR_PAINTS["review-home-empty"], HERDR_PAINTS["review-home-space"]);
+  const probeSuggestion = ["suggestion", "suggestion", "suggestion-x", "suggestion-x", "suggestion-backspace"];
+  const probeTyped = ["typed", "typed", "typed-x", "typed-x", "typed-backspace"];
+  const paints = [
+    "review-home-empty", "review-home-empty", "review-home-empty",
+    "review-home-empty", "review-home-empty", "review-empty-probed", "review-empty-probed",
+    "review-empty-restored", "review-empty-restored",
+    "review-home-space", "review-home-space", "review-hidden-probed", "review-hidden-probed", "review-hidden-restored",
+    ...probeTyped,
+    ...probeSuggestion, "suggestion-backspace",
+    ...probeSuggestion, "typed",
+    ...probeTyped, "typed-backspace",
+    "review-stashed", "review-stashed", "review-stashed-probed", "review-stashed-probed", "review-stashed", "review-stashed",
+    "empty", "empty",
+  ];
+  let readCount = 0;
+  const server = createServer((socket) => {
+    socket.once("data", (data) => {
+      const request = JSON.parse(data.toString());
+      assert.equal(request.method, "pane.read");
+      assert.deepEqual(request.params, { pane_id: REF.target, source: "visible", format: "ansi", strip_ansi: false });
+      const text = HERDR_PAINTS[paints[readCount++]!];
+      assert.equal(typeof text, "string");
+      socket.end(JSON.stringify({
+        id: request.id, result: { type: "pane_read", read: {
+          pane_id: REF.target, source: "visible", format: "ansi", text, truncated: readCount === paints.length - 1,
+        } },
+      }) + "\n");
+    });
+  });
+  const cli = fakeHerdrCli(["idle"], REF.target, [], socketPath);
+  const saved = { ...process.env };
+  process.env.HERDR_SOCKET_PATH = "/tmp/a-different-server.sock";
+  process.env.HERDR_CLIENT_SOCKET_PATH = "/tmp/a-different-client.sock";
+  process.env.HERDR_SESSION = "different-session";
+  try {
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    const backend = new HerdrBackend(cli.bin);
+    const agent = await backend.get(REF.target);
+    assert.ok(agent);
+    assert.equal(agent.ref.pid, null);
+    assert.deepEqual(cli.calls(), [["agent", "get", REF.target]]);
+    const ctx = { ...submitContext(5), driver: claudeDriver };
+    await assert.rejects(backend.submit(agent.ref, "image prompt", { ...ctx, hasImages: true }),
+      (error) => error instanceof SubmitRefused && error.reason === "legacy-claude-images");
+    assert.deepEqual(cli.calls(), [["agent", "get", REF.target]]);
+    await assert.rejects(backend.submit({ ...agent.ref, terminalInstance: "replaced", sessionId: null }, "replaced terminal", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    await assert.rejects(backend.submit({ ...agent.ref, sessionId: null }, "unverified session", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "foreground-unverified");
+    await assert.rejects(backend.submit({ ...agent.ref, sessionId: "replaced" }, "different session", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    await assert.rejects(backend.submit({ ...agent.ref, pid: process.pid, processStartedAt: 1 }, "replaced process", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "agent-changed");
+    assert.deepEqual(await backend.submit(agent.ref, "/model haiku", ctx), { status: "accepted", draftStashed: false });
+    await assert.rejects(backend.submit(agent.ref, "hidden text", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "draft" && error.composer.probe === null);
+    await assert.rejects(backend.submit(agent.ref, "/model haiku", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "draft");
+    assert.deepEqual(await backend.submit(agent.ref, "/model haiku", ctx), { status: "accepted", draftStashed: false });
+    await assert.rejects(backend.submit(agent.ref, "changed suggestion", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "draft");
+    assert.deepEqual(await backend.submit(agent.ref, "typed message", ctx), {
+      status: "accepted", draftStashed: true,
+    });
+    await assert.rejects(backend.submit(agent.ref, "blocked", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "incomplete-screen");
+    await assert.rejects(backend.submit(agent.ref, "foreground with caffeinate", ctx),
+      (error) => error instanceof SubmitRefused && error.reason === "foreground-unverified");
+    assert.deepEqual(cli.calls().filter((args) => ["prompt", "send-keys"].includes(args[1]!)), [
+      ["pane", "send-keys", REF.target, "right", "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["agent", "prompt", REF.target, "/model haiku"],
+      ["pane", "send-keys", REF.target, "right", "x"],
+      ["pane", "send-keys", REF.target, "backspace", "left"],
+      ["pane", "send-keys", REF.target, "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["pane", "send-keys", REF.target, "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["agent", "prompt", REF.target, "/model haiku"],
+      ["pane", "send-keys", REF.target, "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["pane", "send-keys", REF.target, "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["pane", "send-keys", REF.target, "ctrl+s"],
+      ["pane", "send-keys", REF.target, "right", "x"],
+      ["pane", "send-keys", REF.target, "backspace"],
+      ["agent", "prompt", REF.target, "typed message"],
+    ]);
+  } finally {
+    for (const name of ["HERDR_SOCKET_PATH", "HERDR_CLIENT_SOCKET_PATH", "HERDR_SESSION"]) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    cli.cleanup();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 test("VerifiedPrompt cannot be forged from an object literal", () => {

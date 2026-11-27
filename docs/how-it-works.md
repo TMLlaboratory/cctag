@@ -131,6 +131,81 @@ identity. For Codex and `omp`, it also verifies the identity of the transcript o
 for writing. A pane whose agent or session cannot be verified is omitted rather
 than guessed.
 
+### herdr-core: the same terminals the Herdr app shows
+
+[herdr-core](https://github.com/herdrdev/herdr-core) is a headless terminal
+server; the Herdr app is one of its clients and `hc` is another. It is a
+separate product from the herdr TUI and does not share agents with it. cctag
+drives it with `hc` (`CCTAG_HC_BIN`, default `~/.local/bin/hc`), so a person
+watching the Herdr app sees cctag's input arrive in the same terminal. Targets
+carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
+
+- **Discovery.** `hc ls` lists terminals; cctag offers local ones whose program
+  reports itself as `claude-code`, and skips other machines' terminals
+  (`machine/t7`), which belong to the Spoke on that machine. For each, the
+  foreground process id leads to `~/.claude/sessions/<pid>.json`, where Claude
+  Code records its session id and the directory its transcript is filed under.
+  A terminal without that record is not offered. Guarded writes also require
+  the native PID and process start time, which older session records may omit.
+  If they are missing, Slack asks the user to update Claude Code or type at
+  the terminal.
+- **Status.** The core takes status only from what the program reports (OSC
+  7501), not from the screen. Claude Code reports `blocked` while a question
+  or an approval is up, including the observed folder-trust screen in
+  Claude Code 2.1.330, and `done` after a turn. A program that reports nothing
+  has no status, which cctag treats as unknown.
+- **Writes.** For Claude Code on herdr and herdr-core, cctag checks a complete
+  visible composer and the current foreground process before each write in
+  the message submission sequence. The composer has full-width rules and
+  valid visible footer text. Only the upper rule may contain the session name.
+  The caret is verified from inverse video or, on herdr-core, from the cursor
+  coordinates in a complete alternate-screen paint that matches the captured
+  layout. Native-caret drafts accept printable ASCII and supported Japanese
+  characters, including two-cell fullwidth forms and single-cell halfwidth
+  katakana and punctuation. Halfwidth voicing marks and combining sequences
+  are refused. Before writing, cctag requires enough display
+  cells for the probe character and one unpainted space inside the verified
+  width. Before stashing a native-caret draft, cctag probes for unpainted
+  trailing whitespace and returns the caret to its original position. Each
+  footer row must begin with at least two spaces followed by visible text. A
+  paint with no footer text is refused. Only a synthetic test covers that
+  layout. The captured `/model` dropdown is also refused because the footer
+  area contains a selection marker.
+  Legacy herdr gets the PID and process start time during guarded submission
+  and model readback. Guarded model and message submission report a change
+  when agent kind or terminal instance is known to differ, or when both known
+  session IDs differ. A session ID present in only one observation, or missing
+  foreground process proof, makes the identity unverified. If both session IDs
+  are absent, the remaining terminal and foreground checks still apply.
+  Ordinary status polling reads agent metadata.
+  A one-key probe distinguishes a suggestion from a typed draft. A verified
+  draft is stashed with Ctrl+S. At the first screen with the stash marker,
+  any visible text stops the send before another key is written. An initial
+  standalone suggestion can be replaced after its probe, reversal and a
+  fresh same-agent composer check succeed. Model commands and herdr-core
+  messages with images accept an empty composer or a verified suggestion.
+  An ordered Right and sentinel probe distinguishes a blank composer from
+  hidden whitespace. Once the sentinel has been removed, cctag checks the
+  visible composer again before sending. A local key can still arrive after
+  the positive check, including during reversal. The screen cannot confirm
+  exact restoration of a stashed draft.
+  On herdr-core a message goes through `hc send`, which pastes the text and
+  presses Enter once nobody has typed for about three seconds, and refuses a
+  `blocked` program. Answers press named keys with `hc keys` (digits, arrows,
+  Enter, Esc, Shift+Tab). `hc` cannot paste arbitrary text without Enter,
+  so free text is pasted with its Enter through `hc send --force`; a free-text
+  answer to a multi-select question, which has to be typed and *not* submitted,
+  is refused before any key is sent. On herdr-core, a Slack image is converted
+  to `[Image #1]`. In the observed run, `hc send` submitted it with one Enter.
+  Legacy herdr refuses Claude Code messages with images before writing to the
+  terminal for the reason described in section 5.8.
+- **Starting the core.** Any `hc` command starts a stopped core, and a core
+  passes the environment of whoever started it to every terminal. cctag
+  therefore connects to the core's socket first and runs nothing when no core
+  listens. Each command uses that same socket through `HC_SOCKET`. cctag drops
+  `HC_TERMINAL_ID` / `HC_SCOPE` so a Spoke running inside
+  an hc terminal does not get its messages wrapped in `<hc from=…>`.
+
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
@@ -239,30 +314,17 @@ pairing.
 For Claude Code, `@cctag model <name>` (e.g. `model opus`) forwards Claude's
 own `/model <name>` command rather than starting a normal conversational turn;
 the command's output doesn't reliably land in the session transcript. Claude
-Code model switching is supported on Herdr and Orca. `omp` has no model
+Code model switching is supported on herdr, herdr-core and Orca. `omp` has no model
 command; Codex CLI uses its separate model and reasoning-level picker, covered
 in [usage.md](usage.md).
 
-The steps below describe the Herdr command path. Orca uses its guarded composer
-channel for Claude Code.
-
-`commands.ts`'s `runTuiCommand()`:
-
-1. Sends the slash command via Herdr, then confirms it with Enter
-2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
-   confirmation that appears when switching models mid-conversation), the
-   existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
-   first option — asking for the switch already expressed that intent
-3. Once it settles (`idle`/`done`), reads the screen and relays the
-   command's own output back to Slack as-is
-
-Step 3's pane read has a gotcha: the TUI's screen always ends with a fixed
-footer (a separator, an empty prompt, another separator, then
-model/context/cwd/mode status lines). Reading only the last few lines lands
-entirely inside that footer, missing the actual command output above it. So
-cctag reads a larger chunk and cuts everything from the model/context
-status line downward (a distinctive `ctx ... /rc` pattern), then trims the
-separator/padding right above that (`stripFooterChrome()`).
+`runClaudeSlashCommand()` submits the command through the paired backend.
+On herdr and herdr-core, it checks the session and foreground identity in
+the readback and relays a new "Set model to …" result from the screen.
+If it cannot verify the result, Slack directs the user to the terminal,
+where any "Switch model?" confirmation can be answered.
+On Orca, cctag confirms the first option of a recognized confirmation menu
+and trims the footer from the terminal output before posting it to Slack.
 
 `TurnEngine` has a separate `externallyBusy` set alongside its normal turn
 tracking, so these TUI commands are treated as "busy" the same way an
@@ -389,10 +451,10 @@ The path→attachment conversion is asynchronous and the Enter is absorbed while
 it runs. A prompt with only non-image paths submits immediately, so this is
 specific to images (measured: 500ms–1000ms to convert a 2.8MB PNG).
 
-The existing "resend Enter if nothing was submitted" safety net (`0d4c830` /
-`624389c`) waited once and retried once, so it's now a bounded loop of
-`SUBMIT_RETRIES_WITH_IMAGES` attempts. An Enter into an empty box is a harmless
-no-op, which is why erring toward over-retrying is the safe direction.
+Claude Code submissions can restore an earlier draft as soon as Enter lands.
+A delayed retry could submit the restored draft. Legacy herdr refuses Slack
+messages with images before writing to Claude Code and asks the user to send
+the images at the terminal or resend the Slack message without them.
 
 ### Outbound: two routes
 

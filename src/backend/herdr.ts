@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
+import { parseClaudeHerdrComposer } from "../agents/claude/composer.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -13,9 +14,14 @@ import type {
 } from "./index.js";
 import { runHerdrRaw, sendHerdrKeys, sendHerdrText } from "./raw.js";
 import { stripSidePane } from "./side-pane.js";
+import { readHerdrVisibleAnsi } from "./herdr-screen.js";
+import { submitClaudeComposer } from "./submit-claude-composer.js";
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 import {
   BackendUnavailable,
+  SubmitRefused,
+  legacySessionRefusal,
+  WriteOutcomeUnknown,
   type AgentInfo,
   type AgentRef,
   type AgentStatus,
@@ -57,14 +63,16 @@ function normalizeStatus(raw: string): AgentStatus {
 }
 
 function normalizeAgent(raw: RawAgent): AgentInfo {
-  if (backendForTarget(raw.pane_id) === "orca") {
-    throw new BackendUnavailable(`herdr target collision: reserved orca: namespace returned as ${raw.pane_id}`);
+  const reserved = backendForTarget(raw.pane_id);
+  if (reserved !== "herdr") {
+    throw new BackendUnavailable(`herdr target collision: reserved ${reserved} namespace returned as ${raw.pane_id}`);
   }
+  const sessionId = raw.agent_session?.kind === "id" ? raw.agent_session.value : null;
   return {
-    ref: { target: raw.pane_id, pid: null, processStartedAt: null },
+    ref: { target: raw.pane_id, pid: null, processStartedAt: null, terminalInstance: raw.terminal_id, sessionId },
     backend: "herdr",
     agent: raw.agent as AgentInfo["agent"],
-    sessionId: raw.agent_session?.kind === "id" ? raw.agent_session.value : null,
+    sessionId,
     cwd: raw.cwd,
     evidence: { kind: "classified", status: normalizeStatus(raw.agent_status) },
     terminalTitle: raw.terminal_title_stripped?.trim() || null,
@@ -82,17 +90,18 @@ function evidenceStatus(evidence: StatusEvidence): AgentStatus {
 }
 
 function assertHerdrTarget(target: string): void {
-  if (backendForTarget(target) === "orca") throw new UnknownTarget(`No Orca backend is available for target ${target}`);
+  const backend = backendForTarget(target);
+  if (backend !== "herdr") throw new UnknownTarget(`No ${backend} backend is available for target ${target}`);
 }
 
 
 export class HerdrBackend implements Terminals {
   constructor(private readonly bin: string) {}
 
-  private async run(args: string[]): Promise<unknown> {
+  private async run(args: string[], env?: NodeJS.ProcessEnv): Promise<unknown> {
     let stdout: string;
     try {
-      const result = await execFileAsync(this.bin, args, { timeout: 15_000 });
+      const result = await execFileAsync(this.bin, args, { env, timeout: 15_000 });
       stdout = result.stdout;
     } catch (err) {
       const error = err as { message?: string; stderr?: string };
@@ -124,10 +133,19 @@ export class HerdrBackend implements Terminals {
     }
   }
 
-  async get(target: string): Promise<AgentInfo | null> {
+  async get(target: string, proof?: "foreground"): Promise<AgentInfo | null> {
+    const agent = await this.lookupAgent(target);
+    if (proof === "foreground" && agent?.agent === "claude") {
+      const foreground = await this.foregroundClaude(target, false).catch(() => null);
+      if (foreground) agent.ref = { ...agent.ref, ...foreground };
+    }
+    return agent;
+  }
+
+  private async lookupAgent(target: string, env?: NodeJS.ProcessEnv): Promise<AgentInfo | null> {
     assertHerdrTarget(target);
     try {
-      const json = (await this.run(["agent", "get", target])) as { result?: { agent?: RawAgent } };
+      const json = (await this.run(["agent", "get", target], env)) as { result?: { agent?: RawAgent } };
       const agent = json.result?.agent;
       return agent ? normalizeAgent(agent) : null;
     } catch (err) {
@@ -135,6 +153,24 @@ export class HerdrBackend implements Terminals {
       if (err instanceof BackendUnavailable) throw err;
       throw new BackendUnavailable(errorMessage(err));
     }
+  }
+
+  private async foregroundClaude(target: string, requireOnlyClaude: boolean, env?: NodeJS.ProcessEnv): Promise<{ pid: number; processStartedAt: number } | null> {
+    const result = await this.run(["pane", "process-info", "--pane", target], env) as {
+      result?: { process_info?: { pane_id?: string; foreground_process_group_id?: number; foreground_processes?: { name: string; pid: number }[] } };
+    };
+    const info = result.result?.process_info;
+    const foreground = info?.foreground_processes;
+    const pid = info?.foreground_process_group_id;
+    if (info?.pane_id !== target || typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 ||
+      (requireOnlyClaude && foreground?.length !== 1) ||
+      !foreground?.some((process) => process.pid === pid && process.name === "claude")) return null;
+    const { stdout } = await execFileAsync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+      timeout: 2_000,
+      env: { ...process.env, LC_ALL: "C" },
+    });
+    const processStartedAt = Date.parse(stdout.trim());
+    return Number.isFinite(processStartedAt) ? { pid, processStartedAt } : null;
   }
 
   async exists(target: string): Promise<boolean> {
@@ -240,6 +276,9 @@ export class HerdrBackend implements Terminals {
   }
 
   async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    if (ctx.driver.kind === "claude") {
+      return this.submitClaude(ref, text, ctx);
+    }
     // Keep text and Enter atomic; retries retain TurnEngine's old guard: wait,
     // stop on cancel/transcript growth, then require idle or done.
     await this.submitPrompt(ref.target, text);
@@ -254,6 +293,75 @@ export class HerdrBackend implements Terminals {
       await this.writeKeys(ref.target, "Enter");
     }
     return { status: "accepted", draftStashed: false };
+  }
+
+  private async submitClaude(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    if (ctx.hasImages) throw new SubmitRefused("legacy-claude-images", "Claude image conversion can consume Enter");
+    const target = ref.target;
+    assertHerdrTarget(target);
+    const server = await this.run(["status", "server", "--json"]).catch(() => null) as {
+      running?: boolean; compatible?: boolean; socket?: string;
+    } | null;
+    const socket = server?.running === true && server.compatible === true && server.socket;
+    if (!socket) throw new SubmitRefused("incomplete-screen", "herdr did not report a compatible live socket");
+    const env: NodeJS.ProcessEnv = { ...process.env, HERDR_SOCKET_PATH: socket };
+    delete env.HERDR_CLIENT_SOCKET_PATH;
+    delete env.HERDR_SESSION;
+    let foreground: Pick<AgentRef, "pid" | "processStartedAt"> | null = ref.pid === null ? null : ref;
+    return submitClaudeComposer(text, ctx, {
+      read: async () => {
+        const layout = (await this.run(["pane", "layout", "--pane", target], env)) as {
+          result?: { layout?: { panes?: { pane_id?: string; rect?: { width?: number } }[] } };
+        };
+        const width = layout.result?.layout?.panes?.find((pane) => pane.pane_id === target)?.rect?.width;
+        if (!width) return null;
+        const pane = (await this.run(["pane", "get", target], env)) as {
+          result?: { pane?: { terminal_id?: string; scroll?: { offset_from_bottom?: number } } };
+        };
+        const terminalInstance = pane.result?.pane?.terminal_id;
+        if (terminalInstance && ref.terminalInstance && terminalInstance !== ref.terminalInstance) {
+          throw new SubmitRefused("agent-changed", "herdr terminal no longer matches");
+        }
+        if (!terminalInstance || !ref.terminalInstance || pane.result?.pane?.scroll?.offset_from_bottom !== 0) return null;
+        const ansi = await readHerdrVisibleAnsi(socket, target);
+        if (!ansi) return null;
+        const current = await this.lookupAgent(target, env).catch(() => {
+          throw new SubmitRefused("foreground-unverified", "herdr agent lookup failed");
+        });
+        if (!current) throw new SubmitRefused("foreground-unverified", "herdr agent lookup returned no agent");
+        const sessionRefusal = legacySessionRefusal(ref.sessionId, current.sessionId);
+        if (current.agent !== "claude" ||
+          (ref.terminalInstance && current.terminalId && current.terminalId !== ref.terminalInstance) ||
+          sessionRefusal === "agent-changed") {
+          throw new SubmitRefused("agent-changed", "herdr foreground no longer matches");
+        }
+        if (!ref.terminalInstance || !current.terminalId || sessionRefusal) {
+          throw new SubmitRefused("foreground-unverified", "herdr agent identity could not be verified");
+        }
+        const status = evidenceStatus(current.evidence);
+        if (status === "blocked") throw new SubmitRefused("gate", "herdr reports a blocked agent");
+        if (status !== "idle" && status !== "done") throw new SubmitRefused("not-idle", "herdr agent is not idle");
+        const observed = await this.foregroundClaude(target, true, env).catch(() => null);
+        if (!observed) throw new SubmitRefused("foreground-unverified", "herdr foreground process could not be verified");
+        if (foreground && (observed.pid !== foreground.pid || observed.processStartedAt !== foreground.processStartedAt)) {
+          throw new SubmitRefused("agent-changed", "herdr foreground no longer matches");
+        }
+        foreground = observed;
+        return parseClaudeHerdrComposer(ansi, width - 1);
+      },
+      key: async (...keys) => { await runHerdrRaw(this.bin, ["pane", "send-keys", target, ...keys], env); },
+      send: async (composer) => {
+        try {
+          await this.run(["agent", "prompt", target, text], env);
+        } catch (error) {
+          if (error instanceof HerdrCliError && /"code"\s*:\s*"agent_blocked"/u.test(error.stderr ?? "")) {
+            throw new SubmitRefused("gate", "herdr refused a blocked agent", composer);
+          }
+          throw new WriteOutcomeUnknown(error, { ...composer, submitUncertain: true });
+        }
+        return { status: "accepted", draftStashed: composer.stash === "stashed" };
+      },
+    });
   }
 
   private async writeText(target: string, text: string): Promise<void> {

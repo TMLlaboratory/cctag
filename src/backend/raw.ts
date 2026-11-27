@@ -4,9 +4,9 @@ import { BackendUnavailable } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
-export async function runHerdrRaw(bin: string, args: string[]): Promise<string> {
+export async function runHerdrRaw(bin: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   try {
-    const result = await execFileAsync(bin, args, { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    const result = await execFileAsync(bin, args, { env, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
     return result.stdout;
   } catch (err) {
     const error = err as { message?: string };

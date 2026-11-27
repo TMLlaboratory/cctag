@@ -7,9 +7,12 @@ import { createBlindPermissionPrompt, createVerifiedPrompt } from "../../backend
 import {
   ExpectationLost,
   hasUnsendableC0Controls,
+  SubmitRefused,
+  legacySessionRefusal,
   UNSENDABLE_TEXT_MESSAGE,
 } from "../../backend/types.js";
 import type { AgentInfo, AgentRef, ScreenSnapshot } from "../../backend/types.js";
+import { COMPOSER_BOTTOM_RULE_RE, NAMED_COMPOSER_TOP_RULE_RE } from "./composer.js";
 import {
   findPlanFeedbackOption,
   MODE_ALIASES,
@@ -63,6 +66,7 @@ function assertAnswerNotAborted(signal?: AbortSignal): void {
 const CURSOR_ON_FREE_TEXT = "カーソルが自由記述の欄にあるので、送っていません。端末で答えてください";
 const CURSOR_MOVED = "カーソルが最初の選択肢から動いているので、送っていません。端末で答えてください";
 const FREE_TEXT_EDITED = "自由記述の欄に入力途中の文があるので、送っていません。端末で確かめてください";
+const HC_MULTI_SELECT_FREE_TEXT = "herdr-core では、複数選択の質問に自由記述で答えられないため、送っていません。端末で答えてください";
 
 /**
  * The live classic dialog as it is now, read before an answer's first key.
@@ -105,25 +109,18 @@ function answerListsMatch(
   );
 }
 
-// A session given a name with `/rename` draws that name into the rule above the
-// prompt (`──── design ─`), and only that rule; the one below stays plain.
-// Captured live on Claude Code 2.1.291. Requiring a bare rule above refused
-// every Slack message to a named session as "not idle" (#28).
-const COMPOSER_TOP_RULE_RE = /^[─━]+(?: .+ [─━]+)?$/u;
-const COMPOSER_BOTTOM_RULE_RE = /^[─━]+$/u;
-
 function composerFooterStart(rows: readonly string[], acceptTryPlaceholder = false): number | null {
   for (let i = 1; i < rows.length - 1; i++) {
     const inputRow = rows[i]!.trim();
     const isTryPlaceholder = acceptTryPlaceholder && /^❯\s+Try ".+"$/u.test(inputRow);
     if (inputRow !== "❯" && !isTryPlaceholder) continue;
-    if (!COMPOSER_TOP_RULE_RE.test(rows[i - 1]!.trim()) || !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) continue;
+    const upper = rows[i - 1]!.trim();
+    if ((!COMPOSER_BOTTOM_RULE_RE.test(upper) && !NAMED_COMPOSER_TOP_RULE_RE.test(upper)) ||
+      !COMPOSER_BOTTOM_RULE_RE.test(rows[i + 1]!.trim())) continue;
     if (rows.slice(i + 2).some((row) => row.trim())) return i - 1;
   }
   return null;
 }
-
-const NAMED_COMPOSER_TOP_RULE_RE = /^[─━]+ .+ [─━]+$/u;
 
 // Recovered only under a named rule: that is the one layout Orca's extractor is
 // known to miss (it lifts the text into `draft` only below a bare rule, Orca
@@ -286,27 +283,75 @@ async function confirmOrcaAnswerReview(
  * Runs a CLI slash command (`/model <name>`, ...) rather than a normal
  * conversational turn. These don't reliably show up in the session
  * transcript the way an LLM reply does, so this reads the result straight
- * off the pane. If a confirmation menu appears (e.g. switching models
- * mid-conversation asks "Switch model? Yes/No"), it's auto-confirmed with
- * the first option, since the user asking for the command already expressed
- * that intent.
+ * off the pane.
  */
 async function runClaudeSlashCommand(
   terminals: Terminals,
   driver: AgentDriver,
   agent: AgentInfo,
   command: string,
+  cancelled: () => boolean,
 ): Promise<ModelCommandResult> {
+  const backend = backendForTarget(agent.ref.target);
+  const guarded = backend === "herdr-core" || backend === "herdr";
+  const foreground = backend === "herdr" ? "foreground" : undefined;
+  if (foreground) {
+    const current = await terminals.get(agent.ref.target, foreground).catch(() => null);
+    const expectedTerminal = agent.ref.terminalInstance;
+    const currentTerminal = current?.ref.terminalInstance;
+    if (current && (current.agent !== agent.agent ||
+      (expectedTerminal && currentTerminal && currentTerminal !== expectedTerminal))) {
+      throw new SubmitRefused("agent-changed", "herdr agent no longer matches");
+    }
+    const sessionRefusal = current && legacySessionRefusal(agent.sessionId, current.sessionId);
+    if (sessionRefusal === "agent-changed") throw new SubmitRefused(sessionRefusal, "herdr session no longer matches");
+    if (!current || !expectedTerminal || !currentTerminal || sessionRefusal ||
+      current.ref.pid === null || current.ref.processStartedAt === null) {
+      throw new SubmitRefused("foreground-unverified", "herdr foreground process could not be verified");
+    }
+    agent = current;
+  }
+  const readResult = () => backend === "herdr"
+    ? terminals.read(agent.ref.target, 40, "history")
+    : terminals.read(agent.ref.target, 0, "screen");
+  const before = guarded ? await readResult().catch(() => null) : null;
+  if (guarded && cancelled()) throw new SubmitRefused("cancelled", "model command cancelled");
   // Atomic submit — same reason as TurnEngine.startTurn: a separate
   // send-text + Enter races Claude Code's paste coalescing and can leave the
   // command unsent. Terminals.submit keeps it one server-side operation.
   const submitOutcome = await terminals.submit(agent.ref, command, {
     driver,
-    cancelled: () => false,
+    cancelled: guarded ? cancelled : () => false,
     transcriptGrew: () => false,
     retryLimit: 0,
     pollIntervalMs: 0,
   });
+
+  if (guarded) {
+    const echoRow = `❯ ${command}`;
+    const oldEchoes = before?.complete ? before.text.split(/\r?\n/).filter((row) => row === echoRow).length : null;
+    for (let i = 0; i < 10; i++) {
+      await sleep(600);
+      const pane = await readResult().catch(() => null);
+      const current = await terminals.get(agent.ref.target, foreground).catch(() => null);
+      if (!pane?.complete || !current || current.ref.pid === null || current.ref.processStartedAt === null) continue;
+      if (current.ref.pid !== agent.ref.pid ||
+        current.ref.processStartedAt !== agent.ref.processStartedAt || current.sessionId !== agent.sessionId ||
+        current.ref.terminalInstance !== agent.ref.terminalInstance) break;
+      const rows = pane.text.split(/\r?\n/);
+      const echo = rows.lastIndexOf(echoRow);
+      const output = /^\s*⎿\s+(Set model to .+)$/u.exec(rows[echo + 1] ?? "")?.[1];
+      if (oldEchoes !== null && rows.filter((row) => row === echoRow).length > oldEchoes &&
+        output && !output.includes("`")) {
+        const tail = output.endsWith("saved as your default") && rows[echo + 2]?.trim() === "for new sessions"
+          ? " for new sessions" : "";
+        return { reply: "```\n" + output + tail + "\n```", submitOutcome };
+      }
+      if (current.evidence.kind === "classified" && current.evidence.status === "blocked") break;
+    }
+    // The local switch is evidenced; sending keys to a follow-up menu would need its own capture.
+    return { reply: `⚠️ ${backend} はモデル変更の入力を受け付けました。端末で結果を確認し、確認画面が出ていれば端末で選択してください。`, submitOutcome };
+  }
 
   let settled = false;
   for (let i = 0; i < 10 && !settled; i++) {
@@ -573,9 +618,16 @@ export const claudeDriver: AgentDriver = {
   async answerQuestionFreeText(terminals, channel, ref, info, text, signal) {
     // Navigate down to the "Type something" row (the free-text row must be
     // reached via arrows and then have its placeholder replaced before Enter).
-    const isOrca = backendForTarget(ref.target) === "orca";
-    if (isOrca && hasUnsendableC0Controls(text)) {
+    const backend = backendForTarget(ref.target);
+    const isOrca = backend === "orca";
+    if (backend !== "herdr" && hasUnsendableC0Controls(text)) {
       throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
+    }
+    // hc cannot type the text without also pressing Enter, and on a
+    // multi-select dialog that Enter unticks the row (see below). Refuse before
+    // the first key so the dialog is left as the person last saw it.
+    if (backend === "herdr-core" && info.multiSelect) {
+      throw new ExpectationLost("herdr-core cannot answer multi-select free text", HC_MULTI_SELECT_FREE_TEXT);
     }
     const dialog = await liveDialog(terminals, ref.target);
     if (dialog?.freeTextEdited) throw new ExpectationLost("the free-text row already holds text", FREE_TEXT_EDITED);
@@ -645,7 +697,7 @@ export const claudeDriver: AgentDriver = {
     },
   },
 
-  async runModelCommand(terminals, agent, argsText) {
-    return runClaudeSlashCommand(terminals, claudeDriver, agent, `/model ${argsText}`);
+  async runModelCommand(terminals, agent, argsText, cancelled = () => false) {
+    return runClaudeSlashCommand(terminals, claudeDriver, agent, `/model ${argsText}`, cancelled);
   },
 };

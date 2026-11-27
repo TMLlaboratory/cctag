@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CommandHandler } from "./commands.js";
+import { submitClaudeComposer } from "./backend/submit-claude-composer.js";
 import type { Terminals } from "./backend/index.js";
 import type { Notifier } from "./notifier.js";
 import type { Pairing, PairingStore } from "./pairing.js";
@@ -903,6 +904,128 @@ test("/model reports when Claude stashed the composer draft", async () => {
     "\n📥 orca の入力欄の書きかけを一時退避して送りました。Claude Code 2.1.287 では送信の後に入力欄へ戻ります。戻っていなければ、入力欄が空（打った文字も灰色の提案も無い）のときに Ctrl+S を押すと戻ります。",
   ));
 });
+
+test("core /model does not answer a follow-up dialog or include the composer in Slack", async () => {
+  const target = "hc:t1";
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "herdr-core" };
+  const agent: AgentInfo = {
+    ...ompAgentForCommands(target),
+    agent: "claude", backend: "herdr-core", sessionId: "session",
+    ref: { target, pid: 42, processStartedAt: 1, sessionId: "session" },
+    evidence: { kind: "classified", status: "idle" },
+  };
+  const replies: string[] = [];
+  let sent = false;
+  const terminals = {
+    async get() {
+      return sent ? { ...agent, evidence: { kind: "classified", status: "blocked" } } : agent;
+    },
+    async read() {
+      return { text: sent ? "Switch model?\n❯ 1. Yes\n  2. No\n❯ private-draft" : "", draft: null, complete: true };
+    },
+    async submit(_ref: unknown, command: string) {
+      assert.equal(command, "/model sonnet");
+      sent = true;
+      return { status: "accepted", draftStashed: true };
+    },
+    openAnswer() {
+      assert.fail("the follow-up confirmation has no qualified key path");
+    },
+  } as unknown as Terminals;
+  const engine = {
+    isBusy: () => false,
+    acquire: () => ({ cancelled: false, release() {}, signal: new AbortController().signal }),
+  } as unknown as TurnEngine;
+  const notifier = {
+    async postReply(_channel: string, _threadTs: string, text: string) { replies.push(text); },
+  } as unknown as Notifier;
+
+  await new CommandHandler(terminals, { get: () => pairing } as unknown as PairingStore, engine, notifier, OWNER)
+    .handleMention({ channel: "C1", threadTs: "1.1", userId: OWNER, text: "model sonnet", ts: "1.2" });
+  assert.equal(replies.length, 1);
+  assert.match(replies[0]!, /書きかけが戻ったか確認できません/u);
+  assert.doesNotMatch(replies[0]!, /private-draft|戻ったことを確認/u);
+});
+
+test("legacy Herdr /model explicitly checks the foreground for submit and readback", async (t) => {
+  const { claudeDriver } = await import("./agents/claude/driver.js");
+  for (const sessionId of ["session", null]) {
+    await t.test(sessionId ? "same known session" : "both session IDs absent", async () => {
+      const initial: AgentInfo = {
+        ...ompAgentForCommands("wT:p1"),
+        agent: "claude",
+        backend: "herdr",
+        sessionId,
+        ref: { target: "wT:p1", pid: null, processStartedAt: null, terminalInstance: "terminal", sessionId },
+      };
+      const ref = { ...initial.ref, pid: 42, processStartedAt: 1 };
+      const proofs: ("foreground" | undefined)[] = [];
+      let sent = false;
+      const terminals = {
+        async get(_target: string, proof?: "foreground") {
+          proofs.push(proof);
+          return proof === "foreground" ? { ...initial, ref } : initial;
+        },
+        async read() {
+          return { text: sent ? "❯ /model haiku\n  ⎿  Set model to Haiku" : "", draft: null, complete: true };
+        },
+        async submit(received: unknown, command: string) {
+          assert.deepEqual(received, ref);
+          assert.equal(command, "/model haiku");
+          sent = true;
+          return { status: "accepted", draftStashed: false };
+        },
+      } as unknown as Terminals;
+      const result = await claudeDriver.runModelCommand(terminals, initial, "haiku", () => false);
+      assert.equal(result.reply, "```\nSet model to Haiku\n```");
+      assert.deepEqual(proofs, ["foreground", "foreground"]);
+    });
+  }
+});
+
+test("legacy Herdr /model tells Slack when the agent changed or identity proof is missing", async () => {
+  const initial: AgentInfo = {
+    ...ompAgentForCommands("wT:p1"),
+    agent: "claude",
+    backend: "herdr",
+    sessionId: "session",
+    ref: { target: "wT:p1", pid: null, processStartedAt: null, terminalInstance: "terminal" },
+  };
+  const withoutSession = { ...initial, sessionId: null };
+  const withForeground = { ...initial, ref: { ...initial.ref, pid: 42, processStartedAt: 1 } };
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: initial.ref.target };
+  const replaced = /接続先エージェントが切り替わった/u;
+  const unverified = /プロセスを確認できなかった.*端末から入力/u;
+  const engine = {
+    acquire: () => ({ cancelled: false, release() {}, signal: new AbortController().signal }),
+  } as unknown as TurnEngine;
+  for (const [before, current, notice] of [
+    [initial, { ...withoutSession, agent: "codex" }, replaced],
+    [initial, { ...withoutSession, ref: { ...initial.ref, terminalInstance: "replacement" } }, replaced],
+    [initial, { ...initial, sessionId: "replacement" }, replaced],
+    [initial, initial, unverified],
+    [initial, { ...initial, ref: { ...initial.ref, pid: 42 } }, unverified],
+    [initial, { ...withForeground, sessionId: null }, unverified],
+    [withoutSession, withForeground, unverified],
+  ] as const) {
+    const replies: string[] = [];
+    const terminals = {
+      async get(_target: string, proof?: "foreground") {
+        return proof === "foreground" ? current : before;
+      },
+      async read() { assert.fail("preflight must refuse before reading the result"); },
+      async submit() { assert.fail("preflight must refuse before submitting"); },
+    } as unknown as Terminals;
+    const notifier = {
+      async postReply(_channel: string, _threadTs: string, text: string) { replies.push(text); },
+    } as unknown as Notifier;
+    await new CommandHandler(terminals, { get: () => pairing } as unknown as PairingStore, engine, notifier, OWNER)
+      .handleMention({ channel: "C1", threadTs: "1.1", userId: OWNER, text: "model haiku", ts: "1.2" });
+    assert.equal(replies.length, 1);
+    assert.match(replies[0]!, notice);
+  }
+});
+
 test("/model posts state-aware submit failures with the composer state", async () => {
   const target = "orca:tab-7:leaf-2";
   const pairing: Pairing = { ...BUTTON_PAIRING, paneId: target, backend: "orca" };
@@ -1059,6 +1182,60 @@ test("disconnect cancels an OMP lease without sending terminal input", async () 
   assert.equal(cancelled, 1);
   assert.equal(removed, 1);
   assert.deepEqual(replies, ["🔌 接続を解除しました。"]);
+});
+
+test("disconnect cancels the guarded Slack model command during a delayed initial read", async () => {
+  const pairing: Pairing = { ...BUTTON_PAIRING, paneId: "hc:t1", backend: "herdr-core" };
+  const agent: AgentInfo = {
+    ...ompAgentForCommands(pairing.paneId), agent: "claude", backend: "herdr-core",
+    evidence: { kind: "classified", status: "idle" },
+  };
+  let start!: () => void;
+  const started = new Promise<void>((resolve) => { start = resolve; });
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  const controller = new AbortController();
+  let removed = false;
+  let releases = 0;
+  const terminals = {
+    async get() { return agent; },
+    async read() { return { text: "", draft: null, complete: true }; },
+    submit(_ref, text, ctx) {
+      return submitClaudeComposer(text, ctx, {
+        async read() {
+          start();
+          await pending;
+          return { draft: "", caret: 0, stashed: false, idle: true, frame: "composer", rawRow: "" };
+        },
+        async key() { assert.fail("the disconnected command must not send keys"); },
+        async send() { assert.fail("the disconnected command must not submit"); },
+      });
+    },
+  } satisfies Pick<Terminals, "get" | "read" | "submit">;
+  const engine = {
+    acquire: () => ({
+      get cancelled() { return controller.signal.aborted; },
+      signal: controller.signal,
+      release() { releases++; },
+    }),
+    cancelPane(target: string) { assert.equal(target, pairing.paneId); controller.abort(); },
+  } as unknown as TurnEngine;
+  const replies: string[] = [];
+  const handler = new CommandHandler(terminals as unknown as Terminals, {
+    get: () => removed ? null : pairing,
+    remove() { removed = true; return true; },
+  } as unknown as PairingStore, engine, {
+    async postReply(_channel: string, _threadTs: string, text: string) { replies.push(text); },
+  } as unknown as Notifier, OWNER);
+  const event = { channel: "C1", threadTs: "1.1", userId: OWNER, ts: "1.2" };
+  const model = handler.handleMention({ ...event, text: "model haiku" });
+  await started;
+  await handler.handleMention({ ...event, text: "disconnect" });
+  finish();
+  await model;
+  assert.equal(removed, true);
+  assert.equal(releases, 1);
+  assert.deepEqual(replies, ["🔌 接続を解除しました。", "⚠️ herdr-core への送信を中止しました。 端末で確かめてください。"]);
 });
 
 test("a mention while a question waits for a typed answer answers it instead of being refused as busy", async () => {

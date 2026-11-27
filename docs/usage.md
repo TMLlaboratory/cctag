@@ -8,7 +8,7 @@ bot:
 
 | Command | Who | What it does |
 |---|---|---|
-| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca), Codex CLI (Herdr / Orca), `omp` (Orca) |
+| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca / herdr-core), Codex CLI (Herdr / Orca), `omp` (Orca) |
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
@@ -47,9 +47,12 @@ buttons and thread replies cannot answer them.
 Attach a file (or paste an image) to an `@cctag` message. cctag downloads it
 to `~/.cctag/inbox/` and appends its local path to the prompt. Claude Code
 turns an image path into a real image attachment — what the TUI shows as
-`[Image #1]` — so the model sees the screenshot. Other agents receive the path;
-whether they can read an image depends on their own tools. A message that's
-nothing but an image still starts a turn and supplies its path.
+`[Image #1]` — so the model sees the screenshot. Other agents receive the
+path and can read the image if their tools support it. An `@cctag` mention
+with an image and no prompt text can start a turn. Legacy herdr refuses
+image-bearing messages to Claude Code. On herdr-core, Claude Code accepts
+them only when cctag verifies that the composer is empty or contains only
+a suggestion.
 
 The path is deliberate, not incidental: base64 pasted into the prompt as text
 would cost roughly 50x the tokens (measured: a 2.8MB PNG is ~3.6k tokens
@@ -109,8 +112,8 @@ rather than starting a conversational turn — mechanics differ by agent:
   output (e.g. "Set model to Opus and saved as your default for new
   sessions"), read straight off the terminal screen. If switching models
   mid-conversation triggers a confirmation menu ("Switch model? Yes/No"),
-  it's auto-confirmed, since asking for the switch already expressed that
-  intent.
+  answer it at the terminal on herdr or herdr-core. Orca confirms the first
+  option automatically.
 - **Codex CLI** has no `/model <name>` argument — its `/model` opens a
   two-stage picker (pick a model, then pick a reasoning effort level: `low`
   / `medium` / `high` / `extra high`, though which levels are offered

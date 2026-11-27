@@ -5,7 +5,7 @@ import {
   SubmitRefused,
   WriteOutcomeUnknown,
 } from "./backend/types.js";
-import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
+import { submitDraftNotice, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PairingStore } from "./pairing.js";
 import type { TurnEngine } from "./turn.js";
@@ -302,7 +302,7 @@ export class CommandHandler {
         }
         let result: ModelCommandResult;
         try {
-          result = await driver.runModelCommand(this.terminals, agent, modelMatch[1].trim());
+          result = await driver.runModelCommand(this.terminals, agent, modelMatch[1].trim(), () => lease.cancelled);
         } catch (error) {
           const backend = backendForTarget(agent.ref.target);
           if (error instanceof SubmitRefused) {
@@ -312,16 +312,16 @@ export class CommandHandler {
               submitRefusedText(error.reason, backend, error.composer),
             );
           } else if (error instanceof WriteOutcomeUnknown) {
-            await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(error));
+            await this.notifier.postReply(channel, threadTs, writeOutcomeUnknownText(error, backend));
           } else {
             throw error;
           }
           return;
         }
-        const stashNotice = result.submitOutcome?.draftStashed
-          ? `\n${draftStashedText(backendForTarget(agent.ref.target))}`
+        const stashNotice = result.submitOutcome
+          ? submitDraftNotice(result.submitOutcome, backendForTarget(agent.ref.target))
           : "";
-        await this.notifier.postReply(channel, threadTs, `${result.reply}${stashNotice}`);
+        await this.notifier.postReply(channel, threadTs, stashNotice ? `${result.reply}\n${stashNotice}` : result.reply);
       } finally {
         lease.release();
       }
@@ -755,12 +755,13 @@ export class CommandHandler {
       }
     }
 
+    const pairedBackend = backendForTarget(agent.ref.target);
     this.pairingStore.add({
       key: PairingStore.threadKey(channel, threadTs),
       channel,
       threadTs,
       paneId: agent.ref.target,
-      ...(backendForTarget(agent.ref.target) === "orca" ? { backend: "orca" } : {}),
+      ...(pairedBackend !== "herdr" ? { backend: pairedBackend } : {}),
       terminalId: agent.terminalId,
       cwd: agent.cwd,
       agent: agent.agent,

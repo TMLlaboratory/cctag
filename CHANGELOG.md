@@ -11,6 +11,49 @@ would have to keep. Pin an exact version if that matters to you.
 
 ## [Unreleased]
 
+### Added
+
+- A herdr-core backend. cctag drives Claude Code in
+  [herdr-core](https://github.com/herdrdev/herdr-core) terminals — the core
+  behind the Herdr app, separate from the herdr TUI — through `hc`
+  (`CCTAG_HC_BIN`, default `~/.local/bin/hc`). Its rows appear under
+  `herdr-core · <directory>` in `@cctag connect`, and its targets carry an
+  `hc:` prefix, so herdr and Orca pairings are unchanged. cctag checks the
+  selected socket before invoking `hc`. A free-text answer to a multi-select question is answered in the
+  terminal there, because `hc` cannot paste arbitrary text without Enter. Codex
+  CLI and `omp` on herdr-core are not supported yet.
+- Claude Code messages on herdr and herdr-core can temporarily stash a verified
+  single-line draft. Slack reports that exact restoration cannot be verified
+  from the screen. Model switches and herdr-core messages with image attachments
+  accept an empty composer or a verified suggestion and refuse a typed draft.
+  Legacy herdr refuses Claude Code messages with image attachments before
+  writing to the terminal. Send images at the terminal or resend the Slack
+  message without them.
+
+### Changed
+
+- Claude Code submissions on legacy herdr no longer retry Enter. On herdr
+  and herdr-core, answer Claude Code's `Switch model?` confirmation at the
+  terminal.
+
+### Fixed
+
+- The captured default (manual) and auto permission modes pass the guarded
+  composer check on herdr and herdr-core with a valid visible footer. A paint
+  with no footer text is refused. There is no live capture of that layout.
+  The check now accepts a session name in the upper rule of the composer.
+  On herdr-core, it also reads the native caret from a verified fullscreen
+  paint and recognizes the fullscreen stash indicator.
+
+- A permission prompt in auto mode is again read as one prompt while its
+  countdown runs. By 2.1.325, Claude Code had reworded the countdown to "will
+  automatically block this request in 1:56, to avoid holding up an unattended
+  session", which the 2.1.281 wording no longer matched, so each poll saw a new
+  prompt: the Slack post was marked answered at the terminal and posted again,
+  and a button press stopped on its screen check. The countdown is now
+  recognized by its shape (a ⚠ row with an m:ss timer), not its words. The
+  parser is shared, so this applies to herdr and Orca as well.
+
 ## [0.6.3] - 2026-10-31
 
 ### Security

@@ -1,6 +1,6 @@
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
 import type { AgentDriver } from "../agents/driver.js";
-import { BackendUnavailable, type AgentInfo, type AgentRef, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
+import { BackendUnavailable, type AgentInfo, type BackendName, type AgentRef, type ListResult, type ScreenSnapshot, UnknownTarget } from "./types.js";
 import { backendForTarget } from "./target.js";
 
 export * from "./types.js";
@@ -18,6 +18,7 @@ export interface SubmitContext {
   retryLimit: number;
   /** The poll interval already used by TurnEngine before moving submit here. */
   pollIntervalMs: number;
+  hasImages?: boolean;
 }
 
 export interface AnswerChannel {
@@ -44,7 +45,7 @@ export interface ComposerChannel {
 
 export interface Terminals {
   list(): Promise<ListResult>;
-  get(target: string): Promise<AgentInfo | null>;
+  get(target: string, proof?: "foreground"): Promise<AgentInfo | null>;
   exists(target: string): Promise<boolean>;
   read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot>;
   submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome>;
@@ -57,20 +58,21 @@ export interface Terminals {
 export interface TerminalBackends {
   herdr: Terminals | null;
   orca: Terminals | null;
+  "herdr-core": Terminals | null;
 }
 
 function collisionMessage(agent: AgentInfo): string {
-  return `herdr target collision: reserved orca: namespace returned as ${agent.ref.target}`;
+  return `herdr target collision: reserved ${backendForTarget(agent.ref.target)} namespace returned as ${agent.ref.target}`;
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Routes explicit `orca:` targets and combines the enabled backends' lists. */
+/** Routes explicit `orca:` / `hc:` targets and combines the enabled backends' lists. */
 export function createTerminals(backends: TerminalBackends): Terminals {
-  const enabled = (Object.entries(backends) as Array<["herdr" | "orca", Terminals | null]>).filter(
-    (entry): entry is ["herdr" | "orca", Terminals] => entry[1] !== null,
+  const enabled = (Object.entries(backends) as Array<[BackendName, Terminals | null]>).filter(
+    (entry): entry is [BackendName, Terminals] => entry[1] !== null,
   );
   if (enabled.length === 0) throw new BackendUnavailable("No terminal backend is enabled");
 
@@ -102,9 +104,9 @@ export function createTerminals(backends: TerminalBackends): Terminals {
           complete = false;
           continue;
         }
-        const collision = item.name === "herdr" ? item.result.agents.find((agent) => backendForTarget(agent.ref.target) === "orca") : null;
+        const collision = item.name === "herdr" ? item.result.agents.find((agent) => backendForTarget(agent.ref.target) !== "herdr") : null;
         agents.push(
-          ...item.result.agents.filter((agent) => item.name !== "herdr" || backendForTarget(agent.ref.target) !== "orca"),
+          ...item.result.agents.filter((agent) => item.name !== "herdr" || backendForTarget(agent.ref.target) === "herdr"),
         );
         failures.push(...item.result.failures);
         notices.push(...item.result.notices);
@@ -116,9 +118,9 @@ export function createTerminals(backends: TerminalBackends): Terminals {
       }
       return { agents, failures, complete, notices };
     },
-    async get(target: string): Promise<AgentInfo | null> {
-      const agent = await backendFor(target).get(target);
-      if (backendForTarget(target) !== "orca" && agent && backendForTarget(agent.ref.target) === "orca") {
+    async get(target: string, proof?: "foreground"): Promise<AgentInfo | null> {
+      const agent = await backendFor(target).get(target, proof);
+      if (backendForTarget(target) === "herdr" && agent && backendForTarget(agent.ref.target) !== "herdr") {
         throw new BackendUnavailable(collisionMessage(agent));
       }
       return agent;

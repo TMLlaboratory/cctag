@@ -1,6 +1,6 @@
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type BackendName = "herdr" | "orca";
+export type BackendName = "herdr" | "orca" | "herdr-core";
 export const WRITE_OUTCOME_UNKNOWN_MESSAGE = "送信できたか確認できません。端末を確かめてください";
 export const UNSENDABLE_TEXT_MESSAGE = "入力に送信できない制御文字が含まれています。制御文字を除いてください。";
 
@@ -29,6 +29,7 @@ export interface AgentRef {
   readonly agentKind?: AgentKind;
   readonly sessionId?: string | null;
   readonly transcriptIdentity?: TranscriptIdentity;
+  readonly terminalInstance?: string;
 }
 
 export interface AgentInfo {
@@ -77,11 +78,15 @@ export class SubmitRefused extends Error {
     readonly reason:
       | "not-idle"
       | "draft"
+      | "existing-stash"
       | "probe-unverified"
       | "stash-unverified"
       | "gate"
       | "incomplete-screen"
+      | "agent-unverified"
+      | "foreground-unverified"
       | "agent-changed"
+      | "legacy-claude-images"
       | "cancelled"
       | "unsafe-text",
     message: string,
@@ -89,6 +94,11 @@ export class SubmitRefused extends Error {
   ) {
     super(message);
   }
+}
+
+export function legacySessionRefusal(expected: string | null | undefined, current: string | null) {
+  if ((expected || null) === (current || null)) return null;
+  return expected && current ? "agent-changed" : "foreground-unverified";
 }
 
 export class ExpectationLost extends Error {

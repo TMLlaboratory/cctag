@@ -292,7 +292,7 @@ export interface AgentDriver {
   /** Shift+Tab-style mode ring, or null if this agent has no equivalent. */
   readonly modes: ModeSupport | null;
   /** Handles `@cctag model <argsText>` end-to-end, including its submit outcome. */
-  runModelCommand(terminals: Terminals, agent: AgentInfo, argsText: string): Promise<ModelCommandResult>;
+  runModelCommand(terminals: Terminals, agent: AgentInfo, argsText: string, cancelled?: () => boolean): Promise<ModelCommandResult>;
 }
 
 const DANGER_WORDS_RE = /\b(rm\s+-rf|sudo|--force|DROP\s+TABLE)\b/i;

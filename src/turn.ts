@@ -23,7 +23,7 @@ import {
   WRITE_OUTCOME_UNKNOWN_MESSAGE,
 } from "./backend/types.js";
 import type { AgentInfo, AgentRef, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
-import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
+import { submitDraftNotice, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
 import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
@@ -418,7 +418,7 @@ export class TurnEngine {
       if (lease.cancelled) return;
       const driver = driverFor(agent.agent);
       const backend = backendForTarget(agent.ref.target);
-      if (backend === "orca" && hasUnsendableC0Controls(text)) {
+      if (backend !== "herdr" && hasUnsendableC0Controls(text)) {
         await this.notifier.postReply(
           pairing.channel,
           pairing.threadTs ?? "",
@@ -549,13 +549,15 @@ export class TurnEngine {
           transcriptGrew: () => (canVerify ? transcriptSizeSafe(tPath) > offset : null),
           retryLimit: retries,
           pollIntervalMs: this.opts.pollIntervalMs,
+          hasImages: prepared.imageCount > 0,
         });
-        if (outcome.draftStashed) {
+        const draftNotice = submitDraftNotice(outcome, backend);
+        if (draftNotice) {
           await this.notifier
-            .postReply(pairing.channel, pairing.threadTs ?? "", draftStashedText(backend))
+            .postReply(pairing.channel, pairing.threadTs ?? "", draftNotice)
             .catch(() => {});
         }
-        if (backend === "orca" && outcome.status === "accepted") {
+        if (backend !== "herdr" && outcome.status === "accepted") {
           await statusHandle.update(`📨 ${backend} は入力を受け付けました。ターン開始を確認しています…`).catch(() => {});
         }
       } catch (err) {
@@ -567,7 +569,7 @@ export class TurnEngine {
           return;
         }
         if (err instanceof WriteOutcomeUnknown) {
-          await statusHandle.update(writeOutcomeUnknownText(err)).catch(() => {});
+          await statusHandle.update(writeOutcomeUnknownText(err, backend)).catch(() => {});
           return;
         }
         await statusHandle.update("❌ 開始に失敗しました").catch(() => {});
@@ -944,7 +946,7 @@ export class TurnEngine {
       return { ok: false, reason: "not-pending" };
     }
 
-    if (state.backend === "orca" && hasUnsendableC0Controls(freeText)) {
+    if (state.backend !== "herdr" && hasUnsendableC0Controls(freeText)) {
       throw new ExpectationLost(UNSENDABLE_TEXT_MESSAGE, UNSENDABLE_TEXT_MESSAGE);
     }
     state.answering = true;

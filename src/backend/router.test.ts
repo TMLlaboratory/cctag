@@ -72,6 +72,7 @@ function herdr(overrides: Partial<Terminals> = {}): Terminals {
 test("unprefixed Herdr IDs are passed through unchanged", async () => {
   let received: string | undefined;
   const terminals = createTerminals({
+    "herdr-core": null,
     herdr: herdr({
       async get(target) {
         received = target;
@@ -106,6 +107,7 @@ test("answer, model, and composer channels route to Herdr without changing the r
   const blind = { async answer() {} };
   const composer = { async backTab() {} };
   const terminals = createTerminals({
+    "herdr-core": null,
     herdr: herdr({
       openModelAnswer(received) {
         assert.equal(received, ref);
@@ -136,6 +138,7 @@ test("answer, model, and composer channels route to Herdr without changing the r
 test("orca targets fail closed before reaching the Herdr backend", async () => {
   const calls: string[] = [];
   const terminals = createTerminals({
+    "herdr-core": null,
     herdr: herdr({
       async get(target) {
         calls.push(`get:${target}`);
@@ -176,6 +179,7 @@ test("enabled Orca routes explicitly and list combines backend results", async (
   const target = "orca:tab-1:leaf-2";
   const calls: string[] = [];
   const terminals = createTerminals({
+    "herdr-core": null,
     herdr: herdr({
       async list() {
         return { agents: [agent(PANE)], failures: [], complete: true, notices: [] };
@@ -215,13 +219,14 @@ test("enabled Orca routes explicitly and list combines backend results", async (
   assert.deepEqual(await terminals.read(target, 20, "screen"), { text: "screen", draft: null, complete: true });
   assert.deepEqual(calls, [`get:${target}`, `exists:${target}`, `read:${target}`]);
 
-  const orcaOnly = createTerminals({ herdr: null, orca: herdr() });
+  const orcaOnly = createTerminals({ "herdr-core": null, herdr: null, orca: herdr() });
   await assert.rejects(orcaOnly.get(PANE), UnknownTarget);
 });
 
 
 test("a Herdr result in the reserved Orca namespace raises a collision error", async () => {
   const terminals = createTerminals({
+    "herdr-core": null,
     herdr: herdr({
       async get() {
         return agent("orca:herdr-collision");
@@ -259,6 +264,7 @@ test("a pairing file without a backend field still loads and routes to Herdr", a
 
     const received: string[] = [];
     const terminals = createTerminals({
+      "herdr-core": null,
       herdr: herdr({
         async get(target) {
           received.push(target);
@@ -306,6 +312,7 @@ test("Orca pairing round-trips its namespaced target and backend without a PID",
 
     const received: string[] = [];
     const terminals = createTerminals({
+      "herdr-core": null,
       herdr: herdr(),
       orca: herdr({
         async get(receivedTarget) {
@@ -373,6 +380,81 @@ test("pairing store normalizes backend tags from target prefixes and warns on mi
     assert.equal(warnings.length, 2, "new canonical records do not warn");
   } finally {
     console.warn = originalWarn;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("hc targets route to herdr-core, never to Herdr, and keep their prefix", async () => {
+  const target = "hc:t3j";
+  const herdrCalls: string[] = [];
+  const hcCalls: string[] = [];
+  const terminals = createTerminals({
+    herdr: herdr({
+      async get(received) {
+        herdrCalls.push(received);
+        return agent(received);
+      },
+    }),
+    orca: null,
+    "herdr-core": herdr({
+      async list() {
+        return { agents: [agent(target, "herdr-core")], failures: [], complete: true, notices: [] };
+      },
+      async get(received) {
+        hcCalls.push(received);
+        return agent(received, "herdr-core");
+      },
+    }),
+  });
+
+  assert.equal((await terminals.get(target))?.backend, "herdr-core");
+  assert.deepEqual(hcCalls, [target]);
+  assert.deepEqual(herdrCalls, []);
+  assert.deepEqual((await terminals.list()).agents.map((item) => item.ref.target), [target]);
+
+  const withoutHc = createTerminals({ herdr: herdr(), orca: null, "herdr-core": null });
+  await assert.rejects(withoutHc.get(target), UnknownTarget);
+});
+
+test("a Herdr result in the reserved hc namespace raises a collision error", async () => {
+  const terminals = createTerminals({
+    herdr: herdr({
+      async list() {
+        return { agents: [agent("hc:t1")], failures: [], complete: true, notices: [] };
+      },
+      async get() {
+        return agent("hc:t1");
+      },
+    }),
+    orca: null,
+    "herdr-core": null,
+  });
+  await assert.rejects(terminals.get(PANE), BackendUnavailable);
+  const listed = await terminals.list();
+  assert.deepEqual(listed.agents, []);
+  assert.equal(listed.complete, false);
+});
+
+test("an hc pairing round-trips its target and is tagged herdr-core", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-hc-pairing-"));
+  try {
+    const path = join(dir, "pairings.json");
+    const store = new PairingStore(path);
+    store.add({
+      key: "C1:1.1",
+      channel: "C1",
+      threadTs: "1.1",
+      paneId: "hc:t3j",
+      terminalId: "t3j",
+      cwd: "/tmp/project",
+      pairedBy: "U1",
+      pairedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const reloaded = new PairingStore(path).get("C1", "1.1");
+    assert.equal(reloaded?.paneId, "hc:t3j");
+    assert.equal(reloaded?.backend, "herdr-core");
+    assert.equal((JSON.parse(readFileSync(path, "utf8")) as Pairing[])[0]?.backend, "herdr-core");
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

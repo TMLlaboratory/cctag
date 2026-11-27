@@ -317,6 +317,30 @@ test("a stashed Orca draft is reported in the thread after submission", async ()
   }
 });
 
+test("an accepted core send with unverified restoration remains under turn monitoring", async () => {
+  const target = "hc:t1";
+  const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "herdr-core" };
+  const { notifier, posts, updates } = fakeNotifier();
+  const terminals = fakeBackend(() => "working", () => "private-draft", {
+    async get() {
+      return { ...fakeAgent("working", "herdr-core"), ref: { target, pid: 42, processStartedAt: 1 } };
+    },
+    async submit() {
+      return { status: "accepted", draftStashed: true };
+    },
+  }, "herdr-core");
+  const engine = engineFor(terminals, notifier, 600_000);
+  try {
+    await engine.startTurn(pairing, "U1", "send this");
+    assert.equal(engine.isBusy(target), true);
+    assert.match(posts.join("\n"), /書きかけが戻ったか確認できません/u);
+    assert.match(updates.map(({ text }) => text).join("\n"), /ターン開始を確認/u);
+    assert.doesNotMatch(posts.join("\n"), /private-draft|戻ったことを確認/u);
+  } finally {
+    engine.abortAll();
+  }
+});
+
 test("turn refusal is reported once, in its status message, with probe and stash uncertainty", async () => {
   const target = `orca:${PANE}`;
   const pairing: Pairing = { ...fakePairing(), paneId: target, backend: "orca" };
@@ -927,6 +951,32 @@ test("Orca rejects original C0 text before downloading attachments", async () =>
     assert.equal(engine.isBusy(target), false);
   } finally {
     engine.abortAll();
+  }
+});
+
+test("a Slack image on legacy Herdr Claude produces an actionable refusal before terminal input", async () => {
+  const home = mkdtempSync(join(tmpdir(), "cctag-herdr-image-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  const backend = new HerdrBackend(join(home, "no-herdr-cli"));
+  const terminals = fakeBackend(() => "idle", () => "", { submit: backend.submit.bind(backend) });
+  const { notifier, updates } = fakeNotifier();
+  const engine = engineFor(terminals, {
+    ...notifier,
+    async fetchIncomingFile() { return "iVBORw0KGgo="; },
+  }, 600_000);
+  try {
+    await engine.startTurn(fakePairing(), "U1", "これを見て", {
+      files: [{ id: "F1", name: "screen.png", mimetype: "image/png", size: 8 }],
+    });
+    assert.equal(updates.length, 1);
+    assert.match(updates[0]!.text, /画像の自動変換.*端末から画像を送るか、画像を外して Slack から送り直してください/u);
+    assert.equal(engine.isBusy(PANE), false);
+  } finally {
+    engine.abortAll();
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
