@@ -5,6 +5,7 @@ import {
   AQ_MULTI_CHECKBOX_ACTION_ID,
   AQ_MULTI_SUBMIT_ACTION_ID,
   askUserQuestionBlocks,
+  permissionBlocks,
   selectedOptionIndices,
   withSelectedIndices,
 } from "./blocks.js";
@@ -259,4 +260,13 @@ test("an incomplete empty agent list explains backend failures and notices", () 
   assert.match(text, /不完全/);
   assert.match(text, /セッションを特定できないため接続できません/);
   assert.match(text, /Some entries were filtered/);
+});
+
+test("permission summaries retain all text across sections and keep the choices", () => {
+  const snippet = "sample argument ".repeat(400) + "final argument";
+  const blocks = permissionBlocks("pane", 1, { snippet, choices: [{ num: "1", label: "Yes" }, { num: "2", label: "No" }] });
+  const sections = blocks.slice(1, -1) as Array<{ text: { type: string; text: string } }>;
+  assert.ok(sections.every(({ text }) => text.type === "plain_text" && text.text.length <= 3000));
+  assert.equal(sections.map(({ text }) => text.text).join(""), snippet);
+  assert.equal((blocks.at(-1) as { elements: unknown[] }).elements.length, 2);
 });
