@@ -1,0 +1,12 @@
+{
+  "complete": true,
+  "text": "  Would you like to run the following command?\n\n  Environment: local\n\n  Reason: `/bin/zsh -lc '/usr/bin/printf CCTAG_BENIGN'` requires approval by policy\n\n  $ /usr/bin/printf CCTAG_BENIGN\n\n\n› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel",
+  "capture": {
+    "status": {
+      "app": "codex",
+      "kind": "permission",
+      "state": "blocked"
+    },
+    "turn": 2
+  }
+}

@@ -8,7 +8,7 @@ bot:
 
 | Command | Who | What it does |
 |---|---|---|
-| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code (Herdr / Orca / herdr-core), Codex CLI (Herdr / Orca), `omp` (Orca) |
+| `@cctag connect` | owner | Lists agents from enabled backends: Claude Code and Codex CLI (Herdr / Orca / herdr-core), `omp` (Orca) |
 | `@cctag disconnect` | owner | Unpairs this thread |
 | `@cctag status` | anyone | Shows the paired instance and its live status |
 | `@cctag list` | anyone | Lists all running agents and which are paired |
@@ -19,7 +19,7 @@ bot:
 | `@cctag <anything else>` | anyone (in a paired thread) | Sends the text into the paired session; its reply is posted back in the thread |
 
 `mode`/`plan` reply with a "not supported" message on Codex CLI and `omp`;
-`model` is unavailable on `omp` and on Codex CLI in Orca.
+`model` is unavailable on `omp` and on Codex CLI in Orca and herdr-core.
 
 Only one thread can be paired to a given terminal at a time. Only single-word
 messages (`connect`, `status`, ...) are treated as commands — anything with a
@@ -30,14 +30,19 @@ For supported Claude Code and Codex CLI prompts, cctag posts buttons in the
 thread; a person can answer by clicking one or by responding at the terminal.
 If someone answers at the keyboard, cctag updates the Slack message to say so.
 On herdr-core, answer prompts in the terminal if cctag cannot verify them.
+Start Codex with `codex --no-daemon` for cctag to locate its rollout. The
+same Slack thread stays paired to the terminal after `/new` or resume.
 `omp` prompts appear as terminal-only notices: answer at the terminal; Slack
 buttons and thread replies cannot answer them.
 
 - **AskUserQuestion** (Claude Code only): one button per option; click one,
   or reply in the thread with free text for a custom answer.
-  Multi-select questions aren't rendered as buttons (toggling checkboxes
-  reliably over a terminal isn't robust yet) — reply in the thread listing
-  what you'd pick instead.
+  Multi-select questions show checkboxes and also accept a reply listing the
+  option numbers. Use the terminal for a free-text multi-select answer on
+  herdr-core.
+- **Codex Plan mode questions** (herdr-core): click a choice when cctag can
+  verify the question. Verification is independent for each screen. Add notes
+  or answer an unverified question at the terminal.
 - **Permission / command-approval prompts** (Claude Code or Codex CLI; e.g.
   "Do you want to run `rm -rf ...`?" or Codex's command approval): one button
   per choice, first option styled primary, anything that looks like a refusal
@@ -114,8 +119,8 @@ rather than starting a conversational turn — mechanics differ by agent:
   after reading the complete visible screen and verifying that the same
   confirmation is still present in the same Claude session. If cctag cannot
   verify the confirmation, answer it in the terminal.
-- **Codex CLI** has no `/model <name>` argument — its `/model` opens a
-  two-stage picker (pick a model, then pick a reasoning effort level: `low`
+- **Codex CLI** on Herdr uses the `/model` two-stage picker
+  (pick a model, then pick a reasoning effort level: `low`
   / `medium` / `high` / `extra high`, though which levels are offered
   varies by model). cctag drives that picker for you: `@cctag model
   gpt-5.6-sol high` picks the model and the level in one go; `@cctag model
@@ -125,8 +130,8 @@ rather than starting a conversational turn — mechanics differ by agent:
 
 ## Switching mode
 
-*(Claude Code only — Codex CLI and `omp` have no equivalent mode ring;
-`mode`/`plan` reply with a not-supported message on both.)*
+*The Slack `mode` and `plan` commands apply to Claude Code. Switch Codex
+Plan mode in the terminal.*
 
 `@cctag mode <name>` selects one of Claude Code's four Shift+Tab modes —
 `manual`, `accept-edits`, `plan`, `auto`. There's no slash command for
@@ -178,6 +183,10 @@ background watcher (polling every ~7s) notices once it settles
 (working → idle/done) and posts the new output to the paired thread,
 prefixed with 🖥️. It never replays old history, so pairing mid-task only
 reports what happens *after* pairing.
+
+The herdr-core watcher needs one verified Codex rollout. While Codex keeps
+multiple rollouts open after `/new` or resume, terminal-initiated output may
+only be visible in the terminal.
 
 If terminal-driven work hits a Claude Code or Codex CLI prompt, the watcher
 hands the terminal to the same prompt flow: supported prompts are posted as

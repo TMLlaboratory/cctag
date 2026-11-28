@@ -722,6 +722,37 @@ test("a transcript that appears after watching began is read whole, not skipped"
   });
 });
 
+test("the herdr-core Codex watcher drops output from a file replaced after discovery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-hc-watch-"));
+  try {
+    const path = join(dir, "rollout.jsonl");
+    writeFileSync(path, "");
+    const { dev, ino } = statSync(path, { bigint: true });
+    const transcriptIdentity = { path, device: String(dev), inode: String(ino) };
+    const paneId = "hc:t1";
+    const { notifier, replies } = fakeNotifier();
+    let polls = 0;
+    const watcher = new BackgroundWatcher("herdr-core", fakeTerminals(() => {
+      if (++polls === 2) {
+        renameSync(path, join(dir, "original.jsonl"));
+        writeFileSync(path, JSON.stringify({ type: "response_item", payload: {
+          type: "message", role: "assistant", content: [{ type: "output_text", text: "unrelated reply" }],
+        } }) + "\n");
+      }
+      return {
+        ...fakeAgent(polls === 1 ? "working" : "done", dir),
+        ref: { target: paneId, pid: 1, processStartedAt: 1, agentKind: "codex" },
+        backend: "herdr-core", agent: "codex", transcriptIdentity,
+      };
+    }), storeWithPairing(dir, { ...fakePairing(), paneId }), idleEngine, notifier);
+    await watcher["tick"]();
+    await watcher["tick"]();
+    assert.deepEqual(replies, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a pane herdr reports as working forever still gets its terminal-side response posted", async () => {
   // The production failure: a lingering background shell makes herdr report
   // `working` permanently (background_shell_working outranks every idle rule),

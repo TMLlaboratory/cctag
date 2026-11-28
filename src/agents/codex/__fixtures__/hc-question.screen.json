@@ -1,0 +1,12 @@
+{
+  "complete": true,
+  "text": "  Question 1/1 (1 unanswered)\n  Which label?\n\n  › 1. Red (Recommended)  Warm.\n    2. Blue               Cool.\n    3. None of the above  Optionally, add details in notes (tab)\n\n  tab to add notes | enter to submit answer | esc to interrupt",
+  "capture": {
+    "status": {
+      "app": "codex",
+      "kind": "question",
+      "state": "blocked"
+    },
+    "turn": 5
+  }
+}

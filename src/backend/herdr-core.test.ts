@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, Socket, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +9,9 @@ import type { Notifier } from "../notifier.js";
 import type { Pairing, PairingStore } from "../pairing.js";
 import { TurnEngine } from "../turn.js";
 import { claudeDriver } from "../agents/claude/driver.js";
+import { codexDriver, HC_CODEX_SHARED_SERVER_NOTICE, parseVerifiedHcCodexPrompt } from "../agents/codex/driver.js";
 import { stripSidePane } from "./side-pane.js";
-import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE } from "./herdr-core.js";
+import { HcBackend, HC_TYPED_TEXT_UNSUPPORTED, HC_UNSUPPORTED_AGENTS_NOTICE, type HcBackendOptions } from "./herdr-core.js";
 import { createTerminals, type SubmitContext, type Terminals } from "./index.js";
 import type { VerifiedPrompt } from "./prompt.js";
 import { BackendUnavailable, CoreNotRunning, ExpectationLost, SubmitRefused, WriteOutcomeUnknown, type AgentRef } from "./types.js";
@@ -18,6 +19,9 @@ import { BackendUnavailable, CoreNotRunning, ExpectationLost, SubmitRefused, Wri
 const FIXTURES = new URL("../agents/claude/__fixtures__/", import.meta.url);
 const QUESTION_SCREEN = JSON.parse(readFileSync(new URL("hc-question.screen.json", FIXTURES), "utf8")) as { text: string };
 const PLAN_SCREEN = JSON.parse(readFileSync(new URL("hc-plan-approval.screen.json", FIXTURES), "utf8")) as { text: string };
+const CODEX_FIXTURES = new URL("../agents/codex/__fixtures__/", import.meta.url);
+const CODEX_IDLE = JSON.parse(readFileSync(new URL("hc-idle.screen.json", CODEX_FIXTURES), "utf8")) as { text: string };
+const CODEX_APPROVAL = JSON.parse(readFileSync(new URL("hc-approval.screen.json", CODEX_FIXTURES), "utf8")) as { text: string };
 const MODEL_SWITCH = JSON.parse(
   readFileSync(new URL("hc-model-switch-confirmation.screen.json", FIXTURES), "utf8"),
 ) as { text: string; capture: { status: string } };
@@ -29,6 +33,10 @@ interface FakeTerminal {
   status?: string | null;
   pid?: number;
   foregroundName?: string;
+  argv?: string[];
+  kind?: string;
+  turn?: number;
+  statusMs?: number;
   name?: string | null;
   title?: string;
 }
@@ -83,8 +91,9 @@ if (args[0] === "ls") {
     ? JSON.parse(fs.readFileSync(${JSON.stringify(terminalChanges)}, "utf8")) : {}) };
   out({
     address: t.address, name: t.name ?? null, cwd: "/created/here", state: t.state ?? "live", title: t.title ?? "",
-    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: t.foregroundName ?? "claude" },
-    status: t.status == null ? null : { app: t.agent, state: t.status },
+    foreground: t.pid === undefined ? null : { pid: t.pid, cwd: "/moved/here", name: t.foregroundName ?? "claude", argv: t.argv },
+    status: t.status == null ? null : { app: t.agent, state: t.status, kind: t.kind },
+    turn: t.turn ?? 2, status_ms: t.statusMs ?? 100,
   });
 } else if (args[0] === "read") {
   find(ops[0]);
@@ -130,11 +139,14 @@ if (args[0] === "ls") {
   };
 }
 
-async function withCore(terminals: FakeTerminal[], options: Parameters<typeof fakeHc>[1], run: (backend: HcBackend, fake: Fake) => Promise<void>) {
+async function withCore(
+  terminals: FakeTerminal[], options: Parameters<typeof fakeHc>[1], run: (backend: HcBackend, fake: Fake) => Promise<void>,
+  execFile?: HcBackendOptions["execFile"],
+) {
   const fake = fakeHc(terminals, options);
   try {
     await fake.startCore();
-    await run(new HcBackend(fake.bin, { socket: fake.socket, sessionsDir: fake.sessionsDir }), fake);
+    await run(new HcBackend(fake.bin, { socket: fake.socket, sessionsDir: fake.sessionsDir, execFile }), fake);
   } finally {
     await fake.cleanup();
   }
@@ -190,8 +202,8 @@ test("lists local Claude Code terminals with the session id and cwd Claude Code 
   );
 });
 
-test("notes agents that report a status but are not Claude Code", async () => {
-  await withCore([{ address: "t1", agent: "codex", status: "idle" }], {}, async (backend) => {
+test("notes unsupported agents that report a status", async () => {
+  await withCore([{ address: "t1", agent: "omp", status: "idle" }], {}, async (backend) => {
     const result = await backend.list();
     assert.deepEqual(result.agents, []);
     assert.deepEqual(result.notices, [HC_UNSUPPORTED_AGENTS_NOTICE]);
@@ -205,6 +217,114 @@ test("a Claude Code that records no start time is not offered, since every write
     assert.equal(await backend.get("hc:t1"), null);
   });
 });
+
+const CODEX = { address: "t1", agent: "codex", status: "idle", pid: 202, foregroundName: "codex", argv: ["codex", "--no-daemon"] };
+const CODEX_CTX = { ...CTX, driver: codexDriver };
+const execResult = (stdout: string) => ({ stdout, stderr: "", exitCode: 0 });
+
+test("lists fresh Codex and submits its first message with no rollout", async () => {
+  await withCore([CODEX], { screens: [CODEX_IDLE.text] }, async (backend, fake) => {
+    const result = await backend.list();
+    assert.deepEqual(result.notices, []);
+    assert.equal(result.agents.length, 1);
+    const [agent] = result.agents;
+    assert.equal(agent.agent, "codex");
+    assert.equal(agent.sessionId, null);
+    assert.deepEqual(agent.evidence, { kind: "classified", status: "idle" });
+    await backend.submit(agent.ref, "first message", CODEX_CTX);
+    assert.deepEqual(writes(fake), [["send", "--json", "--", "t1", "first message"]]);
+  }, async (file) => execResult(file === "ps" ? "Tue Nov 24 01:00:00 2026" : "p202\n"));
+});
+
+test("refuses unbound shared-server Codex without sending", async () => {
+  await withCore([{ ...CODEX, argv: ["codex"] }], { screens: [CODEX_IDLE.text] }, async (backend, fake) => {
+    const result = await backend.list();
+    assert.deepEqual(result.agents, []);
+    assert.deepEqual(result.notices, [HC_CODEX_SHARED_SERVER_NOTICE]);
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    await assert.rejects(backend.submit(agent.ref, "unsafe to route", CODEX_CTX), { message: HC_CODEX_SHARED_SERVER_NOTICE });
+    assert.deepEqual(writes(fake), []);
+  }, async (file) => execResult(file === "ps" ? "Tue Nov 24 01:00:00 2026" : "p202\n"));
+});
+
+test("refuses Codex writes when the PID, start time, or foreground executable changes", async () => {
+  let startTime = "Tue Nov 24 01:00:00 2026";
+  await withCore([CODEX], { screens: [CODEX_IDLE.text] }, async (backend, fake) => {
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    for (const change of [{ pid: 203 }, { pid: 202, foregroundName: "zsh" }, { pid: 202, foregroundName: "codex" }]) {
+      fake.setTerminal(change);
+      if (change.foregroundName === "codex") startTime = "Tue Nov 24 01:00:01 2026";
+      await assert.rejects(backend.submit(agent.ref, "do not write", CODEX_CTX), (err) => {
+        return err instanceof SubmitRefused && err.reason === "agent-unverified";
+      });
+    }
+    assert.deepEqual(writes(fake), []);
+  }, async (file) => execResult(file === "ps" ? startTime : "p202\n"));
+});
+
+test("Codex keys require the published blocked turn and a complete plain screen", async (t) => {
+  for (const scenario of ["same prompt", "later hc turn", "new blocked observation", "competing start after publication", "incomplete screen"] as const) {
+    await t.test(scenario, async () => checkCodexApproval(scenario));
+  }
+});
+
+async function checkCodexApproval(scenario: string) {
+  let rollout = "";
+  let competitor = "";
+  const id = "00000000-0000-0000-0000-000000000001";
+  const otherId = "00000000-0000-0000-0000-000000000002";
+  await withCore([{ ...CODEX, status: "blocked", kind: "permission" }], {
+    screens: [CODEX_APPROVAL.text],
+    incomplete: scenario === "incomplete screen",
+  }, async (backend, fake) => {
+    rollout = join(fake.sessionsDir, `rollout-fixture-${id}.jsonl`);
+    competitor = join(fake.sessionsDir, `rollout-fixture-${otherId}.jsonl`);
+    for (const [path, sessionId] of [[rollout, id], [competitor, otherId]]) {
+      writeFileSync(path, JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/moved/here", thread_source: "user" } }) + "\n");
+    }
+    const agent = await backend.get("hc:t1");
+    const selected = agent?.codexRollouts?.find(({ sessionId }) => sessionId === id);
+    const other = agent?.codexRollouts?.find(({ sessionId }) => sessionId === otherId);
+    assert.ok(agent?.hcCodexPromptStamp && selected && other);
+    const context = {
+      ref: agent.ref, rollout: selected.transcriptIdentity, stamp: agent.hcCodexPromptStamp, offset: statSync(rollout).size,
+      competitors: [{ identity: other.transcriptIdentity, offset: statSync(competitor).size }],
+    };
+    const capture = () => backend.read(agent.ref.target, 0, "screen", context);
+    if (scenario === "incomplete screen") {
+      await assert.rejects(capture(), ExpectationLost);
+    } else {
+      const prompt = parseVerifiedHcCodexPrompt(await capture(), context);
+      assert.ok(prompt.kind === "permission");
+      const answer = () => backend.openAnswer(agent.ref, prompt.verified).digit(2);
+      if (scenario === "later hc turn") fake.setTerminal({ turn: 3 });
+      if (scenario === "new blocked observation") fake.setTerminal({ statusMs: 101 });
+      if (scenario === "competing start after publication") {
+        appendFileSync(competitor, '{"type":"event_msg","payload":{"type":"task_started","turn_id":"competing"}}\n');
+      }
+      if (scenario === "same prompt") {
+        await answer();
+        assert.deepEqual(writes(fake), [["keys", "--json", "--", "t1", "2"]]);
+        return;
+      }
+      await assert.rejects(answer(), ExpectationLost);
+    }
+    assert.deepEqual(writes(fake), []);
+  }, async (file, args) => {
+    if (file === "ps") return execResult("Tue Nov 24 01:00:00 2026");
+    if (file === "stat") {
+      const { dev, ino } = statSync(args.at(-1)!, { bigint: true });
+      return execResult(`${dev} ${ino}`);
+    }
+    if (args[0] === "-Fpa") return execResult("p202\nf8\nau\n");
+    return execResult("p202\n" + [rollout, competitor].map((path, i) => {
+      const { dev, ino } = statSync(path, { bigint: true });
+      return `f${8 + i}\nau\ntREG\nD0x${dev.toString(16)}\ni${ino}\nn${path}\n`;
+    }).join(""));
+  });
+}
 
 test("a terminal whose Claude Code has no session record is not offered", async () => {
   await withCore([{ address: "t1", agent: "claude-code", status: "idle" }], {}, async (backend) => {

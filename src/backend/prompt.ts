@@ -1,4 +1,5 @@
 import type { AgentDriver } from "../agents/driver.js";
+import type { HcCodexPromptContext } from "./types.js";
 
 const verifiedPromptBrand: unique symbol = Symbol("VerifiedPrompt");
 const verifiedModelMenuPromptBrand: unique symbol = Symbol("VerifiedModelMenuPrompt");
@@ -12,6 +13,7 @@ export type VerifiedPrompt = {
   readonly expectedCursorLabel?: string;
   readonly expiresAt?: number;
   readonly expiredUserMessage?: string;
+  readonly hcCodex?: HcCodexPromptContext;
 };
 
 export type VerifiedModelMenuPrompt = VerifiedPrompt & {
@@ -33,6 +35,7 @@ export function createVerifiedPrompt(
     expectedCursorLabel?: string;
     expiresAt?: number;
     expiredUserMessage?: string;
+    hcCodex?: HcCodexPromptContext;
   } = {},
 ): VerifiedPrompt {
   return { [verifiedPromptBrand]: true, fingerprint, driver, form, ...options };

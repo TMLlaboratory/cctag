@@ -11,7 +11,7 @@
  */
 
 import type { ScreenSnapshot } from "../../backend/types.js";
-import type { PermissionChoice, PermissionMenu } from "../driver.js";
+import type { AskUserQuestionPaneInfo, PermissionChoice, PermissionMenu } from "../driver.js";
 
 const NUMBERED_LINE_RE = /^\s*(?:›\s*)?(\d+)\.\s*(.+?)\s*$/;
 const CURSOR_LINE_RE = /›\s*\d+\./;
@@ -53,6 +53,48 @@ export function parseCodexMenu(paneText: string): PermissionMenu | null {
     .trim();
 
   return { choices, snippet };
+}
+
+export function parseHcCodexPrompt(text: string):
+  | { kind: "question"; info: AskUserQuestionPaneInfo }
+  | { kind: "permission"; menu: PermissionMenu; isPlanPrompt: false }
+  | null {
+  const rows = text.trimEnd().split("\n");
+  const footer = rows.at(-1)?.trim();
+  const question = footer === "tab to add notes | enter to submit answer | esc to interrupt" ||
+    footer === "tab to add notes | enter to submit all | esc to interrupt";
+  if (!question && footer !== "Press enter to confirm or esc to cancel") return null;
+
+  const header = question ? /^Question \d+\/\d+ \(\d+ unanswered\)$/u : /^Would you like to run the following command\?$/u;
+  const start = rows.map((row) => header.test(row.trim())).lastIndexOf(true);
+  if (start < 0) return null;
+  const body = rows.slice(start, -1);
+  const firstChoice = body.findIndex((row) => NUMBERED_LINE_RE.test(row));
+  const menu = parseCodexMenu(body.join("\n"));
+  if (!menu || firstChoice < 1 || menu.choices.length > 5 ||
+      body.slice(firstChoice).filter((row) => row.trim()).length !== menu.choices.length ||
+      body.slice(firstChoice).filter((row) => CURSOR_LINE_RE.test(row)).length !== 1) return null;
+
+  if (!question) {
+    if (!body.slice(1, firstChoice).some((row) => row.trim().startsWith("$ ")) ||
+        body.join("\n").trim().length > 2900) return null;
+    return { kind: "permission", menu: { choices: menu.choices, snippet: body.join("\n").trim() }, isPlanPrompt: false };
+  }
+
+  const questionText = body.slice(1, firstChoice).join(" ").trim();
+  if (!questionText || !menu.choices.at(-1)?.label.startsWith("None of the above  ")) return null;
+  return {
+    kind: "question",
+    info: {
+      header: body[0]!.trim().replace(/ \(\d+ unanswered\)$/u, ""),
+      question: questionText,
+      options: menu.choices.map(({ label: value }) => {
+        const [label, description] = value.split(/ {2,}/u, 2);
+        return { label: label!, description };
+      }),
+      multiSelect: false,
+    },
+  };
 }
 
 /**
@@ -200,4 +242,11 @@ export function isCodexIdleComposer(snapshot: ScreenSnapshot): boolean {
   const composer = rows.at(-2)!;
   if (!/^›(?: |$)/u.test(composer) || /^›\s*\d+\./u.test(composer)) return false;
   return !rows.some((row) => WORKING_ROW.test(row) || AWAITING_ENTER.test(row));
+}
+
+export function isHcCodexIdleComposer(snapshot: ScreenSnapshot): boolean {
+  if (!snapshot.complete) return false;
+  const [composer, status, hint] = snapshot.text.split("\n").filter((row) => row.trim()).slice(-3);
+  return composer?.trimEnd() === "› Ask Codex to do anything" &&
+    COMPOSER_STATUS_ROW.test(status ?? "") && /^ {2}← for agents · \? for shortcuts\b/u.test(hint ?? "");
 }

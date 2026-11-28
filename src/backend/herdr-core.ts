@@ -5,6 +5,9 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { isClaudeModelSwitchConfirmation } from "../agents/claude/prompts.js";
+import { codexDriver, ownedCodexRollouts, HC_CODEX_SHARED_SERVER_NOTICE } from "../agents/codex/driver.js";
+import { isHcCodexIdleComposer } from "../agents/codex/prompts.js";
+import { sameTranscriptIdentity, verifiedTranscriptSize } from "../agents/transcript.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -16,6 +19,7 @@ import type {
   Terminals,
 } from "./index.js";
 import type { BlindPermissionPrompt, VerifiedModelMenuPrompt, VerifiedPrompt } from "./prompt.js";
+import { lstartTimestamp, nativeExecFile, nativeReadTranscriptHead, runSystem } from "./local-process.js";
 import { stripSidePane } from "./side-pane.js";
 import { backendForTarget } from "./target.js";
 import {
@@ -28,6 +32,9 @@ import {
   type AgentInfo,
   type AgentRef,
   type AgentStatus,
+  type CodexRollout,
+  type HcCodexPromptContext,
+  type HcCodexPromptStamp,
   type ListResult,
   type ScreenSnapshot,
 } from "./types.js";
@@ -38,11 +45,12 @@ const KNOWN_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done
 const CLAUDE_APP = "claude-code";
 const HC_CLAUDE_UNVERIFIED = "herdr-core の前景で Claude Code を確認できませんでした。端末の状態を確認してください。";
 const HC_CLAUDE_CHANGED = "herdr-core の Claude Code セッションが切り替わりました。端末の状態を確認してください。";
+const HC_CODEX_CHANGED = "herdr-core の前景で同じ Codex プロセスを確認できませんでした。端末の状態を確認してください。";
 const HC_BLOCKED_CHANGED = "herdr-core の入力待ち状態が変わりました。端末の状態を確認してください。";
 export const HC_TYPED_TEXT_UNSUPPORTED =
   "herdr-core では、文字を入力したまま送信せずに次の操作へ進めないため、この回答は送れません。端末で答えてください。";
 export const HC_UNSUPPORTED_AGENTS_NOTICE =
-  "herdr-core 上の Claude Code 以外のエージェント（Codex・omp など）には、まだ接続できません。";
+  "herdr-core 上の Claude Code・Codex 以外のエージェント（omp など）には、まだ接続できません。";
 
 /** What `hc get --json` returns; only the fields cctag reads. */
 interface HcTerminal {
@@ -51,8 +59,18 @@ interface HcTerminal {
   cwd: string;
   state: string;
   title?: string | null;
-  foreground?: { pid?: number; cwd?: string; name?: string } | null;
-  status?: { app?: string | null; state?: string | null } | null;
+  foreground?: { argv?: string[]; pid?: number; cwd?: string; name?: string } | null;
+  status?: { app?: string | null; state?: string | null; kind?: string | null } | null;
+  turn?: number;
+  status_ms?: number;
+}
+
+function codexPromptStamp(terminal: HcTerminal): HcCodexPromptStamp | undefined {
+  const { turn, status_ms: statusMs, status } = terminal;
+  return status?.app === "codex" && status.state === "blocked" &&
+    typeof turn === "number" && Number.isSafeInteger(turn) && turn > 0 &&
+    typeof statusMs === "number" && Number.isSafeInteger(statusMs) && statusMs > 0
+    ? { turn, statusMs } : undefined;
 }
 
 /** What `hc ls --json` returns per terminal. */
@@ -61,7 +79,7 @@ interface HcListedTerminal {
   agent?: string;
   state: string;
   /** Present only for programs that report their state (coding agents), absent for shells. */
-  status?: string;
+  status?: string | null;
 }
 
 class HcCliError extends Error {
@@ -151,14 +169,23 @@ function claudeForegroundPid(terminal: HcTerminal): number | null {
     (terminal.status?.app == null || terminal.status.app === CLAUDE_APP) ? pid : null;
 }
 
+function codexForegroundPid(terminal: HcTerminal): number | null {
+  const { pid, name } = terminal.foreground ?? {};
+  return terminal.state === "live" && typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 &&
+    typeof name === "string" && basename(name) === "codex" &&
+    (terminal.status?.app == null || terminal.status.app === "codex") ? pid : null;
+}
+
 export interface HcBackendOptions {
   socket?: string;
   sessionsDir?: string;
+  execFile?: typeof nativeExecFile;
 }
 
 export class HcBackend implements Terminals {
   private readonly socket: string;
   private readonly sessionsDir: string;
+  private readonly system: typeof nativeExecFile;
 
   constructor(
     private readonly bin: string,
@@ -166,6 +193,7 @@ export class HcBackend implements Terminals {
   ) {
     this.socket = options.socket ?? defaultHcSocket();
     this.sessionsDir = options.sessionsDir ?? join(homedir(), ".claude", "sessions");
+    this.system = options.execFile ?? nativeExecFile;
   }
 
   /**
@@ -223,7 +251,34 @@ export class HcBackend implements Terminals {
     }
   }
 
-  private async agentFrom(terminal: HcTerminal): Promise<AgentInfo | null> {
+  private async agentFrom(terminal: HcTerminal, onUnbound?: () => void): Promise<AgentInfo | null> {
+    const codexPid = codexForegroundPid(terminal);
+    if (codexPid !== null) {
+      const cwd = terminal.foreground?.cwd;
+      if (!cwd) return null;
+      const processStartedAt = await this.processStart(codexPid);
+      if (processStartedAt === null) return null;
+      const rollouts = await this.codexRollouts(codexPid, cwd);
+      if (onUnbound && !this.canSubmitCodex(terminal, rollouts)) {
+        onUnbound();
+        return null;
+      }
+      const session = rollouts?.length === 1 ? rollouts[0] : undefined;
+      return {
+        ref: { target: `${PREFIX}${terminal.address}`, pid: codexPid, processStartedAt, agentKind: "codex" },
+        backend: "herdr-core",
+        agent: "codex",
+        sessionId: session?.sessionId ?? null,
+        transcriptIdentity: session?.transcriptIdentity,
+        codexRollouts: rollouts ?? undefined,
+        hcCodexPromptStamp: codexPromptStamp(terminal),
+        cwd,
+        evidence: { kind: "classified", status: terminal.status?.app === "codex" ? normalizeStatus(terminal.status.state) : "unknown" },
+        terminalTitle: terminal.title?.trim() || null,
+        terminalId: terminal.address,
+        displayId: terminal.name ?? terminal.address,
+      };
+    }
     const pid = claudeForegroundPid(terminal);
     if (pid === null) return null;
     const session = await claudeSession(pid, this.sessionsDir);
@@ -242,6 +297,28 @@ export class HcBackend implements Terminals {
     };
   }
 
+  private async processStart(pid: number): Promise<number | null> {
+    const output = await runSystem(this.system, "ps", ["-p", String(pid), "-o", "lstart="]).catch(() => "");
+    return lstartTimestamp(output.trim());
+  }
+
+  private codexRollouts(pid: number, cwd: string) {
+    return ownedCodexRollouts({ pid, cwd }, {
+      homeDir: homedir(),
+      readFile: (path) => readFile(path, "utf8"),
+      readTranscriptHead: nativeReadTranscriptHead,
+      runSystem: (file, args) => runSystem(this.system, file, args),
+    }, true).catch(() => null);
+  }
+
+  private canSubmitCodex(terminal: HcTerminal, rollouts: CodexRollout[] | null): boolean {
+    if (!rollouts) return false;
+    if (rollouts.length > 0) return true;
+    const argv = terminal.foreground?.argv ?? [];
+    const separator = argv.indexOf("--");
+    return argv.slice(1, separator === -1 ? undefined : separator).includes("--no-daemon");
+  }
+
   async list(): Promise<ListResult> {
     let listed: HcListedTerminal[];
     try {
@@ -253,16 +330,19 @@ export class HcBackend implements Terminals {
     }
     // Remote machines' terminals (`machine/t7`) belong to the Spoke on that machine.
     const local = listed.filter((t) => t.state === "live" && !t.address.includes("/"));
-    const notices = local.some((t) => t.agent !== CLAUDE_APP && t.status !== undefined) ? [HC_UNSUPPORTED_AGENTS_NOTICE] : [];
+    const notices = local.some((t) => t.agent !== CLAUDE_APP && t.agent !== "codex" && t.status != null) ? [HC_UNSUPPORTED_AGENTS_NOTICE] : [];
     const failures: ListResult["failures"] = [];
     const agents = (
       await Promise.all(
         local
-          .filter((t) => t.agent === CLAUDE_APP)
+          .filter((t) => t.agent === CLAUDE_APP || t.agent === "codex")
           .map(async (t) => {
             try {
               const terminal = await this.terminal(t.address);
-              return terminal ? await this.agentFrom(terminal) : null;
+              if (!terminal) return null;
+              return await this.agentFrom(terminal, () => {
+                if (!notices.includes(HC_CODEX_SHARED_SERVER_NOTICE)) notices.push(HC_CODEX_SHARED_SERVER_NOTICE);
+              });
             } catch (err) {
               failures.push({ backend: "herdr-core", reason: `${t.address}: ${errorMessage(err)}` });
               return null;
@@ -283,15 +363,54 @@ export class HcBackend implements Terminals {
     return terminal !== null && terminal.state === "live";
   }
 
-  async read(target: string, lines: number, region: "screen" | "history"): Promise<ScreenSnapshot> {
+  async read(target: string, lines: number, region: "screen" | "history", hcCodex?: HcCodexPromptContext): Promise<ScreenSnapshot> {
+    if (hcCodex) {
+      if (target !== hcCodex.ref.target) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      const before = await this.assertCodexPrompt(hcCodex);
+      const screen = await this.json<{ text?: string; complete?: boolean; how?: string }>(["read"], [addressOf(target)]);
+      const after = await this.assertCodexPrompt(hcCodex);
+      if (before !== after || screen.how !== "screen" || screen.complete !== true || typeof screen.text !== "string") {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      }
+      return { text: screen.text, complete: true, draft: null, hcCodexPromptKind: after };
+    }
     const command = region === "history" && lines > 0 ? ["read", "--lines", String(lines)] : ["read"];
     const result = await this.json<{ text?: string; complete?: boolean }>(command, [addressOf(target)]);
     return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
   }
 
+  private async assertCodexPrompt(context: HcCodexPromptContext): Promise<"permission" | "question"> {
+    const terminal = await this.assertWritable(context.ref, codexDriver);
+    const stamp = codexPromptStamp(terminal);
+    const kind = terminal.status?.kind;
+    const cwd = terminal.foreground?.cwd;
+    if (stamp?.turn !== context.stamp.turn || stamp.statusMs !== context.stamp.statusMs ||
+        (kind !== "permission" && kind !== "question") || !cwd) {
+      throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+    }
+    const rollouts = await this.codexRollouts(context.ref.pid!, cwd);
+    const expected = [{ identity: context.rollout, offset: context.offset }, ...context.competitors];
+    if (rollouts?.length !== expected.length) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+    for (const { identity, offset } of expected) {
+      if (!rollouts.some(({ transcriptIdentity }) => sameTranscriptIdentity(identity, transcriptIdentity)) ||
+          await verifiedTranscriptSize(identity) !== offset) {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      }
+    }
+    return kind;
+  }
+
   private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<HcTerminal> {
     const address = addressOf(ref.target);
     const terminal = await this.terminal(address);
+    if (driver.kind === "codex") {
+      const pid = terminal ? codexForegroundPid(terminal) : null;
+      if (ref.agentKind !== "codex" || terminal?.address !== address || pid === null || pid !== ref.pid ||
+          ref.processStartedAt === null || await this.processStart(pid) !== ref.processStartedAt) {
+        throw new ExpectationLost(HC_CODEX_CHANGED, HC_CODEX_CHANGED);
+      }
+      return terminal;
+    }
     const pid = terminal ? claudeForegroundPid(terminal) : null;
     if (driver.kind !== "claude" || terminal?.address !== address || pid === null ||
         ref.pid === null || ref.processStartedAt === null || !ref.sessionId) {
@@ -309,7 +428,21 @@ export class HcBackend implements Terminals {
 
   async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
     try {
-      await this.assertWritable(ref, ctx.driver);
+      const terminal = await this.assertWritable(ref, ctx.driver);
+      if (ctx.driver.kind === "codex") {
+        if (terminal.status?.app !== "codex" || !["idle", "done"].includes(terminal.status.state ?? "")) {
+          throw new SubmitRefused("not-idle", "Codex is not idle");
+        }
+        const rollouts = terminal.foreground?.cwd ? await this.codexRollouts(ref.pid!, terminal.foreground.cwd) : null;
+        if (!this.canSubmitCodex(terminal, rollouts)) {
+          throw new SubmitRefused("agent-unverified", HC_CODEX_SHARED_SERVER_NOTICE);
+        }
+        const screen = await this.read(ref.target, 0, "screen");
+        if (!isHcCodexIdleComposer(screen)) throw new SubmitRefused("incomplete-screen", "Codex composer could not be verified");
+        const current = await this.assertWritable(ref, ctx.driver);
+        if (current.turn !== terminal.turn || current.status?.state !== terminal.status.state ||
+            current.status?.app !== "codex") throw new SubmitRefused("not-idle", "Codex is not idle");
+      }
     } catch (err) {
       if (err instanceof ExpectationLost) throw new SubmitRefused("agent-unverified", err.message);
       throw err;
@@ -329,15 +462,11 @@ export class HcBackend implements Terminals {
   }
 
   openAnswer(ref: AgentRef, prompt: VerifiedPrompt, purpose?: "claude-model-switch"): AnswerChannel {
-    const channel = this.createAnswerChannel(ref, prompt, purpose === "claude-model-switch");
-    return { digit: channel.digit, text: channel.text, move: channel.move, complete: channel.complete, confirm: channel.confirm };
+    return this.createAnswerChannel(ref, prompt, purpose === "claude-model-switch");
   }
 
-  openModelAnswer(ref: AgentRef, prompt: VerifiedModelMenuPrompt): ModelAnswerChannel {
-    if (prompt.capability !== "codex-model-menu" || prompt.driver.kind !== "codex" || prompt.form !== "digit-then-enter") {
-      throw new ExpectationLost("Escape is restricted to verified Codex model-selection menus");
-    }
-    return this.createAnswerChannel(ref, prompt);
+  openModelAnswer(_ref: AgentRef, _prompt: VerifiedModelMenuPrompt): ModelAnswerChannel {
+    throw new ExpectationLost("Codex model changes require the terminal");
   }
 
   /**
@@ -346,7 +475,7 @@ export class HcBackend implements Terminals {
    * pastes it with Enter through `hc send --force`. Anything else after
    * `text()` would need the text typed but not submitted, and is refused.
    */
-  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt, modelSwitch = false): ModelAnswerChannel {
+  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt, modelSwitch = false): AnswerChannel {
     const address = addressOf(ref.target);
     let firstWrite = true;
     let active = true;
@@ -358,7 +487,7 @@ export class HcBackend implements Terminals {
       if (before.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       const snapshot = await this.read(ref.target, 0, "screen");
       if (!snapshot.complete) throw new ExpectationLost("the verified prompt screen is incomplete");
-      const current = prompt.driver.parseBlockedPane(snapshot.text);
+      const current = prompt.driver.parseBlockedPane(snapshot.text, "herdr-core");
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
       }
@@ -377,6 +506,7 @@ export class HcBackend implements Terminals {
     const write = async (action: () => Promise<void>, terminal = false, modelConfirmation = false): Promise<void> => {
       assertActive();
       if (modelSwitch && !modelConfirmation) throw new ExpectationLost("only the affirmative model-switch digit is allowed");
+      if (prompt.driver.kind === "codex") throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       if (firstWrite) await assertFingerprint(modelConfirmation);
       const current = await this.assertWritable(ref, prompt.driver);
       if (current.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
@@ -389,8 +519,25 @@ export class HcBackend implements Terminals {
     };
 
     return {
-      digit: (n, terminal = prompt.form === "digit-confirms") => {
+      digit: async (n, terminal = prompt.form === "digit-confirms") => {
         assertNoPendingText();
+        if (prompt.driver.kind === "codex") {
+          assertActive();
+          const context = prompt.hcCodex;
+          if (!context || context.ref.pid !== ref.pid || context.ref.processStartedAt !== ref.processStartedAt ||
+              !terminal || !Number.isInteger(n) || n < 1 || n > 9) {
+            throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+          }
+          const snapshot = await this.read(ref.target, 0, "screen", context);
+          const current = prompt.driver.parseBlockedPane(snapshot.text, "herdr-core");
+          if ((current.kind !== "question" && current.kind !== "permission") ||
+              current.kind !== snapshot.hcCodexPromptKind || current.verified.fingerprint !== prompt.fingerprint) {
+            throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+          }
+          active = false;
+          await keys(String(n))();
+          return;
+        }
         return write(keys(String(n)), terminal, modelSwitch && n === 1 && terminal);
       },
       text: async (value) => {
@@ -418,10 +565,6 @@ export class HcBackend implements Terminals {
         if (firstWrite) throw new ExpectationLost("an answer channel cannot complete before its first write");
         active = false;
       },
-      escape: () => {
-        assertNoPendingText();
-        return write(keys("esc"), true);
-      },
     };
   }
 
@@ -437,6 +580,7 @@ export class HcBackend implements Terminals {
     const address = addressOf(ref.target);
     return {
       backTab: async () => {
+        if (driver.kind === "codex") throw new ExpectationLost("Codex mode changes require the terminal");
         await this.assertWritable(ref, driver);
         await this.json(["keys"], [address, "shift+tab"]);
       },

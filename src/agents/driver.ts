@@ -1,6 +1,6 @@
 import type { BlindPermissionPrompt, VerifiedPrompt } from "../backend/prompt.js";
 import type { AnswerChannel, ComposerChannel, SubmitOutcome, Terminals } from "../backend/index.js";
-import type { AgentInfo, AgentRef, ScreenSnapshot, TranscriptIdentity } from "../backend/types.js";
+import type { AgentInfo, AgentRef, BackendName, ScreenSnapshot, TranscriptIdentity } from "../backend/types.js";
 import { claudeDriver } from "./claude/driver.js";
 import { codexDriver } from "./codex/driver.js";
 import { ompDriver } from "./omp/driver.js";
@@ -30,6 +30,12 @@ export interface AskUserQuestionPaneInfo {
 export type PromptFingerprintInput =
   | { kind: "question"; info: AskUserQuestionPaneInfo }
   | { kind: "permission"; menu: PermissionMenu | null; isPlanPrompt: boolean; planFeedbackOptionNum?: number };
+
+export function agentTranscriptPath(agent: AgentInfo, driver: AgentDriver): string {
+  if (agent.transcriptIdentity) return agent.transcriptIdentity.path;
+  if (agent.backend === "herdr-core" && agent.agent === "codex") return "";
+  return driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+}
 
 /** Parsed blocked screen. Only parsed menus carry a verified write capability. */
 export type BlockedPrompt =
@@ -183,7 +189,7 @@ export interface AgentDriver {
   extractLifecycle(records: unknown[]): TurnLifecycleEvent[];
 
   /** Classifies what a `blocked` pane is currently showing. */
-  parseBlockedPane(paneText: string): BlockedPrompt;
+  parseBlockedPane(paneText: string, backend?: BackendName): BlockedPrompt;
   /** Parses a complete post-submit review and, when supplied, verifies this answer's visible selection. */
   parseAnswerReview?(
     snap: ScreenSnapshot,

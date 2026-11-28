@@ -22,15 +22,16 @@ import {
   WriteOutcomeUnknown,
   WRITE_OUTCOME_UNKNOWN_MESSAGE,
 } from "./backend/types.js";
-import type { AgentInfo, AgentRef, AgentStatus, BackendName, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
+import type { AgentInfo, AgentRef, AgentStatus, BackendName, CodexRollout, HcCodexPromptContext, ScreenSnapshot, TranscriptIdentity } from "./backend/types.js";
 import { draftStashedText, submitRefusedText, writeOutcomeUnknownText } from "./backend/submit-notice.js";
 import { backendForTarget } from "./backend/target.js";
 import { PaneLeaseRegistry, type PaneLease } from "./leases.js";
 import { EMPTY_TRANSCRIPT_BOUNDARIES, resolveStatus, SettleTracker, transcriptBoundaries, type StatusResolution } from "./settle.js";
 import type { Pairing } from "./pairing.js";
 import { isUnsupportedByRemote, type MessageHandle, type Notifier } from "./notifier.js";
-import { readNewRecords, readRecentRecords, transcriptSizeSafe } from "./agents/transcript.js";
-import { driverFor, type AgentDriver, type AskUserQuestionPaneInfo, type BlockedPrompt } from "./agents/driver.js";
+import { readNewRecords, readRecentRecords, readVerifiedRecords, sameTranscriptIdentity, transcriptSizeSafe, verifiedTranscriptSize } from "./agents/transcript.js";
+import { agentTranscriptPath, driverFor, type AgentDriver, type AskUserQuestionPaneInfo, type BlockedPrompt } from "./agents/driver.js";
+import { isCodexSubmittedInput } from "./agents/codex/transcript.js";
 import { promptFingerprint } from "./agents/fingerprint.js";
 import {
   createOmpStatusMemory,
@@ -54,23 +55,96 @@ import { randomInt } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
-import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED } from "./agents/codex/driver.js";
+import { CODEX_ORCA_TERMINAL_ANSWER, CODEX_THREAD_SWITCHED, HC_CODEX_SHARED_SERVER_NOTICE, codexDriver, parseVerifiedHcCodexPrompt } from "./agents/codex/driver.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function sameTranscriptIdentity(
-  left: TranscriptIdentity | undefined,
-  right: TranscriptIdentity | undefined,
-): boolean {
-  return (
-    left !== undefined &&
-    right !== undefined &&
-    left.path === right.path &&
-    left.device === right.device &&
-    left.inode === right.inode
-  );
+interface CodexRolloutBaseline {
+  identity: TranscriptIdentity;
+  offset: number | null;
+}
+
+interface HcCodexInput {
+  text: string;
+  sentAt: number;
+  baselines: CodexRolloutBaseline[];
+  startedRollouts: TranscriptIdentity[];
+}
+
+/**
+ * How far a file's birthtime may read before the clock that stamped `sentAt`. Linux stamps file times from a
+ * coarse clock (one scheduler tick, up to 10 ms), so a rollout Codex creates right after the send can carry a
+ * birthtime a few ms before `sentAt`, read as "pre-existing", and never be bound. Widening by a few ticks cannot
+ * replay old input: the input record must still carry a timestamp at or after `sentAt` to match.
+ */
+const FS_BIRTHTIME_SLACK_MS = 50;
+
+const HC_CODEX_INPUT_UNVERIFIED = "⚠️ Codex の入力先を確認できませんでした。端末で応答を確認してください。";
+
+function baselineCodexRollouts(rollouts: readonly CodexRollout[]): Promise<CodexRolloutBaseline[]> {
+  return Promise.all(rollouts.map(async ({ transcriptIdentity: identity }) => ({ identity, offset: await verifiedTranscriptSize(identity) })));
+}
+
+function codexTaskStart(record: Record<string, unknown>) {
+  const boundary = codexDriver.extractLifecycle([record])[0];
+  return boundary?.kind === "started" ? boundary : undefined;
+}
+
+async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCodexInput) {
+  const matches = [];
+  const scanned = [...input.baselines];
+  for (const rollout of rollouts) {
+    const identity = rollout.transcriptIdentity;
+    const baseline = input.baselines.find((entry) => sameTranscriptIdentity(entry.identity, identity));
+    const offset = baseline ? baseline.offset : 0;
+    if (offset === null) return null;
+    const batch = baseline ? await readVerifiedRecords(identity, { offset })
+      : await readVerifiedRecords(identity, { createdSince: input.sentAt - FS_BIRTHTIME_SLACK_MS });
+    if (!batch) return null;
+    if (batch === "pre-existing") continue;
+    const { records, newOffset } = batch;
+    const starts = records.map(codexTaskStart);
+    if (starts.some(Boolean) && !input.startedRollouts.some((started) => sameTranscriptIdentity(started, identity))) {
+      input.startedRollouts.push(identity);
+    }
+    const consumed = { identity, offset: newOffset };
+    if (baseline) scanned[scanned.indexOf(baseline)] = consumed;
+    else scanned.push(consumed);
+    const inputRecord = records.findIndex((record) => isCodexSubmittedInput(record, input.text, input.sentAt));
+    if (inputRecord === -1) continue;
+    const start = starts.slice(0, inputRecord).map(Boolean).lastIndexOf(true);
+    const turnId = starts[start]?.turnId;
+    if (!turnId) continue;
+    matches.push({ rollout, turnId, records: records.slice(start), offset, newOffset });
+  }
+  // Closing a writer does not rule out an input recorded after its pre-send offset.
+  if (matches.length && input.baselines.some(({ identity }) =>
+    !rollouts.some(({ transcriptIdentity }) => sameTranscriptIdentity(identity, transcriptIdentity)))) return null;
+  const selected = matches[0]?.rollout.transcriptIdentity;
+  return {
+    matches,
+    scanned,
+    competingStart: input.startedRollouts.some((identity) => !sameTranscriptIdentity(identity, selected)),
+  };
+}
+
+async function otherCodexRolloutStarted(
+  state: TurnState, rollouts: readonly CodexRollout[],
+): Promise<boolean> {
+  for (const { transcriptIdentity } of rollouts) {
+    if (sameTranscriptIdentity(transcriptIdentity, state.transcriptIdentity)) continue;
+    const baseline = state.hcCodexRollouts?.find(({ identity }) => sameTranscriptIdentity(identity, transcriptIdentity));
+    if (!baseline) return true;
+    if (baseline.offset === null) return true;
+    const batch = await readVerifiedRecords(transcriptIdentity, { offset: baseline.offset });
+    if (!batch) return true;
+    const { records, newOffset } = batch;
+    baseline.offset = newOffset;
+    if (state.driver.extractLifecycle(records).some(({ kind }) => kind === "started")) return true;
+  }
+  return false;
 }
 
 const PROMPT_ID_LIMIT = 2 ** 48;
@@ -193,6 +267,9 @@ interface TurnState {
    * session's transcript held no trace of the message.
    */
   awaitingFirstRecordSince?: number;
+  hcCodexInput?: HcCodexInput;
+  hcCodexRollouts?: CodexRolloutBaseline[];
+  hcCodexTurnId?: string;
   /** OMP's consecutive-screen and one-notice-per-fingerprint memory. */
   ompStatus: OmpStatusMemory | null;
   ompNoticeText?: string;
@@ -307,6 +384,7 @@ export interface BlockedTerminalHandoff {
   sessionId: string;
   transcriptPath: string;
   transcriptIdentity?: TranscriptIdentity;
+  hcCodexTurnId?: string;
   offset: number;
   collected: string[];
   paneId: string;
@@ -448,8 +526,8 @@ export class TurnEngine {
         : text;
 
       const sessionId = agent.sessionId ?? "";
-      const tPath = agent.transcriptIdentity?.path ?? driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
-      const offset = tPath ? transcriptSizeSafe(tPath) : 0;
+      const tPath = agentTranscriptPath(agent, driver);
+      const offset = tPath && !(backend === "herdr-core" && driver.kind === "codex") ? transcriptSizeSafe(tPath) : 0;
 
       // A pane sitting at one of the agent's startup dialogs reports `idle`, so
       // nothing above this catches it, and submitting anyway is actively
@@ -541,7 +619,18 @@ export class TurnEngine {
         .trim();
 
       try {
-        const canVerify = tPath !== "";
+        if (backend === "herdr-core" && driver.kind === "codex") {
+          const current = await this.terminals.get(paneId);
+          if (!current?.codexRollouts) throw new SubmitRefused("agent-unverified", HC_CODEX_SHARED_SERVER_NOTICE);
+          const baselines = await baselineCodexRollouts(current.codexRollouts);
+          if (baselines.some(({ offset }) => offset === null)) {
+            throw new SubmitRefused("agent-unverified", "Codex の rollout を確認できなかったため送信しませんでした。端末の状態を確認してください。");
+          }
+          const sentAt = Date.now();
+          state.hcCodexInput = { text: normalized, sentAt, baselines, startedRollouts: [] };
+          state.awaitingFirstRecordSince = sentAt;
+        }
+        const canVerify = tPath !== "" && !state.hcCodexInput;
         const retries = prepared.imageCount > 0 && canVerify ? SUBMIT_RETRIES_WITH_IMAGES : 1;
         const outcome = await this.terminals.submit(agent.ref, normalized, {
           driver,
@@ -563,7 +652,10 @@ export class TurnEngine {
         // roll it back so the terminal doesn't stay stuck "busy" forever.
         this.turns.delete(paneId);
         if (err instanceof SubmitRefused) {
-          await statusHandle.update(submitRefusedText(err.reason, backend, err.composer)).catch(() => {});
+          const notice = backend === "herdr-core" && driver.kind === "codex" && err.reason === "agent-unverified"
+            ? `⚠️ ${err.message}`
+            : submitRefusedText(err.reason, backend, err.composer);
+          await statusHandle.update(notice).catch(() => {});
           return;
         }
         if (err instanceof WriteOutcomeUnknown) {
@@ -683,6 +775,7 @@ export class TurnEngine {
         sessionId: handoff.sessionId,
         transcriptPath: handoff.transcriptPath,
         transcriptIdentity: handoff.transcriptIdentity,
+        hcCodexTurnId: handoff.hcCodexTurnId,
         offset: handoff.offset,
         collected: [...handoff.collected],
         outboxBaseline: handoff.outboxBaseline,
@@ -767,6 +860,8 @@ export class TurnEngine {
           info,
           state.lease.signal,
         );
+      } else if (state.backend === "herdr-core" && state.driver.kind === "codex") {
+        await channel.digit(optionIndex + 1);
       } else {
         await state.driver.answerOption(channel, String(optionIndex + 1), label);
       }
@@ -901,7 +996,9 @@ export class TurnEngine {
       const choice = prompt.menu.choices.find((candidate) => candidate.num === num);
       if (!choice) return { ok: false, reason: "not-pending" };
       const channel = this.terminals.openAnswer(state.ref, prompt.verified);
-      answer = () => state.driver.answerOption(channel, num, choice.label);
+      answer = state.backend === "herdr-core" && state.driver.kind === "codex"
+        ? () => channel.digit(Number(num))
+        : () => state.driver.answerOption(channel, num, choice.label);
     } else {
       return { ok: false, reason: "not-pending" };
     }
@@ -1075,7 +1172,7 @@ export class TurnEngine {
         state.pairing.channel,
         state.pairing.threadTs ?? "",
         `❓ ${aq.header}: ${aq.question}`,
-        askUserQuestionBlocks(paneId, promptId, aq),
+        askUserQuestionBlocks(paneId, promptId, aq, state.driver.kind !== "codex" || state.backend !== "herdr-core"),
       );
       state.phase = "awaiting-question";
       return;
@@ -1289,17 +1386,33 @@ export class TurnEngine {
         return;
       }
 
+      const hcCodex = state.backend === "herdr-core" && state.driver.kind === "codex";
+      if (hcCodex && (agent.agent !== "codex" || agent.ref.pid !== state.ref.pid ||
+          agent.ref.processStartedAt !== state.ref.processStartedAt)) {
+        await this.finalize(state, CODEX_THREAD_SWITCHED);
+        return;
+      }
       const sessionChanged = Boolean(agent.sessionId && agent.sessionId !== state.sessionId);
+      const codexRollouts = agent.codexRollouts ?? [];
+      if (hcCodex && !state.hcCodexInput && state.transcriptIdentity && codexRollouts.length > 0 && (
+        !codexRollouts.some(({ transcriptIdentity }) => sameTranscriptIdentity(transcriptIdentity, state.transcriptIdentity)) ||
+        await otherCodexRolloutStarted(state, codexRollouts)
+      )) {
+        state.promptId = null;
+        await state.promptHandle?.update(CODEX_THREAD_SWITCHED, []).catch(() => {});
+        await this.finalize(state, CODEX_THREAD_SWITCHED);
+        return;
+      }
       const identityChanged =
         state.driver.kind === "omp" &&
         !sameTranscriptIdentity(state.transcriptIdentity, agent.transcriptIdentity);
-      if (sessionChanged && state.driver.kind === "codex" && agent.transcriptIdentity) {
+      if (!hcCodex && sessionChanged && state.driver.kind === "codex" && agent.transcriptIdentity) {
         // Not followed into the new rollout: from 0 it replays the resumed thread's history, and
         // from its end the turn never sees a start and holds the pane until the timeout.
         await this.finalize(state, CODEX_THREAD_SWITCHED);
         return;
       }
-      if (sessionChanged || identityChanged) {
+      if (!hcCodex && (sessionChanged || identityChanged)) {
         if (state.driver.kind === "omp") {
           this.switchOmpSession(state, agent);
         } else {
@@ -1307,8 +1420,7 @@ export class TurnEngine {
           if (state.backend === "herdr-core") state.ref = agent.ref;
           state.sessionId = agent.sessionId ?? "";
           state.transcriptIdentity = agent.transcriptIdentity;
-          state.transcriptPath =
-            agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+          state.transcriptPath = agentTranscriptPath(agent, state.driver);
           state.offset = 0;
           // A new session is the agent acting on the prompt (`/clear`, a resume).
           state.awaitingFirstRecordSince = undefined;
@@ -1316,10 +1428,9 @@ export class TurnEngine {
           state.settle = new SettleTracker();
           state.previousStatus = "working";
         }
-      } else if (!state.transcriptPath) {
+      } else if (!hcCodex && !state.transcriptPath) {
         // Retry the cwd-based fallback if transcript creation was delayed.
-        const located =
-          agent.transcriptIdentity?.path ?? state.driver.locateTranscript(agent.cwd, agent.sessionId) ?? "";
+        const located = agentTranscriptPath(agent, state.driver);
         if (located) {
           state.transcriptPath = located;
           state.transcriptIdentity = agent.transcriptIdentity;
@@ -1327,9 +1438,43 @@ export class TurnEngine {
         }
       }
 
-      if (state.transcriptPath) {
-        const readOffset = state.offset;
-        const { records, newOffset } = await readNewRecords(state.transcriptPath, readOffset);
+      let boundInput: NonNullable<Awaited<ReturnType<typeof matchHcCodexInput>>>["matches"][number] | undefined;
+      let competingStart = false;
+      if (state.hcCodexInput) {
+        const input = state.hcCodexInput;
+        const match = await matchHcCodexInput(codexRollouts, input);
+        if (!match || match.matches.length > 1) {
+          await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
+          return;
+        }
+        boundInput = match.matches[0];
+        if (!boundInput) {
+          if (Date.now() - input.sentAt < (this.opts.firstRecordGraceMs ?? FIRST_RECORD_GRACE_MS)) continue;
+          await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
+          return;
+        }
+        state.hcCodexInput = undefined;
+        state.sessionId = boundInput.rollout.sessionId;
+        state.transcriptIdentity = boundInput.rollout.transcriptIdentity;
+        state.transcriptPath = boundInput.rollout.transcriptIdentity.path;
+        state.hcCodexRollouts = match.scanned;
+        state.hcCodexTurnId = boundInput.turnId;
+        competingStart = match.competingStart;
+      }
+
+      const path = hcCodex && !codexRollouts.length ? "" : state.transcriptPath;
+      if (path) {
+        const readOffset = boundInput?.offset ?? state.offset;
+        const batch = boundInput ?? (hcCodex
+          ? await readVerifiedRecords(state.transcriptIdentity!, { offset: readOffset })
+          : await readNewRecords(path, readOffset));
+        if (!batch) {
+          state.promptId = null;
+          await state.promptHandle?.update(HC_CODEX_INPUT_UNVERIFIED, []).catch(() => {});
+          await this.finalize(state, HC_CODEX_INPUT_UNVERIFIED);
+          return;
+        }
+        const { records, newOffset } = batch;
         if (state.driver.kind === "omp") {
           const ownership = await this.revalidateOmpTranscript(state, agent);
           if (ownership === "lost") return;
@@ -1337,7 +1482,8 @@ export class TurnEngine {
         }
         const grew = newOffset > readOffset;
         state.offset = newOffset;
-        const output = state.driver.extractTurnOutput(records);
+        const nextStart = hcCodex ? records.findIndex((record, index) => (!boundInput || index > 0) && codexTaskStart(record)) : -1;
+        const output = state.driver.extractTurnOutput(nextStart === -1 ? records : records.slice(0, nextStart));
         state.collected.push(...output.texts);
         for (const name of output.toolNames) {
           state.toolCounts[name] = (state.toolCounts[name] ?? 0) + 1;
@@ -1348,6 +1494,14 @@ export class TurnEngine {
         if (grew) {
           state.deadlineAt = Date.now() + this.opts.turnTimeoutMs;
           state.awaitingFirstRecordSince = undefined;
+        }
+        if (hcCodex && output.lifecycle?.some(({ kind, turnId }) =>
+          kind !== "started" && turnId === state.hcCodexTurnId)) state.hcCodexTurnId = undefined;
+        if (nextStart !== -1 || competingStart) {
+          state.promptId = null;
+          await state.promptHandle?.update(CODEX_THREAD_SWITCHED, []).catch(() => {});
+          await this.finalize(state, CODEX_THREAD_SWITCHED);
+          return;
         }
       }
 
@@ -1420,7 +1574,7 @@ export class TurnEngine {
             state.failures.read = 0;
             return {
               snapshot,
-              fingerprint: snapshot.complete ? promptFingerprint(state.driver.parseBlockedPane(snapshot.text)) : null,
+              fingerprint: snapshot.complete ? promptFingerprint(state.driver.parseBlockedPane(snapshot.text, state.backend)) : null,
             };
           },
         });
@@ -1454,8 +1608,25 @@ export class TurnEngine {
         // Ownership of a prompt already delivered to Slack must not turn on one
         // failed read.
         let paneText: string;
+        let hcPrompt: HcCodexPromptContext | undefined;
+        if (hcCodex && path && state.hcCodexTurnId && state.transcriptIdentity && agent.hcCodexPromptStamp) {
+          const competitors = codexRollouts.flatMap(({ transcriptIdentity }) => {
+            if (sameTranscriptIdentity(transcriptIdentity, state.transcriptIdentity)) return [];
+            const baseline = state.hcCodexRollouts?.find(({ identity }) => sameTranscriptIdentity(identity, transcriptIdentity));
+            return baseline?.offset == null ? [] : [{ identity: baseline.identity, offset: baseline.offset }];
+          });
+          if (competitors.length + 1 === codexRollouts.length) {
+            hcPrompt = { ref: state.ref, stamp: agent.hcCodexPromptStamp, rollout: state.transcriptIdentity, offset: state.offset, competitors };
+          }
+        }
+        let hcScreen: ScreenSnapshot | null = null;
         try {
-          if (resolution.screen) {
+          if (hcCodex) {
+            hcScreen = hcPrompt
+              ? await this.terminals.read(state.paneId, 0, "screen", hcPrompt).catch(() => null)
+              : null;
+            paneText = hcScreen?.complete && hcScreen.hcCodexPromptKind ? hcScreen.text : "";
+          } else if (resolution.screen) {
             paneText = resolution.screen.text;
           } else {
             const snapshot = await this.terminals.read(state.paneId, BLOCKED_PANE_LINES, state.driver.readRegion);
@@ -1477,15 +1648,19 @@ export class TurnEngine {
           );
           return;
         }
-        const prompt = state.driver.parseBlockedPane(paneText);
-        const fingerprint = promptFingerprint(prompt);
+        const prompt = hcScreen && hcPrompt
+          ? parseVerifiedHcCodexPrompt(hcScreen, hcPrompt)
+          : state.driver.parseBlockedPane(paneText, state.backend);
+        const fingerprint = hcPrompt && (prompt.kind === "question" || prompt.kind === "permission")
+          ? JSON.stringify([hcPrompt.stamp, hcPrompt.offset, hcPrompt.competitors, prompt.verified.fingerprint])
+          : promptFingerprint(prompt);
 
         if (state.phase === "running") {
           // A NEW prompt appeared (either the first one this turn, or the
           // next one in a multi-question flow — each is independently
           // parsed off the pane; see prompts.ts).
           await this.postPrompt(state, paneText, prompt, fingerprint);
-        } else if (fingerprint !== null && fingerprint !== state.promptFingerprint) {
+        } else if ((hcCodex || fingerprint !== null) && fingerprint !== state.promptFingerprint) {
           // Includes the case where the posted prompt had no identity at all.
           // What was posted for it is a raw screen dump with no usable buttons,
           // so replacing that with a prompt we *can* read is strictly better —

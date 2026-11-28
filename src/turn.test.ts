@@ -20,7 +20,7 @@ import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -2571,6 +2571,198 @@ test("a Codex thread resumed mid-turn on Orca ends the turn instead of replaying
   } finally {
     engine?.abortAll();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("herdr-core Codex binds a new rollout after /new without replaying the same input in the old rollout", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-input-"));
+  const oldPath = join(dir, "old.jsonl");
+  const nextPath = join(dir, "new.jsonl");
+  const text = "identical user text";
+  const record = (type: string, payload: Record<string, unknown>) =>
+    JSON.stringify({ type, timestamp: new Date(Date.now() + 1000).toISOString(), payload }) + "\n";
+  const records = (reply: string) =>
+    record("event_msg", { type: "task_started", turn_id: "1" }) +
+    record("event_msg", { type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text }] } }) +
+    record("response_item", { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: reply }] }) +
+    record("event_msg", { type: "task_complete", turn_id: "1" });
+  writeFileSync(oldPath, records("historical reply"));
+  const old = { sessionId: "old", transcriptIdentity: rolloutIdentity(oldPath) };
+  let next = old;
+  const paneId = "hc:t1";
+  const pairing = { ...fakePairing(), paneId };
+  const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+  const { notifier, posts } = fakeNotifier();
+  let sent = false;
+  const terminals = fakeBackend(() => "idle", () => "", {
+    async get() {
+      return {
+        ...fakeAgent(sent ? "done" : "idle", "herdr-core"),
+        ref,
+        agent: "codex",
+        cwd: dir,
+        sessionId: sent ? null : old.sessionId,
+        transcriptIdentity: sent ? undefined : old.transcriptIdentity,
+        codexRollouts: sent ? [old, next] : [old],
+      };
+    },
+    async submit() {
+      writeFileSync(nextPath, records("new reply"));
+      // Linux stamps file times from a coarse clock: a file made right after sentAt can carry a birthtime a few ms before it.
+      const coarse = (Date.now() - 4) / 1000;
+      utimesSync(nextPath, coarse, coarse);
+      next = { sessionId: "next", transcriptIdentity: rolloutIdentity(nextPath) };
+      sent = true;
+      return { status: "started", draftStashed: false };
+    },
+  }, "herdr-core");
+  const engine = engineFor(terminals, notifier, 5000);
+  try {
+    await engine.startTurn(pairing, "U1", text);
+    for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+    assert.equal(engine.isBusy(paneId), false);
+    assert.ok(posts.includes("new reply"), JSON.stringify(posts));
+    assert.ok(!posts.includes("historical reply"));
+  } finally {
+    engine.abortAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function rolloutIdentity(path: string) {
+  const { dev, ino } = statSync(path, { bigint: true });
+  return { path, device: String(dev), inode: String(ino) };
+}
+
+test("herdr-core Codex rejects unverified or competing rollout evidence", async (t) => {
+  for (const scenario of [
+    "next task in same rollout", "blocked with a competing start", "replaced path",
+    "unreadable eligible candidate", "unreadable possibly fresh candidate", "verified pre-existing candidate",
+    "matching writer with a vanished pre-send candidate",
+  ]) {
+    await t.test(scenario, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "cctag-hc-codex-later-"));
+      const path = join(dir, "bound.jsonl");
+      const otherPath = join(dir, "other.jsonl");
+      writeFileSync(path, "");
+      writeFileSync(otherPath, "");
+      const rollout = { sessionId: "bound", transcriptIdentity: rolloutIdentity(path) };
+      const other = { sessionId: "other", transcriptIdentity: rolloutIdentity(otherPath) };
+      const paneId = "hc:t1";
+      const pairing = { ...fakePairing(), paneId };
+      const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+      const { notifier, posts, postedBlocks } = fakeNotifier();
+      const blocked = scenario === "blocked with a competing start";
+      const unreadable = scenario.startsWith("unreadable");
+      const vanished = scenario === "matching writer with a vanished pre-send candidate";
+      const previouslyUnseen = scenario === "verified pre-existing candidate" || scenario === "unreadable possibly fresh candidate";
+      const { text: approval } = JSON.parse(readFileSync(
+        new URL("./agents/codex/__fixtures__/hc-approval.screen.json", import.meta.url), "utf8",
+      ));
+      const event = (payload: object) => JSON.stringify({ type: "event_msg", timestamp: new Date().toISOString(), payload }) + "\n";
+      const reply = (text: string) => JSON.stringify({ type: "response_item", payload: {
+        type: "message", role: "assistant", content: [{ type: "output_text", text }],
+      } }) + "\n";
+      let polls = 0;
+      let promptReads = 0;
+      let submitted = false;
+      const engine = engineFor(fakeBackend(() => "working", () => "", {
+        async get() {
+          if (submitted && ++polls === 2) {
+            const newTask = event({ type: "task_started", turn_id: "later" }) + reply("unrelated reply");
+            if (scenario === "replaced path") {
+              renameSync(path, join(dir, "original.jsonl"));
+              writeFileSync(path, " ".repeat(statSync(join(dir, "original.jsonl")).size) + "\n" + reply("unrelated reply"));
+            } else if (scenario === "next task in same rollout") {
+              appendFileSync(path, newTask);
+            }
+          }
+          return {
+            ...fakeAgent(submitted ? (blocked ? "blocked" : previouslyUnseen || vanished ? "done" : "working") : "idle", "herdr-core"),
+            ref, agent: "codex", sessionId: null, cwd: dir,
+            codexRollouts: (previouslyUnseen && !submitted) || (vanished && submitted) ? [rollout] : [other, rollout],
+            hcCodexPromptStamp: blocked ? { turn: 2, statusMs: 100 } : undefined,
+          };
+        },
+        async read() {
+          promptReads++;
+          return { text: submitted ? approval : "", complete: true, draft: null, hcCodexPromptKind: "permission" };
+        },
+        async submit() {
+          appendFileSync(path, event({ type: "task_started", turn_id: "active" }) +
+            event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }) +
+            reply("verified reply"));
+          if (scenario === "verified pre-existing candidate" || vanished) {
+            appendFileSync(path, event({ type: "task_complete", turn_id: "active" }));
+          }
+          if (vanished) {
+            appendFileSync(otherPath, event({ type: "task_started", turn_id: "disappeared" }) +
+              event({ type: "item_completed", item: { type: "UserMessage", content: [{ type: "text", text: "request" }] } }));
+          }
+          if (blocked) {
+            appendFileSync(otherPath, event({ type: "task_started", turn_id: "parallel" }));
+          }
+          if (unreadable) {
+            renameSync(otherPath, join(dir, "other-original.jsonl"));
+            writeFileSync(otherPath, "");
+          }
+          submitted = true;
+          return { status: "started", draftStashed: false };
+        },
+      }, "herdr-core"), notifier, 5000);
+      try {
+        await sleep(5);
+        await engine.startTurn(pairing, "U1", "request");
+        for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+        assert.equal(engine.isBusy(paneId), false);
+        assert.equal(posts.includes("verified reply"), !unreadable && !vanished, JSON.stringify(posts));
+        if (unreadable || vanished) assert.ok(posts.some((post) => post.includes("Codex の入力先を確認できませんでした")));
+        if (blocked) {
+          assert.ok(posts.includes(CODEX_THREAD_SWITCHED));
+          // The startup screen may be read before submission. A blocked prompt must not be captured.
+          assert.equal(promptReads, 1);
+          assert.ok(postedBlocks.every((blocks) => promptIdInButtonBlock(blocks) === undefined));
+        }
+        assert.ok(!posts.some((post) => post.includes("unrelated reply")));
+      } finally {
+        engine.abortAll();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("a mid-turn Codex rollout switch on herdr-core ends the adopted turn without replay", async () => {
+  const paneId = "hc:t1";
+  const pairing = { ...fakePairing(), paneId };
+  const ref = { target: paneId, agentKind: "codex" as const, pid: 1, processStartedAt: 1 };
+  const previous = { path: "/old.jsonl", device: "1", inode: "11" };
+  const next = { path: "/new.jsonl", device: "1", inode: "12" };
+  const { notifier, posts } = fakeNotifier();
+  const engine = engineFor(fakeBackend(() => "working", () => "", {
+    async get() {
+      return {
+        ...fakeAgent("working", "herdr-core"),
+        ref, agent: "codex", sessionId: null, cwd: "/tmp",
+        codexRollouts: [
+          { sessionId: "old", transcriptIdentity: previous },
+          { sessionId: "next", transcriptIdentity: next },
+        ],
+      };
+    },
+  }, "herdr-core"), notifier, 5000);
+  try {
+    await engine.adoptBlockedTerminal(pairing, {
+      backend: "herdr-core", driver: codexDriver, ref, paneId, cwd: "/tmp",
+      sessionId: "old", transcriptPath: previous.path, transcriptIdentity: previous, offset: 0,
+      collected: ["already collected"], outboxBaseline: {}, writes: new WrittenFileTracker(),
+    });
+    for (let i = 0; i < 50 && engine.isBusy(paneId); i++) await sleep(20);
+    assert.equal(engine.isBusy(paneId), false);
+    assert.ok(posts.includes(CODEX_THREAD_SWITCHED), JSON.stringify(posts));
+    assert.ok(posts.includes("already collected"));
+  } finally {
+    engine.abortAll();
   }
 });
 

@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 
 import type { AnswerChannel, Terminals } from "../../backend/index.js";
-import { BackendUnavailable, type AgentInfo } from "../../backend/types.js";
+import { BackendUnavailable, type AgentInfo, type CodexRollout, type HcCodexPromptContext, type ScreenSnapshot } from "../../backend/types.js";
 import { promptFingerprint } from "../fingerprint.js";
 import type {
   AgentDriver,
@@ -9,7 +9,6 @@ import type {
   ModelCommandResult,
   OrcaProcessAccess,
   OrcaProcessIdentity,
-  OrcaProcessSession,
 } from "../driver.js";
 import { descriptorMode, parseDescriptors, soleWriterIdentity, type Descriptor } from "../transcript-writer.js";
 import {
@@ -26,6 +25,7 @@ import {
   isEffortListScreen,
   modelNameKey,
   parseCodexMenu,
+  parseHcCodexPrompt,
   parseCodexStartupPrompt,
   parseCursorLabel as parseCodexCursorLabel,
 } from "./prompts.js";
@@ -105,6 +105,9 @@ export const CODEX_THREAD_SWITCHED =
 export const CODEX_SHARED_SERVER_NOTICE =
   "Codex の会話の記録（rollout）が見つからないため、Orca の Codex をつなげません。まだ最初のメッセージを送っていない Codex は、端末で一度送ってから選び直してください。Codex が共有の background server で動いている場合は、Orca の設定「Run each Codex terminal on its own server」を有効にして起動し直してください";
 
+export const HC_CODEX_SHARED_SERVER_NOTICE =
+  "herdr-core 上の Codex の rollout を端末に結び付けられませんでした。Codex を `codex --no-daemon` で起動してください。";
+
 const ROLLOUT_NAME = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/iu;
 
 /** The `session_meta` payload on a rollout's first line, or null when the line is not one. */
@@ -126,7 +129,7 @@ function sessionMeta(head: string): Record<string, unknown> | null {
 }
 
 /**
- * Ties a Codex TUI on Orca to its own rollout: the one rollout the process holds
+ * Ties a Codex TUI to its own rollout: the one rollout the process holds
  * open for writing whose `session_meta` is the user's thread, written by no other
  * process. Measured on 0.162: a TUI running its own app-server (Orca's default,
  * `--no-daemon`) holds its thread's rollout and, once a command is reviewed, a
@@ -135,10 +138,11 @@ function sessionMeta(head: string): Record<string, unknown> | null {
  * session's rollout — so it gets no binding and is not listed. Neither does a TUI
  * before its first message: it creates its rollout then, not at startup.
  */
-async function codexSession(
-  process: OrcaProcessIdentity,
+export async function ownedCodexRollouts(
+  process: Pick<OrcaProcessIdentity, "pid" | "cwd">,
   access: OrcaProcessAccess,
-): Promise<OrcaProcessSession | null> {
+  allowMultiple = false,
+): Promise<CodexRollout[] | null> {
   if (!process.cwd) return null;
   const descriptors = parseDescriptors(
     await access.runSystem("lsof", ["-a", "-p", String(process.pid), "-FftpaDin"]),
@@ -160,12 +164,15 @@ async function codexSession(
     if (meta.thread_source !== "user") continue;
     threads.push({ writer: descriptor, sessionId, meta });
   }
-  if (threads.length !== 1) return null;
-  const { writer, sessionId, meta } = threads[0]!;
-  if (meta.id !== sessionId || meta.cwd !== process.cwd) return null;
-
-  const identity = await soleWriterIdentity(writer, process.pid, access);
-  return identity ? { sessionId, transcriptIdentity: identity } : null;
+  if (!allowMultiple && threads.length > 1) return null;
+  const rollouts: CodexRollout[] = [];
+  for (const { writer, sessionId, meta } of threads) {
+    if (meta.id !== sessionId || meta.cwd !== process.cwd) return null;
+    const identity = await soleWriterIdentity(writer, process.pid, access);
+    if (!identity) return null;
+    rollouts.push({ sessionId, transcriptIdentity: identity });
+  }
+  return rollouts;
 }
 
 export const codexDriver: AgentDriver = {
@@ -179,7 +186,7 @@ export const codexDriver: AgentDriver = {
     },
     async session(process, access) {
       try {
-        return await codexSession(process, access);
+        return (await ownedCodexRollouts(process, access))?.[0] ?? null;
       } catch (error) {
         if (error instanceof BackendUnavailable) throw error;
         return null;
@@ -204,9 +211,18 @@ export const codexDriver: AgentDriver = {
 
   parseStartupPrompt: parseCodexStartupPrompt,
 
-  parseBlockedPane(paneText): BlockedPrompt {
-    // Codex has no AskUserQuestion-equivalent tool and no plan mode — every
-    // blocked prompt is a command-approval (or directory-trust) menu.
+  parseBlockedPane(paneText, backend): BlockedPrompt {
+    if (backend === "herdr-core") {
+      const prompt = parseHcCodexPrompt(paneText);
+      if (prompt) {
+        const fingerprint = prompt.kind === "permission"
+          ? JSON.stringify(prompt.menu.snippet.replace(/^[ \t]*(?:›[ \t]*)?(\d+\.)/gmu, "$1"))
+          : JSON.stringify(prompt.info);
+        return { ...prompt, verified: createVerifiedPrompt(fingerprint, codexDriver, "digit-confirms") };
+      }
+      return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-confirms") };
+    }
+
     const menu = parseCodexMenu(paneText);
     if (!menu) {
       return { kind: "blind-permission", blind: createBlindPermissionPrompt(codexDriver, "key-then-enter") };
@@ -235,10 +251,7 @@ export const codexDriver: AgentDriver = {
     await channel.confirm(expectedLabel);
   },
 
-  // No answerQuestionFreeText / answerPlanFeedback / resolvePlanFile — Codex
-  // has no AskUserQuestion tool and no plan-file concept.
-
-  modes: null, // no Shift+Tab ring, no plan mode
+  modes: null,
 
   async runModelCommand(terminals, agent, argsText): Promise<ModelCommandResult> {
     const result = (reply: string, submitOutcome: ModelCommandResult["submitOutcome"] = null) => ({
@@ -248,6 +261,9 @@ export const codexDriver: AgentDriver = {
     if (agent.backend === "orca") {
       // Refused before /model is sent: Orca has no Escape-capable channel to back out of the menu.
       return result("⚠️ Orca 上の Codex のモデルは、端末で /model から変えてください。");
+    }
+    if (agent.backend === "herdr-core") {
+      return result("⚠️ herdr-core 上の Codex のモデルは、端末で /model から変えてください。");
     }
     const words = argsText.trim().split(/\s+/).filter(Boolean);
     if (words.length === 0) {
@@ -342,6 +358,14 @@ export const codexDriver: AgentDriver = {
     return result(`✅ モデルを ${modelName} (${effortLevelKey(levelMatch.label)}) に切り替えました。`, submitOutcome);
   },
 };
+
+export function parseVerifiedHcCodexPrompt(snapshot: ScreenSnapshot, hcCodex: HcCodexPromptContext): BlockedPrompt {
+  const prompt = codexDriver.parseBlockedPane(snapshot.complete ? snapshot.text : "", "herdr-core");
+  if ((prompt.kind !== "permission" && prompt.kind !== "question")) return prompt;
+  if (prompt.kind !== snapshot.hcCodexPromptKind) return codexDriver.parseBlockedPane("", "herdr-core");
+  const { fingerprint, form } = prompt.verified;
+  return { ...prompt, verified: createVerifiedPrompt(fingerprint, codexDriver, form, { hcCodex }) };
+}
 
 export function parseCodexModelMenuPrompt(paneText: string): VerifiedModelMenuPrompt | null {
   if (!isModelListScreen(paneText) && !isEffortListScreen(paneText)) return null;
