@@ -133,7 +133,7 @@ Herdr appは同じターミナルを表示するので、cctagが入力した内
 
 cctagは、`hc ls`が`claude-code`と報告するローカルで稼働中の端末を確認する。一覧に出す条件は、
 前景プロセスが`claude`か`claude-code`で、状態の`app`が未報告か`claude-code`であり、有効なセッションレコードがあること。
-ファイルにPIDがあれば、前景のPIDとの一致も必要になる。
+ファイルに前景のPIDと起動時刻（`startedAt`）が記録されていること。`node`として動くClaude Codeや、どちらかを記録しないClaude Codeは一覧に出ない。
 書き込みにはファイルに記録されたPIDと開始時刻が必要で、書き込み直前にPID・セッションID・開始時刻を操作開始時の値と照合する。
 詳細は[herdr-coreの検出と書き込み](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows)を参照（英語）。
 

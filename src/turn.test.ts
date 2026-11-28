@@ -1718,8 +1718,7 @@ test("herdr-core closes the old turn and removes actions when its Claude identit
     await sleep(100);
     const promptId = promptIdInButtonBlock(postedBlocks[1]);
     assert.ok(promptId);
-    agent.sessionId = "s2";
-    agent.ref = { ...oldRef, sessionId: "s2" };
+    agent.ref = { ...oldRef, pid: 202, processStartedAt: 456 };
     await sleep(5_200);
     assert.equal(reads, 1, "the replacement session's prompt must not be read by the old turn");
     assert.ok(posts.some((text) => text.includes("ターンを終了しました")));
@@ -1728,6 +1727,28 @@ test("herdr-core closes the old turn and removes actions when its Claude identit
     assert.deepEqual(await engine.answerPermissionButton(pairing.paneId, promptId, "1", pairing.key), {
       ok: false, reason: "not-pending",
     });
+  } finally {
+    engine.abortAll();
+  }
+});
+
+test("herdr-core follows a new session of the same Claude Code process instead of ending the turn", async () => {
+  const pairing = { ...fakePairing(), paneId: "hc:t1" };
+  const oldRef = { target: pairing.paneId, pid: 101, processStartedAt: 123, sessionId: "s1" };
+  const agent = fakeAgent("working", "herdr-core");
+  agent.ref = oldRef;
+  const { notifier, posts } = fakeNotifier();
+  const backend = fakeBackend(() => "working", undefined, { async get() { return agent; } }, "herdr-core");
+  const engine = engineFor(backend, notifier, 600_000);
+  try {
+    assert.ok(await adopt(engine, pairing, "herdr-core", oldRef));
+    await sleep(100);
+    // `/clear` from Slack: same process and start time, new session.
+    agent.sessionId = "s2";
+    agent.ref = { ...oldRef, sessionId: "s2" };
+    await sleep(5_200);
+    assert.equal(posts.some((text) => text.includes("ターンを終了しました")), false);
+    assert.equal(engine.isBusy(pairing.paneId), true);
   } finally {
     engine.abortAll();
   }

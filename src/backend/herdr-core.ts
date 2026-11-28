@@ -4,7 +4,7 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
-import { isClaudeModelSwitchConfirmation } from "../agents/claude/driver.js";
+import { isClaudeModelSwitchConfirmation } from "../agents/claude/prompts.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -109,20 +109,34 @@ function probeSocket(path: string): Promise<void> {
   });
 }
 
-/** Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under. */
+/**
+ * Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under.
+ *
+ * Only a missing file means "no Claude Code session here". A read or parse failure throws instead: Claude Code
+ * rewrites this file while it runs, and a read that lands mid-write would otherwise make `get()` return null,
+ * which the turn loop takes as the pane being gone and ends a live turn. Thrown, it is a failed query and retried.
+ */
 async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string; startedAt: number | null } | null> {
+  const path = join(sessionsDir, `${pid}.json`);
+  let text: string;
   try {
-    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as {
-      pid?: unknown; sessionId?: unknown; cwd?: unknown; startedAt?: unknown;
-    };
-    if (typeof raw.sessionId !== "string" || !raw.sessionId || typeof raw.cwd !== "string") return null;
-    if (raw.pid !== undefined && raw.pid !== pid) return null;
-    const startedAt = raw.pid === pid && typeof raw.startedAt === "number" &&
-      Number.isSafeInteger(raw.startedAt) && raw.startedAt > 0 ? raw.startedAt : null;
-    return { sessionId: raw.sessionId, cwd: raw.cwd, startedAt };
-  } catch {
-    return null;
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new BackendUnavailable(`could not read Claude Code session file ${path}: ${errorMessage(err)}`);
   }
+  let raw: { pid?: unknown; sessionId?: unknown; cwd?: unknown; startedAt?: unknown };
+  try {
+    raw = JSON.parse(text) as typeof raw;
+  } catch {
+    throw new BackendUnavailable(`Claude Code session file ${path} is not valid JSON (possibly mid-write)`);
+  }
+  if (raw === null || typeof raw !== "object") return null;
+  if (typeof raw.sessionId !== "string" || !raw.sessionId || typeof raw.cwd !== "string") return null;
+  if (raw.pid !== undefined && raw.pid !== pid) return null;
+  const startedAt = raw.pid === pid && typeof raw.startedAt === "number" &&
+    Number.isSafeInteger(raw.startedAt) && raw.startedAt > 0 ? raw.startedAt : null;
+  return { sessionId: raw.sessionId, cwd: raw.cwd, startedAt };
 }
 
 function normalizeStatus(raw: string | null | undefined): AgentStatus {
@@ -213,7 +227,8 @@ export class HcBackend implements Terminals {
     const pid = claudeForegroundPid(terminal);
     if (pid === null) return null;
     const session = await claudeSession(pid, this.sessionsDir);
-    if (!session) return null;
+    // Not listed without a start time: every write would be refused, so connecting would only succeed to fail.
+    if (session?.startedAt == null) return null;
     return {
       ref: { target: `${PREFIX}${terminal.address}`, pid, processStartedAt: session.startedAt, sessionId: session.sessionId },
       backend: "herdr-core",
@@ -283,7 +298,8 @@ export class HcBackend implements Terminals {
       throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
     }
     if (pid !== ref.pid) throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);
-    const session = await claudeSession(pid, this.sessionsDir);
+    // Fail closed: a session file that cannot be read right now is not a verified Claude Code.
+    const session = await claudeSession(pid, this.sessionsDir).catch(() => null);
     if (session?.startedAt == null) throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
     if (session.sessionId !== ref.sessionId || session.startedAt !== ref.processStartedAt) {
       throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);

@@ -145,10 +145,10 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
   `claude` or `claude-code`, the foreground PID is a positive safe integer,
   and the status app is either absent or `claude-code`. The foreground PID identifies
   `~/.claude/sessions/<pid>.json`, which must contain a nonempty session ID and
-  a working directory string. If the file contains a PID, it must match the
-  foreground PID. A terminal can appear in the list with a missing file PID or
-  an unavailable or invalid recorded start time. Writing requires both a
-  matching file PID and a positive safe integer `startedAt`. Remote terminals
+  a working directory string, the foreground PID, and a positive safe integer
+  `startedAt`; a Claude Code that writes either differently is not listed, so it cannot be connected. The executable
+  name comes from `hc get` as the OS reports it: a Claude Code that runs as
+  `node` (an npm install without the native binary) is not listed either. Remote terminals
   (`machine/t7`) belong to the Spoke on that machine.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question

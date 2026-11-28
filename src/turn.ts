@@ -1281,7 +1281,7 @@ export class TurnEngine {
 
       if (state.backend === "herdr-core" && state.driver.kind === "claude" && (
         agent.agent !== "claude" || agent.ref.pid !== state.ref.pid ||
-        agent.ref.processStartedAt !== state.ref.processStartedAt || agent.ref.sessionId !== state.ref.sessionId
+        agent.ref.processStartedAt !== state.ref.processStartedAt
       )) {
         state.promptId = null;
         await state.promptHandle?.update("⚠️ Claude Code の接続先が切り替わったため、この確認は終了しました。", []).catch(() => {});
@@ -1303,6 +1303,8 @@ export class TurnEngine {
         if (state.driver.kind === "omp") {
           this.switchOmpSession(state, agent);
         } else {
+          // Same process, new session (`/clear`, a resume): later replies are bound to the new one.
+          if (state.backend === "herdr-core") state.ref = agent.ref;
           state.sessionId = agent.sessionId ?? "";
           state.transcriptIdentity = agent.transcriptIdentity;
           state.transcriptPath =

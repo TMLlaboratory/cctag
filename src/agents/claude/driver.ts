@@ -27,6 +27,8 @@ import {
   previewAnchorIndex,
   parseCursorLabel as parseClaudeCursorLabel,
   stripFooterChrome,
+  SWITCH_MODEL_HEADING,
+  isClaudeModelSwitchConfirmation,
 } from "./prompts.js";
 import {
   extractAssistantText,
@@ -281,15 +283,6 @@ async function confirmOrcaAnswerReview(
     }
     await sleep(100);
   }
-}
-
-const SWITCH_MODEL_HEADING = /^\s*Switch model\?\s*$/m;
-
-export function isClaudeModelSwitchConfirmation(prompt: BlockedPrompt): boolean {
-  if (prompt.kind !== "permission") return false;
-  const { snippet, choices } = prompt.menu;
-  return SWITCH_MODEL_HEADING.test(snippet) && choices.length === 2 &&
-    /^Yes, switch to \S/.test(choices[0]!.label) && choices[1]!.label === "No, go back";
 }
 
 /**

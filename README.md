@@ -155,9 +155,9 @@ started it and hands it to every terminal.
 
 cctag considers live local terminals that `hc ls` identifies as
 `claude-code`. Listing requires a `claude` or `claude-code` foreground
-process, an absent or `claude-code` status app, and a valid session record.
-A PID recorded in the file must match the foreground PID.
-Writes require a recorded PID and start time. Before each write, cctag
+process, an absent or `claude-code` status app, and a valid session record
+that holds the foreground PID and a start time. A Claude Code that runs as `node`
+or records neither is not listed. Before each write, cctag
 rechecks the PID, session ID and recorded start time against the values
 observed at the start of the operation. See [herdr-core discovery and writes](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows).
 

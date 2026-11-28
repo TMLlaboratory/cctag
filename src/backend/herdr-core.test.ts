@@ -198,11 +198,41 @@ test("notes agents that report a status but are not Claude Code", async () => {
   });
 });
 
+test("a Claude Code that records no start time is not offered, since every write to it would be refused", async () => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
+    writeFileSync(join(fake.sessionsDir, "101.json"), JSON.stringify({ pid: 101, sessionId: "session-101", cwd: "/repo/t1" }));
+    assert.deepEqual((await backend.list()).agents, []);
+    assert.equal(await backend.get("hc:t1"), null);
+  });
+});
+
 test("a terminal whose Claude Code has no session record is not offered", async () => {
   await withCore([{ address: "t1", agent: "claude-code", status: "idle" }], {}, async (backend) => {
     assert.deepEqual((await backend.list()).agents, []);
     assert.equal(await backend.get("hc:t1"), null);
     assert.equal(await backend.exists("hc:t1"), true);
+  });
+});
+
+test("a session record caught mid-write is a failed query, not a gone pane, and authorizes no write", async () => {
+  await withCore([CLAUDE], {}, async (backend, fake) => {
+    const agent = await backend.get("hc:t1");
+    assert.ok(agent);
+    const record = join(fake.sessionsDir, "101.json");
+    const whole = readFileSync(record, "utf8");
+    for (const partial of ["", whole.slice(0, whole.length >> 1)]) {
+      writeFileSync(record, partial);
+      // get() throwing (not returning null) sends the turn loop down its retry path.
+      await assert.rejects(backend.get("hc:t1"), BackendUnavailable);
+      const listed = await backend.list();
+      assert.deepEqual(listed.agents, []);
+      assert.equal(listed.complete, false);
+      await assert.rejects(backend.submit(agent.ref, "hello", CTX), (error: unknown) =>
+        error instanceof SubmitRefused && error.reason === "agent-unverified");
+    }
+    assert.deepEqual(writes(fake), []);
+    writeFileSync(record, whole);
+    assert.deepEqual((await backend.get("hc:t1"))?.ref, agent.ref);
   });
 });
 
