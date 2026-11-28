@@ -29,6 +29,7 @@ sent to the paired agent as a turn.
 For supported Claude Code and Codex CLI prompts, cctag posts buttons in the
 thread; a person can answer by clicking one or by responding at the terminal.
 If someone answers at the keyboard, cctag updates the Slack message to say so.
+On herdr-core, answer prompts in the terminal if cctag cannot verify them.
 `omp` prompts appear as terminal-only notices: answer at the terminal; Slack
 buttons and thread replies cannot answer them.
 
@@ -109,8 +110,10 @@ rather than starting a conversational turn — mechanics differ by agent:
   output (e.g. "Set model to Opus and saved as your default for new
   sessions"), read straight off the terminal screen. If switching models
   mid-conversation triggers a confirmation menu ("Switch model? Yes/No"),
-  it's auto-confirmed, since asking for the switch already expressed that
-  intent.
+  cctag attempts to confirm it automatically. On herdr-core, it can do so once
+  after reading the complete visible screen and verifying that the same
+  confirmation is still present in the same Claude session. If cctag cannot
+  verify the confirmation, answer it in the terminal.
 - **Codex CLI** has no `/model <name>` argument — its `/model` opens a
   two-stage picker (pick a model, then pick a reasoning effort level: `low`
   / `medium` / `high` / `extra high`, though which levels are offered

@@ -13,7 +13,7 @@
  * which only appears in AskUserQuestion menus.
  */
 
-import type { AskUserQuestionOption, AskUserQuestionPaneInfo, PermissionChoice, PermissionMenu } from "../driver.js";
+import type { AskUserQuestionOption, AskUserQuestionPaneInfo, BlockedPrompt, PermissionChoice, PermissionMenu } from "../driver.js";
 
 const NUMBERED_LINE_RE = /^\s*(?:❯\s*)?(\d+)\.\s*(.+?)\s*$/;
 const CURSOR_LINE_RE = /❯\s*\d+\./;
@@ -675,4 +675,13 @@ export function parseCursorLabel(paneText: string): string | null {
     typed.push(lines[i]!.trim());
   }
   return typed.join("\n");
+}
+
+export const SWITCH_MODEL_HEADING = /^\s*Switch model\?\s*$/m;
+
+export function isClaudeModelSwitchConfirmation(prompt: BlockedPrompt): boolean {
+  if (prompt.kind !== "permission") return false;
+  const { snippet, choices } = prompt.menu;
+  return SWITCH_MODEL_HEADING.test(snippet) && choices.length === 2 &&
+    /^Yes, switch to \S/.test(choices[0]!.label) && choices[1]!.label === "No, go back";
 }

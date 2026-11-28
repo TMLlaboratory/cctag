@@ -140,7 +140,7 @@ must be available.
 
 | | herdr | Orca | herdr-core |
 |---|:---:|:---:|:---:|
-| Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ everything in the table above, except a free-text answer to a multi-select question, which is answered in the terminal |
+| Claude Code | ✅ everything in the table above | ✅ everything in the table above | ✅ the features above. Use the terminal for unverified prompts and for free-text answers to multi-select questions |
 | Codex CLI | ✅ | ✅ Turns, output and status, when Codex runs its own app server (Orca's default, “Run each Codex terminal on its own server”) and has had its first message. Approval prompts appear in Slack as “answer in the terminal”, and `model` is changed in the terminal | — |
 | oh-my-pi (`omp`) | — | ✅ Turns, output, status and `.cctag/outbox` uploads; incoming attachments are passed as paths. Prompts and approvals show “answer in the terminal” (no Slack answers, `mode`, `plan` or `model`) | — |
 
@@ -151,11 +151,15 @@ core: when nothing listens on its socket (`HC_SOCKET`, or
 `~/.local/state/herdr-core/default/default.sock`), the backend reports that
 herdr-core is not running. Start the core yourself — through the Herdr app,
 launchd or `hc server start` — because a core takes the environment of whatever
-started it and hands it to every terminal. Status is what Claude Code reports
-to the core; the transcript is found from `~/.claude/sessions/<pid>.json`,
-which Claude Code writes for each running session. `hc` cannot type text
-without pressing Enter, so a free-text answer to a multi-select question is
-refused with a note to answer in the terminal.
+started it and hands it to every terminal.
+
+cctag considers live local terminals that `hc ls` identifies as
+`claude-code`. Listing requires a `claude` or `claude-code` foreground
+process, an absent or `claude-code` status app, and a valid session record
+that holds the foreground PID and a start time. A Claude Code that runs as `node`
+or records neither is not listed. Before each write, cctag
+rechecks the PID, session ID and recorded start time against the values
+observed at the start of the operation. See [herdr-core discovery and writes](docs/how-it-works.md#herdr-core-the-same-terminals-the-herdr-app-shows).
 
 On Orca, cctag identifies the agent from its pane key, process start time and
 foreground process group. For `omp`, it also verifies the transcript the

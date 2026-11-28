@@ -140,21 +140,36 @@ drives it with `hc` (`CCTAG_HC_BIN`, default `~/.local/bin/hc`), so a person
 watching the Herdr app sees cctag's input arrive in the same terminal. Targets
 carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 
-- **Discovery.** `hc ls` lists terminals; cctag offers local ones whose program
-  reports itself as `claude-code`, and skips other machines' terminals
-  (`machine/t7`), which belong to the Spoke on that machine. For each, the
-  foreground process id leads to `~/.claude/sessions/<pid>.json`, where Claude
-  Code records its session id and the directory its transcript is filed under.
-  A terminal without that record is not offered.
+- **Discovery.** cctag considers live local terminals that `hc ls` identifies
+  as `claude-code`. It checks with `hc get` that the foreground executable is
+  `claude` or `claude-code`, the foreground PID is a positive safe integer,
+  and the status app is either absent or `claude-code`. The foreground PID identifies
+  `~/.claude/sessions/<pid>.json`, which must contain a nonempty session ID and
+  a working directory string, the foreground PID, and a positive safe integer
+  `startedAt`; a Claude Code that writes either differently is not listed, so it cannot be connected. The executable
+  name comes from `hc get` as the OS reports it: a Claude Code that runs as
+  `node` (an npm install without the native binary) is not listed either. Remote terminals
+  (`machine/t7`) belong to the Spoke on that machine.
 - **Status.** The core takes status only from what the program reports (OSC
   7501), not from the screen. Claude Code reports `blocked` while a question
   or an approval is up, and `done` after a turn. A program that reports nothing
   — Claude Code on its folder-trust screen, for one — has no status, which
   cctag treats as unknown.
-- **Writes.** A message goes through `hc send`, which pastes the text and
+- **Writes.** Before each message, answer, model confirmation, or mode-change
+  write, cctag rechecks the foreground and Claude's session file. The
+  foreground PID, session ID, and recorded start time must match the values
+  observed at the start of the operation. An ordinary Slack answer requires
+  a complete visible screen with the same prompt and a `blocked` state before
+  and after the read. For an answer that takes several writes, cctag rechecks
+  the Claude identity and `blocked` state before each later write. Answer in
+  the terminal if cctag cannot verify the prompt or its state has changed.
+  The [Claude model-switch confirmation](#56-switching-model) can also be
+  answered while the state remains `done`.
+
+  A message goes through `hc send`, which pastes the text and
   presses Enter once nobody has typed for about three seconds, and refuses a
-  `blocked` program. Answers press named keys with `hc keys` (digits, arrows,
-  Enter, Esc, Shift+Tab). `hc` has no way to type text without pressing Enter,
+  `blocked` program. Answers and mode changes use named keys through `hc keys`
+  (digits, arrows, Enter, Shift+Tab). `hc` has no way to type text without pressing Enter,
   so free text is pasted with its Enter through `hc send --force`; a free-text
   answer to a multi-select question, which has to be typed and *not* submitted,
   is refused before any key is sent. A Slack image arrives as a real attachment
@@ -170,8 +185,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
 ## 4. From `@cctag connect` to an actual conversation
 
 1. **`@cctag connect`** (owner only) → posts a Slack button menu built from
-   the enabled backends: Herdr's Claude Code/Codex agents and Orca's
-   Claude Code/Codex/`omp` agents
+   the enabled backends. Herdr provides Claude Code and Codex, Orca provides
+   Claude Code, Codex and `omp`, and herdr-core provides Claude Code.
 
    "Owner only" is not simply a narrowed permission. **The Spoke runs on the
    owner's own machine, so `connect` is choosing which of your own panes to
@@ -181,7 +196,8 @@ carry an `hc:` prefix (`hc:t3j`), the way Orca's carry `orca:`.
    like in use" in the [README](../README.md)) — so what is restricted is
    *deciding what to attach*, not *using it*.
 2. Pick one → that thread (channel + thread_ts) and the backend-qualified
-   target (a Herdr pane or `orca:<paneKey>`) are recorded as a pairing
+   target (a Herdr pane, `orca:<paneKey>`, or `hc:<address>`) are recorded as a
+   pairing.
 
    Orca supports the same cctag features for Claude Code as Herdr, plus Codex
    CLI and `omp` text turns, output, and status. Codex approvals and OMP
@@ -275,35 +291,27 @@ pairing.
 For Claude Code, `@cctag model <name>` (e.g. `model opus`) forwards Claude's
 own `/model <name>` command rather than starting a normal conversational turn;
 the command's output doesn't reliably land in the session transcript. Claude
-Code model switching is supported on Herdr and Orca. `omp` has no model
+Code model switching is supported on Herdr, Orca and herdr-core. `omp` has no model
 command; Codex CLI uses its separate model and reasoning-level picker, covered
 in [usage.md](usage.md).
 
-The steps below describe the Herdr command path. Orca uses its guarded composer
-channel for Claude Code.
+The Claude driver sends the slash command through the backend's `submit`.
+On each poll it checks for a confirmation menu before deciding from
+`idle` or `done` that the command has settled. It reads the command output
+from the pane and trims the footer before relaying the result to Slack.
 
-`commands.ts`'s `runTuiCommand()`:
+On herdr-core, the driver reads the full visible screen without scrollback.
+When it recognizes Claude's `Switch model?` confirmation, cctag compares
+the dialog in that complete capture with the dialog in a second complete
+capture. It verifies the same Claude process and session, and checks that the
+state stays unchanged before and after the second read. The confirmation
+can be answered in either `blocked` or `done`. cctag sends the affirmative
+key at most once per command. Claude Code resolves the model argument, and
+cctag authorizes the key from the verified dialog. If the screen or the
+confirmation cannot be verified, answer in the terminal.
 
-1. Sends the slash command via Herdr, then confirms it with Enter
-2. Polls status; if it goes `blocked` (e.g. the "Switch model? Yes/No"
-   confirmation that appears when switching models mid-conversation), the
-   existing permission-menu parser (`parsePermissionMenu`) auto-confirms the
-   first option — asking for the switch already expressed that intent
-3. Once it settles (`idle`/`done`), reads the screen and relays the
-   command's own output back to Slack as-is
-
-Step 3's pane read has a gotcha: the TUI's screen always ends with a fixed
-footer (a separator, an empty prompt, another separator, then
-model/context/cwd/mode status lines). Reading only the last few lines lands
-entirely inside that footer, missing the actual command output above it. So
-cctag reads a larger chunk and cuts everything from the model/context
-status line downward (a distinctive `ctx ... /rc` pattern), then trims the
-separator/padding right above that (`stripFooterChrome()`).
-
-`TurnEngine` has a separate `externallyBusy` set alongside its normal turn
-tracking, so these TUI commands are treated as "busy" the same way an
-active turn is — this keeps the background watcher (section 5.5) from
-trying to watch the same instance a TUI command is currently driving.
+The model command holds the pane lease while it runs. The background watcher
+(section 5.5) treats the leased pane as busy.
 
 ## 5.6.1 Switching mode (the four Shift+Tab modes)
 
@@ -312,16 +320,15 @@ differently from switching model. These four modes have **no slash
 command** — the only way to change them in Claude Code is cycling with
 Shift+Tab. On Herdr, `pane send-keys shift+tab` is accepted but
 **delivers nothing Claude Code reacts to**. Empirically, sending the raw
-CSI Z sequence (`\x1b[Z`, backtab) via `pane send-text` does work — exposed
-as `HerdrClient.paneSendText()`.
+CSI Z sequence (`\x1b[Z`, backtab) via `pane send-text` works.
 
-Claude Code mode switching is also supported on Orca; that backend sends the
-backtab through its guarded composer channel.
+Orca sends the backtab through its guarded composer channel. herdr-core
+rechecks Claude's identity before sending each `hc keys … shift+tab`.
 
 `runModeCommand()` matches the mode with a closed loop: read the current
 mode off the footer status line (`⏸ manual mode on` / `⏵⏵ accept edits on` /
 `⏸ plan mode on` / `⏵⏵ auto mode on`), and while it differs from the target,
-send one CSI Z and re-read — repeating until it matches. Because it checks
+send one backtab and re-read — repeating until it matches. Because it checks
 after each press rather than computing a press count up front, it's robust
 to the ring order or footer wording changing across versions. Two
 safeguards: (1) if the current mode can't be read, it refuses to cycle
@@ -332,18 +339,20 @@ plan`.
 
 ## 5.6.2 Plan Mode over Slack
 
-Claude Code Plan Mode works on Herdr and Orca. When a plan-mode turn finishes,
-Claude Code shows a "Here is Claude's plan / ready to execute?" approval prompt
-(a kind of permission menu). On detecting it, cctag:
+Claude Code Plan Mode works on Herdr, Orca and herdr-core. When a plan-mode
+turn finishes, Claude Code shows a "Here is Claude's plan / ready to execute?"
+approval prompt. On herdr-core, answer at the terminal if cctag cannot
+verify the approval menu from a complete screen. When cctag recognizes the
+plan approval menu, it enables approval and feedback in the Slack thread.
 
-- **attaches the full plan as a `.md` file**. The plan is written to
+- cctag **attaches the full plan as a `.md` file** when it can locate it. The plan is written to
   `~/.claude/plans/<slug>.md`, and its path shows in the footer — but a
   narrow pane wraps and truncates that path, so the parsed path is only a
   hint: if it doesn't resolve to an existing file, cctag falls back to the
   **most-recently-modified file** in the plans directory (which Claude Code
-  writes right before the prompt) — see `resolvePlanFile()`;
-- posts **approval buttons** (proceed / proceed with auto mode);
-- lets you **reply with changes in the thread**. The approval menu has a
+  writes right before the prompt). See `resolvePlanFile()`.
+- cctag posts **approval buttons** (proceed / proceed with auto mode).
+- You can **reply with changes in the thread**. The approval menu has a
   "Tell Claude what to change" free-text option; a plain thread reply is fed
   into it (move the cursor to that option's number, type the feedback,
   Enter), which regenerates the plan and stays in plan mode — so you can

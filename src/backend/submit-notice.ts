@@ -36,6 +36,9 @@ export function submitRefusedText(
     case "agent-changed":
       message = `⚠️ ${backend} の接続先エージェントが切り替わったため、送信しませんでした。再度送信してください。`;
       break;
+    case "agent-unverified":
+      message = `⚠️ ${backend} の前景で Claude Code を確認できなかったため、送信しませんでした。端末の状態を確認してください。`;
+      break;
     case "cancelled":
       message = `⚠️ ${backend} への送信を中止しました。`;
       break;

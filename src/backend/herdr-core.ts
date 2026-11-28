@@ -2,8 +2,9 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
+import { isClaudeModelSwitchConfirmation } from "../agents/claude/prompts.js";
 import type { AgentDriver } from "../agents/driver.js";
 import type {
   AnswerChannel,
@@ -34,8 +35,10 @@ import {
 const execFileAsync = promisify(execFile);
 const PREFIX = "hc:";
 const KNOWN_STATUSES = new Set<AgentStatus>(["idle", "working", "blocked", "done"]);
-const ANSWER_PANE_LINES = 200;
 const CLAUDE_APP = "claude-code";
+const HC_CLAUDE_UNVERIFIED = "herdr-core の前景で Claude Code を確認できませんでした。端末の状態を確認してください。";
+const HC_CLAUDE_CHANGED = "herdr-core の Claude Code セッションが切り替わりました。端末の状態を確認してください。";
+const HC_BLOCKED_CHANGED = "herdr-core の入力待ち状態が変わりました。端末の状態を確認してください。";
 export const HC_TYPED_TEXT_UNSUPPORTED =
   "herdr-core では、文字を入力したまま送信せずに次の操作へ進めないため、この回答は送れません。端末で答えてください。";
 export const HC_UNSUPPORTED_AGENTS_NOTICE =
@@ -106,19 +109,46 @@ function probeSocket(path: string): Promise<void> {
   });
 }
 
-/** Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under. */
-async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string } | null> {
+/**
+ * Claude Code writes `~/.claude/sessions/<pid>.json` with the session id and the cwd its transcript is filed under.
+ *
+ * Only a missing file means "no Claude Code session here". A read or parse failure throws instead: Claude Code
+ * rewrites this file while it runs, and a read that lands mid-write would otherwise make `get()` return null,
+ * which the turn loop takes as the pane being gone and ends a live turn. Thrown, it is a failed query and retried.
+ */
+async function claudeSession(pid: number, sessionsDir: string): Promise<{ sessionId: string; cwd: string; startedAt: number | null } | null> {
+  const path = join(sessionsDir, `${pid}.json`);
+  let text: string;
   try {
-    const raw = JSON.parse(await readFile(join(sessionsDir, `${pid}.json`), "utf8")) as { sessionId?: unknown; cwd?: unknown };
-    if (typeof raw.sessionId !== "string" || typeof raw.cwd !== "string") return null;
-    return { sessionId: raw.sessionId, cwd: raw.cwd };
-  } catch {
-    return null;
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new BackendUnavailable(`could not read Claude Code session file ${path}: ${errorMessage(err)}`);
   }
+  let raw: { pid?: unknown; sessionId?: unknown; cwd?: unknown; startedAt?: unknown };
+  try {
+    raw = JSON.parse(text) as typeof raw;
+  } catch {
+    throw new BackendUnavailable(`Claude Code session file ${path} is not valid JSON (possibly mid-write)`);
+  }
+  if (raw === null || typeof raw !== "object") return null;
+  if (typeof raw.sessionId !== "string" || !raw.sessionId || typeof raw.cwd !== "string") return null;
+  if (raw.pid !== undefined && raw.pid !== pid) return null;
+  const startedAt = raw.pid === pid && typeof raw.startedAt === "number" &&
+    Number.isSafeInteger(raw.startedAt) && raw.startedAt > 0 ? raw.startedAt : null;
+  return { sessionId: raw.sessionId, cwd: raw.cwd, startedAt };
 }
 
 function normalizeStatus(raw: string | null | undefined): AgentStatus {
   return raw && KNOWN_STATUSES.has(raw as AgentStatus) ? (raw as AgentStatus) : "unknown";
+}
+
+function claudeForegroundPid(terminal: HcTerminal): number | null {
+  const { pid, name } = terminal.foreground ?? {};
+  const executable = typeof name === "string" ? basename(name) : "";
+  return terminal.state === "live" && typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 &&
+    (executable === "claude" || executable === CLAUDE_APP) &&
+    (terminal.status?.app == null || terminal.status.app === CLAUDE_APP) ? pid : null;
 }
 
 export interface HcBackendOptions {
@@ -147,12 +177,13 @@ export class HcBackend implements Terminals {
    * a Spoke run inside an hc terminal does not get its sends wrapped in
    * `<hc from=…>`, which also stops slash commands from working.
    */
-  private async raw(args: string[]): Promise<string> {
+  private async raw(args: string[], cancelled?: () => boolean): Promise<string> {
     await probeSocket(this.socket);
-    const env = { ...process.env };
+    const env: NodeJS.ProcessEnv = { ...process.env, HC_SOCKET: this.socket };
     delete env.HC_TERMINAL_ID;
     delete env.HC_SCOPE;
     delete env.HC_TERMINAL_SOCKET;
+    if (cancelled?.()) throw new SubmitRefused("cancelled", "herdr-core submit was cancelled before writing");
     try {
       const result = await execFileAsync(this.bin, args, { env, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
       return result.stdout;
@@ -173,8 +204,8 @@ export class HcBackend implements Terminals {
    * starts with `-` (a Slack reply such as "-1" or "--force") an operand
    * instead of a flag.
    */
-  private async json<T>(command: string[], operands: string[] = []): Promise<T> {
-    const stdout = await this.raw([...command, "--json", "--", ...operands]);
+  private async json<T>(command: string[], operands: string[] = [], cancelled?: () => boolean): Promise<T> {
+    const stdout = await this.raw([...command, "--json", "--", ...operands], cancelled);
     try {
       return JSON.parse(stdout) as T;
     } catch {
@@ -193,12 +224,13 @@ export class HcBackend implements Terminals {
   }
 
   private async agentFrom(terminal: HcTerminal): Promise<AgentInfo | null> {
-    const pid = terminal.foreground?.pid;
-    if (terminal.state !== "live" || typeof pid !== "number") return null;
+    const pid = claudeForegroundPid(terminal);
+    if (pid === null) return null;
     const session = await claudeSession(pid, this.sessionsDir);
-    if (!session) return null;
+    // Not listed without a start time: every write would be refused, so connecting would only succeed to fail.
+    if (session?.startedAt == null) return null;
     return {
-      ref: { target: `${PREFIX}${terminal.address}`, pid: null, processStartedAt: null },
+      ref: { target: `${PREFIX}${terminal.address}`, pid, processStartedAt: session.startedAt, sessionId: session.sessionId },
       backend: "herdr-core",
       agent: "claude",
       sessionId: session.sessionId,
@@ -257,11 +289,36 @@ export class HcBackend implements Terminals {
     return { text: stripSidePane(result.text ?? ""), draft: null, complete: result.complete === true };
   }
 
-  async submit(ref: AgentRef, text: string, _ctx: SubmitContext): Promise<SubmitOutcome> {
+  private async assertWritable(ref: AgentRef, driver: AgentDriver): Promise<HcTerminal> {
+    const address = addressOf(ref.target);
+    const terminal = await this.terminal(address);
+    const pid = terminal ? claudeForegroundPid(terminal) : null;
+    if (driver.kind !== "claude" || terminal?.address !== address || pid === null ||
+        ref.pid === null || ref.processStartedAt === null || !ref.sessionId) {
+      throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
+    }
+    if (pid !== ref.pid) throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);
+    // Fail closed: a session file that cannot be read right now is not a verified Claude Code.
+    const session = await claudeSession(pid, this.sessionsDir).catch(() => null);
+    if (session?.startedAt == null) throw new ExpectationLost(HC_CLAUDE_UNVERIFIED, HC_CLAUDE_UNVERIFIED);
+    if (session.sessionId !== ref.sessionId || session.startedAt !== ref.processStartedAt) {
+      throw new ExpectationLost(HC_CLAUDE_CHANGED, HC_CLAUDE_CHANGED);
+    }
+    return terminal;
+  }
+
+  async submit(ref: AgentRef, text: string, ctx: SubmitContext): Promise<SubmitOutcome> {
+    try {
+      await this.assertWritable(ref, ctx.driver);
+    } catch (err) {
+      if (err instanceof ExpectationLost) throw new SubmitRefused("agent-unverified", err.message);
+      throw err;
+    }
     let result: { started?: boolean };
     try {
-      result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text]);
+      result = await this.json<{ started?: boolean }>(["send"], [addressOf(ref.target), text], () => ctx.cancelled());
     } catch (err) {
+      if (err instanceof SubmitRefused) throw err;
       if (err instanceof HcCliError && err.kind === "blocked") {
         throw new SubmitRefused("gate", `herdr-core refused the send: ${err.message}`);
       }
@@ -271,8 +328,8 @@ export class HcBackend implements Terminals {
     return { status: result.started === true ? "started" : "accepted", draftStashed: false };
   }
 
-  openAnswer(ref: AgentRef, prompt: VerifiedPrompt): AnswerChannel {
-    const channel = this.createAnswerChannel(ref, prompt);
+  openAnswer(ref: AgentRef, prompt: VerifiedPrompt, purpose?: "claude-model-switch"): AnswerChannel {
+    const channel = this.createAnswerChannel(ref, prompt, purpose === "claude-model-switch");
     return { digit: channel.digit, text: channel.text, move: channel.move, complete: channel.complete, confirm: channel.confirm };
   }
 
@@ -289,16 +346,24 @@ export class HcBackend implements Terminals {
    * pastes it with Enter through `hc send --force`. Anything else after
    * `text()` would need the text typed but not submitted, and is refused.
    */
-  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt): ModelAnswerChannel {
+  private createAnswerChannel(ref: AgentRef, prompt: VerifiedPrompt, modelSwitch = false): ModelAnswerChannel {
     const address = addressOf(ref.target);
     let firstWrite = true;
     let active = true;
+    let answerStatus: "blocked" | "done" = "blocked";
     let pendingText: string | null = null;
-    const assertFingerprint = async (): Promise<void> => {
-      const snapshot = await this.read(ref.target, ANSWER_PANE_LINES, prompt.driver.readRegion);
+    const assertFingerprint = async (modelConfirmation: boolean): Promise<void> => {
+      const before = await this.assertWritable(ref, prompt.driver);
+      answerStatus = modelConfirmation && before.status?.state === "done" ? "done" : "blocked";
+      if (before.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
+      const snapshot = await this.read(ref.target, 0, "screen");
+      if (!snapshot.complete) throw new ExpectationLost("the verified prompt screen is incomplete");
       const current = prompt.driver.parseBlockedPane(snapshot.text);
       if ((current.kind !== "question" && current.kind !== "permission") || current.verified.fingerprint !== prompt.fingerprint) {
         throw new ExpectationLost("the verified prompt is no longer on screen");
+      }
+      if (modelConfirmation && !isClaudeModelSwitchConfirmation(current)) {
+        throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       }
     };
     const assertActive = (): void => {
@@ -309,9 +374,12 @@ export class HcBackend implements Terminals {
         throw new ExpectationLost("herdr-core cannot type text without submitting it", HC_TYPED_TEXT_UNSUPPORTED);
       }
     };
-    const write = async (action: () => Promise<void>, terminal = false): Promise<void> => {
+    const write = async (action: () => Promise<void>, terminal = false, modelConfirmation = false): Promise<void> => {
       assertActive();
-      if (firstWrite) await assertFingerprint();
+      if (modelSwitch && !modelConfirmation) throw new ExpectationLost("only the affirmative model-switch digit is allowed");
+      if (firstWrite) await assertFingerprint(modelConfirmation);
+      const current = await this.assertWritable(ref, prompt.driver);
+      if (current.status?.state !== answerStatus) throw new ExpectationLost(HC_BLOCKED_CHANGED, HC_BLOCKED_CHANGED);
       await action();
       firstWrite = false;
       if (terminal) active = false;
@@ -323,7 +391,7 @@ export class HcBackend implements Terminals {
     return {
       digit: (n, terminal = prompt.form === "digit-confirms") => {
         assertNoPendingText();
-        return write(keys(String(n)), terminal);
+        return write(keys(String(n)), terminal, modelSwitch && n === 1 && terminal);
       },
       text: async (value) => {
         assertActive();
@@ -357,21 +425,19 @@ export class HcBackend implements Terminals {
     };
   }
 
-  openBlind(ref: AgentRef, prompt: BlindPermissionPrompt): BlindChannel {
-    const address = addressOf(ref.target);
+  openBlind(_ref: AgentRef, _prompt: BlindPermissionPrompt): BlindChannel {
     return {
-      answer: async (choice) => {
-        await this.json(["keys"], [address, choice]);
-        if (prompt.form === "key-confirms") return;
-        await this.json(["keys"], [address, "enter"]);
+      answer: async () => {
+        throw new ExpectationLost("herdr-core cannot verify the permission prompt", "許可リクエストを確認できませんでした。ターミナルで回答してください。");
       },
     };
   }
 
-  openComposer(ref: AgentRef, _driver: AgentDriver): ComposerChannel {
+  openComposer(ref: AgentRef, driver: AgentDriver): ComposerChannel {
     const address = addressOf(ref.target);
     return {
       backTab: async () => {
+        await this.assertWritable(ref, driver);
         await this.json(["keys"], [address, "shift+tab"]);
       },
     };
