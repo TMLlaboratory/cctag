@@ -20,7 +20,7 @@ import { CODEX_THREAD_SWITCHED, codexDriver } from "./agents/codex/driver.js";
 import { ompDriver, OMP_RESUME_NOTICE } from "./agents/omp/driver.js";
 import { formatOmpScreenNotice, ompScreenFingerprint } from "./agents/omp/prompts.js";
 import { WrittenFileTracker } from "./attachments.js";
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -2608,6 +2608,9 @@ test("herdr-core Codex binds a new rollout after /new without replaying the same
     },
     async submit() {
       writeFileSync(nextPath, records("new reply"));
+      // Linux stamps file times from a coarse clock: a file made right after sentAt can carry a birthtime a few ms before it.
+      const coarse = (Date.now() - 4) / 1000;
+      utimesSync(nextPath, coarse, coarse);
       next = { sessionId: "next", transcriptIdentity: rolloutIdentity(nextPath) };
       sent = true;
       return { status: "started", draftStashed: false };

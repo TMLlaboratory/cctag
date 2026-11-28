@@ -73,6 +73,14 @@ interface HcCodexInput {
   startedRollouts: TranscriptIdentity[];
 }
 
+/**
+ * How far a file's birthtime may read before the clock that stamped `sentAt`. Linux stamps file times from a
+ * coarse clock (one scheduler tick, up to 10 ms), so a rollout Codex creates right after the send can carry a
+ * birthtime a few ms before `sentAt`, read as "pre-existing", and never be bound. Widening by a few ticks cannot
+ * replay old input: the input record must still carry a timestamp at or after `sentAt` to match.
+ */
+const FS_BIRTHTIME_SLACK_MS = 50;
+
 const HC_CODEX_INPUT_UNVERIFIED = "⚠️ Codex の入力先を確認できませんでした。端末で応答を確認してください。";
 
 function baselineCodexRollouts(rollouts: readonly CodexRollout[]): Promise<CodexRolloutBaseline[]> {
@@ -93,7 +101,7 @@ async function matchHcCodexInput(rollouts: readonly CodexRollout[], input: HcCod
     const offset = baseline ? baseline.offset : 0;
     if (offset === null) return null;
     const batch = baseline ? await readVerifiedRecords(identity, { offset })
-      : await readVerifiedRecords(identity, { createdSince: input.sentAt });
+      : await readVerifiedRecords(identity, { createdSince: input.sentAt - FS_BIRTHTIME_SLACK_MS });
     if (!batch) return null;
     if (batch === "pre-existing") continue;
     const { records, newOffset } = batch;
